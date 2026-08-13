@@ -1,32 +1,24 @@
+/**
+ * 售后运营中心 · 主页面。
+ *
+ * 只保留编排层：query / mutation / SSE / 派生数据；
+ * 展示层拆分到 AfterSalesQueue（指标/筛选/表格）与 AfterSalesWorkspace（三栏 + Trace）。
+ */
+
 import {
-  AuditOutlined,
-  CheckCircleOutlined,
-  ClockCircleOutlined,
-  CustomerServiceOutlined,
-  FileSearchOutlined,
-  SafetyCertificateOutlined,
-  SyncOutlined,
+  PlusOutlined,
+  ReloadOutlined,
 } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Alert,
   Badge,
   Button,
-  Card,
-  Col,
-  Collapse,
-  Descriptions,
-  Empty,
   Form,
   Input,
-  Popconfirm,
-  Row,
+  Modal,
   Select,
   Space,
-  Statistic,
-  Steps,
-  Tag,
-  Timeline,
   Typography,
 } from "antd";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -36,16 +28,33 @@ import {
   createAfterSalesEventSource,
   createAfterSalesTicket,
   getAfterSalesTicket,
+  listAfterSalesTickets,
   parseAfterSalesEvent,
   rejectAfterSalesProposal,
   retryAfterSalesExecution,
   startAfterSalesRun,
 } from "../../api/afterSales";
 import type { AfterSalesEvent, AfterSalesTicket } from "../../types/afterSales";
-import { formatDuration } from "../../utils/format";
+import {
+  appendEvent,
+  assessRiskLevel,
+  collectEvidence,
+  countryLabel,
+  deriveApprovalChecks,
+  deriveTicketMetrics,
+  filterTickets,
+  issueTypeLabel,
+  streamLabel,
+  ticketCountry,
+} from "./afterSalesLogic";
+import type { TicketFilters } from "./afterSalesLogic";
+import { AfterSalesQueue } from "./AfterSalesQueue";
+import { AfterSalesWorkspace } from "./AfterSalesWorkspace";
 
 const streamEventTypes = [
   "run_started",
+  "intake_started",
+  "intake_completed",
   "tool_started",
   "tool_completed",
   "retrieval_completed",
@@ -59,14 +68,29 @@ const streamEventTypes = [
 
 const demoMessage = "我的包裹十天没有更新了，现在到底是什么情况？能不能退款？";
 
+/** 与 Java DemoFulfillmentDataFactory 同一批已知演示订单，仅作为「新建工单」的输入选项，不参与任何统计。 */
+const knownDemoOrders = [
+  { value: "O-VN-5002", label: "O-VN-5002 · 越南 VND" },
+  { value: "O-VN-5001", label: "O-VN-5001 · 越南 VND" },
+  { value: "O-SG-1001", label: "O-SG-1001 · 新加坡 SGD" },
+  { value: "O-SG-1002", label: "O-SG-1002 · 新加坡 SGD" },
+  { value: "O-SG-1003", label: "O-SG-1003 · 新加坡 SGD" },
+  { value: "O-MY-2001", label: "O-MY-2001 · 马来西亚 MYR" },
+  { value: "O-TH-3001", label: "O-TH-3001 · 泰国 THB" },
+  { value: "O-ID-4001", label: "O-ID-4001 · 印尼 IDR" },
+];
+
 export function AfterSalesPage() {
   const queryClient = useQueryClient();
-  const [orderId, setOrderId] = useState("O-VN-5002");
-  const [customerMessage, setCustomerMessage] = useState(demoMessage);
+  const [ticketId, setTicketId] = useState<string>("");
   const [operatorId, setOperatorId] = useState("operator-vn-01");
   const [reviewComment, setReviewComment] = useState("订单与政策证据已核验，同意发放延迟补偿券。");
-  const [ticketId, setTicketId] = useState("");
+  const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [filters, setFilters] = useState<TicketFilters>({ search: "" });
+
+  // 直播链路：只对「当前页面新建并分析」的 run 建立 SSE；历史工单只读取持久化事件。
   const [runId, setRunId] = useState("");
+  const [liveTicketId, setLiveTicketId] = useState("");
   const [liveEvents, setLiveEvents] = useState<AfterSalesEvent[]>([]);
   const [streamStatus, setStreamStatus] = useState<"idle" | "connecting" | "live" | "closed" | "error">("idle");
   const [analysisStartedAt, setAnalysisStartedAt] = useState<number | null>(null);
@@ -79,6 +103,15 @@ export function AfterSalesPage() {
   const lastEventIdRef = useRef<string | undefined>(undefined);
   const closedRef = useRef(false);
   const reconnectAttemptsRef = useRef(0);
+  const initialSelectionDoneRef = useRef(false);
+
+  const listQuery = useQuery({
+    queryKey: ["after-sales-tickets"],
+    queryFn: async () => {
+      const { items } = await listAfterSalesTickets();
+      return items;
+    },
+  });
 
   const ticketQuery = useQuery({
     queryKey: ["after-sales-ticket", ticketId],
@@ -86,35 +119,79 @@ export function AfterSalesPage() {
     enabled: Boolean(ticketId),
   });
 
+  const tickets = listQuery.data || [];
   const ticket = ticketQuery.data;
 
-  // 后端 durationMs（run_completed / error 事件或工单详情 run 对象）优先；
-  // 否则在分析期间用本地时钟实时递增估算。
-  const finalDurationMs = backendDurationMs ?? ticket?.run?.durationMs ?? null;
-  const liveDurationMs = analysisStartedAt != null ? tickNow - analysisStartedAt : null;
-  const analysisDurationMs = finalDurationMs != null ? finalDurationMs : liveDurationMs;
-
-  // 仅当「没有后端终值」且「分析仍在进行」时启动本地计时；
-  // 收到终值或流结束（closed/error）后 cleanup 停止，避免泄漏。
-  const isAnalyzing = streamStatus !== "closed" && streamStatus !== "error";
+  // 初次进入：自动加载队列并优先选择最近一张工单（列表按 createdAt 倒序），不自动重新 analyze。
   useEffect(() => {
-    if (analysisStartedAt == null || finalDurationMs != null || !isAnalyzing) return;
+    if (initialSelectionDoneRef.current || !listQuery.isSuccess || ticketId) return;
+    const latest = listQuery.data?.[0];
+    if (latest) {
+      initialSelectionDoneRef.current = true;
+      setTicketId(latest.id);
+    }
+  }, [listQuery.isSuccess, listQuery.data, ticketId]);
+
+  const metrics = useMemo(() => deriveTicketMetrics(tickets), [tickets]);
+  const countryOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const options: Array<{ value: string; label: string }> = [];
+    for (const item of tickets) {
+      const country = ticketCountry(item);
+      if (!seen.has(country)) {
+        seen.add(country);
+        options.push({ value: country, label: countryLabel(country) });
+      }
+    }
+    return options;
+  }, [tickets]);
+  const issueTypeOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const options: Array<{ value: string; label: string }> = [];
+    for (const item of tickets) {
+      if (!seen.has(item.issueType)) {
+        seen.add(item.issueType);
+        options.push({ value: item.issueType, label: issueTypeLabel(item.issueType) });
+      }
+    }
+    return options;
+  }, [tickets]);
+  const filteredTickets = useMemo(() => filterTickets(tickets, filters), [tickets, filters]);
+
+  // 仅当「没有后端终值」且「直播 run 仍在进行」时启动本地计时。
+  // liveRunActive 同时要求直播 run 属于当前选中工单，历史工单不会出现「运行中」假象。
+  const liveRunActive = liveTicketId === ticketId && streamStatus !== "closed" && streamStatus !== "error";
+  useEffect(() => {
+    if (analysisStartedAt == null || backendDurationMs != null || !liveRunActive) return;
     const timer = window.setInterval(() => setTickNow(Date.now()), 200);
     return () => window.clearInterval(timer);
-  }, [analysisStartedAt, finalDurationMs, isAnalyzing]);
+  }, [analysisStartedAt, backendDurationMs, liveRunActive]);
+
+  // Trace 耗时：直播 run（属于当前选中工单）优先后端 durationMs，否则本地实时估算；
+  // 历史工单只显示该工单持久化的 ticket.run.durationMs，不被后台 live run 的 backendDurationMs 串线。
+  const traceDurationMs = useMemo(() => {
+    if (liveTicketId === ticketId) {
+      if (backendDurationMs != null) return backendDurationMs;
+      if (analysisStartedAt != null && liveRunActive) return Date.now() - analysisStartedAt;
+    }
+    return ticket?.run?.durationMs ?? null;
+  }, [liveTicketId, ticketId, backendDurationMs, analysisStartedAt, liveRunActive, tickNow, ticket?.run?.durationMs]);
 
   const createMutation = useMutation({
-    mutationFn: async () => {
-      const ticket = await createAfterSalesTicket({ orderId, customerMessage });
+    mutationFn: async (input: { orderId: string; customerMessage: string }) => {
+      const ticket = await createAfterSalesTicket(input);
       // deferred=true：只创建 READY run 并进入 ANALYZING，等 stream_ready 握手后再启动。
       const analysis = await analyzeAfterSalesTicket(ticket.id, { deferred: true });
       return { ticket, analysis };
     },
     onSuccess: ({ ticket, analysis }) => {
+      setCreateModalOpen(false);
       setTicketId(ticket.id);
       setRunId(analysis.runId);
+      setLiveTicketId(ticket.id);
       setLiveEvents([]);
       setStreamStatus("connecting");
+      // 新 run 不继承旧值：计时与后端终值全部重置。
       setAnalysisStartedAt(null);
       setBackendDurationMs(null);
       setTickNow(0);
@@ -123,6 +200,7 @@ export function AfterSalesPage() {
       reconnectAttemptsRef.current = 0;
       lastEventIdRef.current = undefined;
       setStreamEpoch((epoch) => epoch + 1);
+      void queryClient.invalidateQueries({ queryKey: ["after-sales-tickets"] });
     },
   });
 
@@ -136,9 +214,9 @@ export function AfterSalesPage() {
       setStreamStatus("error");
       closedRef.current = true;
       sourceRef.current?.close();
-      refreshTicket(ticketId, queryClient);
+      refreshTicket(liveTicketId, queryClient);
     }
-  }, [queryClient, runId, ticketId]);
+  }, [queryClient, runId, liveTicketId]);
 
   const retryStart = () => {
     setStartError(null);
@@ -187,7 +265,6 @@ export function AfterSalesPage() {
         setStreamStatus("live");
         setLiveEvents((current) => appendEvent(current, event));
         if (event.type === "run_started") {
-          // run_started 之后才开始本地计时。
           setAnalysisStartedAt(Date.now());
           setTickNow(Date.now());
           setBackendDurationMs(null);
@@ -196,14 +273,14 @@ export function AfterSalesPage() {
           setBackendDurationMs(event.data.durationMs);
         }
         if (event.type === "run_completed") {
-          refreshTicket(ticketId, queryClient);
+          refreshTicket(liveTicketId, queryClient);
         }
         const rejected = event.type === "approval_recorded" && event.data.decision === "REJECTED";
         if (event.type === "execution_completed" || event.type === "error" || rejected) {
           closedRef.current = true;
           setStreamStatus("closed");
           source.close();
-          refreshTicket(ticketId, queryClient);
+          refreshTicket(liveTicketId, queryClient);
         }
       } catch {
         setStreamStatus("error");
@@ -220,7 +297,7 @@ export function AfterSalesPage() {
       if (attempts >= 3) {
         closedRef.current = true;
         setStreamStatus("error");
-        refreshTicket(ticketId, queryClient);
+        refreshTicket(liveTicketId, queryClient);
         return;
       }
       reconnectAttemptsRef.current = attempts + 1;
@@ -231,39 +308,81 @@ export function AfterSalesPage() {
       sourceRef.current = null;
       source.close();
     };
-  }, [queryClient, runId, startRun, streamEpoch, ticketId]);
+  }, [queryClient, runId, startRun, streamEpoch, liveTicketId]);
 
-  const events = useMemo(
-    () => [...(ticket?.events || []), ...liveEvents].reduce<AfterSalesEvent[]>(appendEvent, []),
-    [liveEvents, ticket?.events],
-  );
+  // 轨迹 = 该工单持久化事件 + 直播事件（仅当直播 run 属于当前选中工单）。
+  const events = useMemo(() => {
+    const persisted = ticket?.events || [];
+    const live = liveTicketId === ticketId ? liveEvents : [];
+    return [...persisted, ...live].reduce<AfterSalesEvent[]>(appendEvent, []);
+  }, [ticket?.events, liveEvents, liveTicketId, ticketId]);
+
   const finalAnswer = ticket?.run?.finalAnswer;
   const proposal = ticket?.proposal;
-  const execution = ticket?.executionJob;
-  const isPendingApproval = proposal?.status === "PENDING";
+
+  const evidenceItems = useMemo(() => collectEvidence(events), [events]);
+  const verifiedEvidenceIds = useMemo(
+    () => evidenceItems.filter((item) => item.verified && item.evidenceId).map((item) => item.evidenceId as string),
+    [evidenceItems],
+  );
+  const checks = useMemo(
+    () => deriveApprovalChecks({
+      evidenceIds: finalAnswer?.evidenceIds || verifiedEvidenceIds,
+      eligible: finalAnswer?.compensation?.eligible,
+      amount: proposal?.amount ?? 0,
+      maximumCompensation: finalAnswer?.policy?.maximumCompensation ?? 0,
+    }),
+    [finalAnswer, verifiedEvidenceIds, proposal?.amount],
+  );
+  // 币种链路：proposal.currency -> compensation.currency -> order.currency -> 空字符串，永远不用 country。
+  // 风险规则优先使用 Intake 紧急度：HIGH 直接进入 HIGH 风险，其次才看金额/物流规则。
+  const risk = useMemo(
+    () => assessRiskLevel({
+      amount: proposal?.amount ?? 0,
+      currency: proposal?.currency ?? finalAnswer?.compensation?.currency ?? finalAnswer?.order?.currency ?? "",
+      maxCompensation: finalAnswer?.policy?.maximumCompensation ?? 0,
+      delayDays: finalAnswer?.shipment?.delayDays,
+      intakeUrgency: finalAnswer?.intake?.urgency,
+    }),
+    [proposal?.amount, proposal?.currency, finalAnswer?.compensation?.currency, finalAnswer?.order?.currency, finalAnswer?.policy?.maximumCompensation, finalAnswer?.shipment?.delayDays, finalAnswer?.intake?.urgency],
+  );
+
+  const clearFilters = () => setFilters({ search: "" });
+  const apiError = createMutation.error || ticketQuery.error || reviewMutation.error || retryMutation.error;
 
   return (
     <div className="page-stack after-sales-page">
       <div className="page-heading">
         <div>
-          <Typography.Title level={3}>售后 Agent 工作台</Typography.Title>
-          <Typography.Text type="secondary">跨境物流异常 · Vietnam Operations</Typography.Text>
+          <Typography.Title level={3}>售后运营中心</Typography.Title>
+          <Typography.Text type="secondary">跨境物流异常 · 工单队列与人工审批</Typography.Text>
         </div>
         <Space>
           <Badge status={streamStatus === "live" ? "processing" : streamStatus === "error" ? "error" : "default"} />
           <Typography.Text type="secondary">{streamLabel(streamStatus)}</Typography.Text>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateModalOpen(true)}>
+            新建工单
+          </Button>
         </Space>
       </div>
 
-      {createMutation.error || ticketQuery.error || reviewMutation.error ? (
+      {listQuery.isError ? (
+        <Alert
+          showIcon
+          type="error"
+          message="工单队列加载失败"
+          description={errorMessage(listQuery.error)}
+          action={<Button size="small" icon={<ReloadOutlined />} onClick={() => listQuery.refetch()}>重试</Button>}
+        />
+      ) : null}
+      {apiError ? (
         <Alert
           showIcon
           type="error"
           message="售后链路暂不可用"
-          description={errorMessage(createMutation.error || ticketQuery.error || reviewMutation.error)}
+          description={errorMessage(apiError)}
         />
       ) : null}
-
       {startError ? (
         <Alert
           showIcon
@@ -274,350 +393,91 @@ export function AfterSalesPage() {
         />
       ) : null}
 
-      <Row gutter={[16, 16]}>
-        <Col xs={24} xl={8}>
-          <Card title="创建售后工单">
-            <Form layout="vertical" onFinish={() => createMutation.mutate()}>
-              <Form.Item label="演示订单">
-                <Select
-                  value={orderId}
-                  onChange={setOrderId}
-                  options={[
-                    { value: "O-VN-5002", label: "O-VN-5002 · 越南跨境物流异常" },
-                  ]}
-                />
-              </Form.Item>
-              <Form.Item label="用户诉求">
-                <Input.TextArea
-                  value={customerMessage}
-                  onChange={(event) => setCustomerMessage(event.target.value)}
-                  rows={5}
-                />
-              </Form.Item>
-              <Button
-                block
-                type="primary"
-                htmlType="submit"
-                icon={<CustomerServiceOutlined />}
-                loading={createMutation.isPending}
-              >
-                创建并分析
-              </Button>
-            </Form>
-          </Card>
-        </Col>
-
-        <Col xs={24} xl={16}>
-          <Row gutter={[12, 12]}>
-            <Col xs={12} md={8} lg={{ flex: "20%" }}>
-              <Card size="small"><Statistic title="工单状态" value={ticketStatusLabel(ticket?.status)} /></Card>
-            </Col>
-            <Col xs={12} md={8} lg={{ flex: "20%" }}>
-              <Card size="small"><Statistic title="执行步骤" value={ticket?.run?.stepCount || events.filter((item) => item.type === "tool_completed" || item.type === "retrieval_completed").length} suffix="/ 5" /></Card>
-            </Col>
-            <Col xs={12} md={8} lg={{ flex: "20%" }}>
-              <Card size="small"><Statistic title="证据数量" value={finalAnswer?.evidenceIds?.length || proposal?.evidenceIds?.length || 0} /></Card>
-            </Col>
-            <Col xs={12} md={8} lg={{ flex: "20%" }}>
-              <Card size="small"><Statistic title="执行状态" value={executionStatusLabel(execution?.status)} /></Card>
-            </Col>
-            <Col xs={12} md={8} lg={{ flex: "20%" }}>
-              <Card size="small" className="duration-stat">
-                <Statistic
-                  title="本次分析耗时"
-                  value={analysisDurationMs == null ? "—" : formatDuration(analysisDurationMs)}
-                />
-              </Card>
-            </Col>
-          </Row>
-
-          <Collapse
-            className="decision-trace"
-            defaultActiveKey={["trace"]}
-            items={[{
-              key: "trace",
-              label: (
-                <Space>
-                  <AuditOutlined />
-                  <Typography.Text strong>决策轨迹</Typography.Text>
-                  <Tag color={streamStatus === "live" ? "processing" : ticket?.status === "FAILED" ? "error" : "default"}>
-                    {events.length} 条事件
-                  </Tag>
-                </Space>
-              ),
-              children: <DecisionTimeline events={events} running={createMutation.isPending || ticket?.status === "ANALYZING"} />,
-            }]}
-          />
-        </Col>
-      </Row>
-
-      <Steps
-        size="small"
-        current={workflowStep(ticket)}
-        status={ticket?.status === "FAILED" ? "error" : "process"}
-        items={[
-          { title: "创建工单" },
-          { title: "Agent 分析" },
-          { title: "人工审批" },
-          { title: "可靠执行" },
-        ]}
+      <AfterSalesQueue
+        metrics={metrics}
+        filters={filters}
+        onFiltersChange={setFilters}
+        onClearFilters={clearFilters}
+        countryOptions={countryOptions}
+        issueTypeOptions={issueTypeOptions}
+        tickets={filteredTickets}
+        totalCount={tickets.length}
+        loading={listQuery.isLoading}
+        selectedTicketId={ticketId}
+        onSelectTicket={setTicketId}
       />
 
-      <Row gutter={[16, 16]}>
-        <Col xs={24} xl={8}>
-          <Card title="订单与物流证据" extra={<FileSearchOutlined />} className="after-sales-detail-card">
-            {finalAnswer?.order ? (
-              <>
-                <Descriptions
-                  column={1}
-                  size="small"
-                  items={[
-                    { key: "order", label: "订单", children: finalAnswer.order.orderId },
-                    { key: "amount", label: "实付金额", children: formatMoney(finalAnswer.order.paidAmount, finalAnswer.order.currency) },
-                    { key: "route", label: "履约路线", children: `${finalAnswer.order.warehouseRegion} → ${finalAnswer.order.country}` },
-                    { key: "tracking", label: "运单号", children: finalAnswer.order.trackingNumber },
-                    { key: "inactive", label: "未更新时间", children: `${finalAnswer.shipment.inactiveDays} 天` },
-                  ]}
-                />
-                <Timeline
-                  className="shipment-timeline"
-                  items={finalAnswer.shipment.timeline.map((item) => ({
-                    color: item.status === "CUSTOMS_DOCUMENT_REQUIRED" ? "orange" : "green",
-                    children: (
-                      <div>
-                        <Typography.Text strong>{item.location}</Typography.Text>
-                        <div className="event-line-summary">{item.description}</div>
-                      </div>
-                    ),
-                  }))}
-                />
-              </>
-            ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="等待订单与物流核验" />}
-          </Card>
-        </Col>
+      {ticketId ? (
+        <AfterSalesWorkspace
+          ticket={ticket}
+          loading={ticketQuery.isLoading}
+          events={events}
+          evidenceItems={evidenceItems}
+          checks={checks}
+          risk={risk}
+          operatorId={operatorId}
+          reviewComment={reviewComment}
+          onOperatorIdChange={setOperatorId}
+          onReviewCommentChange={setReviewComment}
+          onApprove={() => reviewMutation.mutate("approve")}
+          onReject={() => reviewMutation.mutate("reject")}
+          reviewPending={reviewMutation.isPending}
+          onRetryExecution={(jobId) => retryMutation.mutate(jobId)}
+          traceDurationMs={traceDurationMs}
+          liveRunActive={liveRunActive}
+        />
+      ) : null}
 
-        <Col xs={24} xl={8}>
-          <Card title="政策证据" extra={<SafetyCertificateOutlined />} className="after-sales-detail-card">
-            {finalAnswer?.policy ? (
-              <>
-                <Descriptions
-                  column={1}
-                  size="small"
-                  items={[
-                    { key: "policy", label: "政策", children: finalAnswer.policy.policyId },
-                    { key: "version", label: "版本", children: <Tag color="blue">{finalAnswer.policy.version}</Tag> },
-                    { key: "section", label: "条款", children: finalAnswer.policy.section },
-                    { key: "threshold", label: "触发阈值", children: `${finalAnswer.policy.minimumInactiveDays} 天未更新` },
-                    { key: "rate", label: "补偿比例", children: `${Math.round(finalAnswer.policy.compensationRate * 100)}%` },
-                  ]}
-                />
-                <Alert
-                  type="info"
-                  showIcon
-                  message={finalAnswer.policy.summary}
-                  description={<Typography.Text code>{finalAnswer.policy.evidenceId}</Typography.Text>}
-                />
-              </>
-            ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="等待政策检索" />}
-          </Card>
-        </Col>
-
-        <Col xs={24} xl={8}>
-          <Card
-            title="处理方案"
-            extra={proposal ? <Tag color={proposalColor(proposal.status)}>{proposalStatusLabel(proposal.status)}</Tag> : null}
-            className="after-sales-detail-card"
-          >
-            {proposal ? (
-              <Space direction="vertical" size={14} style={{ width: "100%" }}>
-                <div className="proposal-amount">
-                  <Typography.Text type="secondary">延迟补偿券</Typography.Text>
-                  <Typography.Title level={2}>{formatMoney(proposal.amount, proposal.currency)}</Typography.Title>
-                </div>
-                <Typography.Paragraph>{proposal.decisionSummary}</Typography.Paragraph>
-                <Input
-                  value={operatorId}
-                  onChange={(event) => setOperatorId(event.target.value)}
-                  addonBefore="审批人"
-                  disabled={!isPendingApproval}
-                />
-                <Input.TextArea
-                  value={reviewComment}
-                  onChange={(event) => setReviewComment(event.target.value)}
-                  rows={3}
-                  disabled={!isPendingApproval}
-                />
-                {isPendingApproval ? (
-                  <Space>
-                    <Popconfirm
-                      title="确认批准该补偿方案？"
-                      description="批准后将创建唯一执行任务并发放补偿券。"
-                      onConfirm={() => reviewMutation.mutate("approve")}
-                    >
-                      <Button type="primary" icon={<CheckCircleOutlined />} loading={reviewMutation.isPending}>批准并执行</Button>
-                    </Popconfirm>
-                    <Popconfirm
-                      title="确认驳回该方案？"
-                      onConfirm={() => reviewMutation.mutate("reject")}
-                    >
-                      <Button danger>驳回</Button>
-                    </Popconfirm>
-                  </Space>
-                ) : null}
-                {execution ? <ExecutionStatusBlock ticket={ticket} onRetry={() => retryMutation.mutate(execution.id)} /> : null}
-              </Space>
-            ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Agent 完成后生成待审批方案" />}
-          </Card>
-        </Col>
-      </Row>
+      <Modal
+        title="新建售后工单"
+        open={createModalOpen}
+        onCancel={() => setCreateModalOpen(false)}
+        footer={null}
+        destroyOnClose
+      >
+        <Form
+          layout="vertical"
+          initialValues={{ orderId: "O-VN-5002", customerMessage: demoMessage }}
+          onFinish={(values) => createMutation.mutate(values as { orderId: string; customerMessage: string })}
+        >
+          <Form.Item label="订单" name="orderId" rules={[{ required: true, message: "请选择订单" }]}>
+            <Select options={knownDemoOrders} />
+          </Form.Item>
+          <Form.Item label="用户诉求" name="customerMessage" rules={[{ required: true, message: "请填写用户诉求" }]}>
+            <Input.TextArea rows={5} />
+          </Form.Item>
+          <Space>
+            <Button onClick={() => setCreateModalOpen(false)}>取消</Button>
+            <Button
+              type="primary"
+              htmlType="submit"
+              icon={<PlusOutlined />}
+              loading={createMutation.isPending}
+            >
+              创建并分析
+            </Button>
+          </Space>
+        </Form>
+      </Modal>
     </div>
   );
 }
 
-function DecisionTimeline({ events, running }: { events: AfterSalesEvent[]; running: boolean }) {
-  if (!events.length) {
-    return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={running ? "正在建立实时事件流" : "创建工单后展示结构化决策轨迹"} />;
-  }
-  return (
-    <Timeline
-      pending={running ? "Agent 正在执行下一步" : undefined}
-      items={events.map((event) => ({
-        color: event.status === "failed" ? "red" : event.status === "running" ? "blue" : "green",
-        dot: event.status === "running" ? <SyncOutlined spin /> : undefined,
-        children: (
-          <div className="decision-event">
-            <Space wrap>
-              <Typography.Text strong>{event.name}</Typography.Text>
-              <Tag>{actionLabel(event.data.action)}</Tag>
-              <Typography.Text type="secondary">#{event.sequence}</Typography.Text>
-            </Space>
-            <div className="event-line-summary">{event.data.summary || "-"}</div>
-            {isToolCompletion(event) && event.data.latencyMs != null ? (
-              <Typography.Text type="secondary" className="event-metric">
-                工具耗时 {formatDuration(event.data.latencyMs)}
-              </Typography.Text>
-            ) : null}
-            {isRunTerminal(event) && event.data.durationMs != null ? (
-              <Typography.Text type="secondary" className="event-metric">
-                分析总耗时 {formatDuration(event.data.durationMs)}
-              </Typography.Text>
-            ) : null}
-            {event.data.evidenceIds?.length ? (
-              <Space wrap className="evidence-list">
-                {event.data.evidenceIds.map((id) => <Typography.Text code key={id}>{id}</Typography.Text>)}
-              </Space>
-            ) : null}
-          </div>
-        ),
-      }))}
-    />
-  );
-}
-
-function ExecutionStatusBlock({ ticket, onRetry }: { ticket?: AfterSalesTicket; onRetry: () => void }) {
-  const execution = ticket?.executionJob;
-  if (!execution) return null;
-  const retryable = execution.status === "RETRY_WAIT" || execution.status === "DEAD_LETTER";
-  return (
-    <Alert
-      type={execution.status === "SUCCEEDED" ? "success" : execution.status === "DEAD_LETTER" ? "error" : "info"}
-      showIcon
-      icon={execution.status === "SUCCEEDED" ? <CheckCircleOutlined /> : <ClockCircleOutlined />}
-      message={`执行状态：${executionStatusLabel(execution.status)}`}
-      description={(
-        <Space direction="vertical" size={4}>
-          <Typography.Text>尝试次数：{execution.attemptCount}</Typography.Text>
-          {execution.result?.externalReference ? <Typography.Text code>{execution.result.externalReference}</Typography.Text> : null}
-          {retryable ? <Button size="small" onClick={onRetry}>重新执行</Button> : null}
-        </Space>
-      )}
-    />
-  );
-}
-
-function isToolCompletion(event: AfterSalesEvent) {
-  return event.type === "tool_completed" || event.type === "retrieval_completed";
-}
-
-function isRunTerminal(event: AfterSalesEvent) {
-  return event.type === "run_completed" || event.type === "error";
-}
-
-function appendEvent(events: AfterSalesEvent[], next: AfterSalesEvent) {
-  if (events.some((item) => item.eventId === next.eventId || item.sequence === next.sequence)) return events;
-  return [...events, next].sort((a, b) => a.sequence - b.sequence);
-}
-
+/**
+ * 刷新工单详情 + 队列列表：审批成功、驳回、run_completed、execution_completed/failed、
+ * 手动重试后都必须同时失效，否则顶部指标与队列状态不更新。
+ * 延迟二次失效兜底异步执行任务的落库时差。
+ */
 function refreshTicket(ticketId: string, queryClient: ReturnType<typeof useQueryClient>) {
   if (!ticketId) return;
   void queryClient.invalidateQueries({ queryKey: ["after-sales-ticket", ticketId] });
+  void queryClient.invalidateQueries({ queryKey: ["after-sales-tickets"] });
   window.setTimeout(() => {
     void queryClient.invalidateQueries({ queryKey: ["after-sales-ticket", ticketId] });
+    void queryClient.invalidateQueries({ queryKey: ["after-sales-tickets"] });
   }, 900);
-}
-
-function workflowStep(ticket?: AfterSalesTicket) {
-  if (!ticket) return 0;
-  if (ticket.status === "OPEN" || ticket.status === "ANALYZING") return 1;
-  if (ticket.status === "PENDING_APPROVAL") return 2;
-  return 3;
-}
-
-function streamLabel(status: string) {
-  if (status === "connecting") return "SSE 连接中";
-  if (status === "live") return "SSE 实时";
-  if (status === "closed") return "运行已结束";
-  if (status === "error") return "SSE 已断开";
-  return "等待运行";
-}
-
-function ticketStatusLabel(status?: string) {
-  const labels: Record<string, string> = {
-    OPEN: "待分析",
-    ANALYZING: "分析中",
-    PENDING_APPROVAL: "待审批",
-    RESOLVED: "已完成",
-    FAILED: "失败",
-  };
-  return status ? labels[status] || status : "未创建";
-}
-
-function proposalStatusLabel(status: string) {
-  return ({ PENDING: "待审批", APPROVED: "已批准", REJECTED: "已驳回" } as Record<string, string>)[status] || status;
-}
-
-function proposalColor(status: string) {
-  return status === "APPROVED" ? "success" : status === "REJECTED" ? "error" : "warning";
-}
-
-function executionStatusLabel(status?: string) {
-  const labels: Record<string, string> = {
-    PENDING: "等待执行",
-    RUNNING: "执行中",
-    RETRY_WAIT: "等待重试",
-    SUCCEEDED: "执行成功",
-    DEAD_LETTER: "死信",
-  };
-  return status ? labels[status] || status : "未执行";
-}
-
-function actionLabel(action?: string) {
-  const labels: Record<string, string> = {
-    get_order_detail: "订单查询",
-    get_shipment_trace: "物流查询",
-    search_after_sales_policy: "政策检索",
-    calculate_compensation: "规则计算",
-    create_action_proposal: "生成方案",
-  };
-  return action ? labels[action] || action : "状态事件";
-}
-
-function formatMoney(amount: number, currency: string) {
-  return `${currency} ${Number(amount || 0).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error || "未知错误");
 }
-
-

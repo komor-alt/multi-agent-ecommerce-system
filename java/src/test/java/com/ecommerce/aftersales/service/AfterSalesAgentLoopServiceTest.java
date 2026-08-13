@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.ai.chat.client.ChatClient;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -39,6 +40,7 @@ class AfterSalesAgentLoopServiceTest {
     void runCompletedEventAndRunEntityExposeNonNegativeDurationMs() {
         AfterSalesRunRepository runRepository = mock(AfterSalesRunRepository.class);
         AfterSalesTicketRepository ticketRepository = mock(AfterSalesTicketRepository.class);
+        AfterSalesTicketContextService ticketContextService = mock(AfterSalesTicketContextService.class);
         AfterSalesToolExecutor toolExecutor = mock(AfterSalesToolExecutor.class);
         AfterSalesRunEventService eventService = mock(AfterSalesRunEventService.class);
         List<CapturedEvent> appended = new ArrayList<>();
@@ -47,11 +49,13 @@ class AfterSalesAgentLoopServiceTest {
             return null;
         }).when(eventService).append(anyString(), anyString(), anyString(), anyString(), anyString(), any());
         AfterSalesAgentLoopService service = new AfterSalesAgentLoopService(
-                toolExecutor, eventService, runRepository, ticketRepository, objectMapper, 0L);
+                toolExecutor, eventService, runRepository, ticketRepository, ticketContextService, intakeService(), objectMapper, 0L);
 
         AfterSalesRunEntity run = run();
         when(runRepository.findById("run-1")).thenReturn(Optional.of(run));
-        when(ticketRepository.findById("ticket-1")).thenReturn(Optional.of(ticket()));
+        AfterSalesTicketEntity ticket = ticket();
+        when(ticketContextService.load("ticket-1"))
+                .thenReturn(new AfterSalesTicketContextService.TicketContext(ticket, ticket.getCustomerMessage()));
         when(runRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
         when(ticketRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
         when(toolExecutor.trustedArguments(anyString(), any())).thenReturn(Map.of());
@@ -102,6 +106,7 @@ class AfterSalesAgentLoopServiceTest {
     void errorEventCarriesNonNegativeDurationMs() {
         AfterSalesRunRepository runRepository = mock(AfterSalesRunRepository.class);
         AfterSalesTicketRepository ticketRepository = mock(AfterSalesTicketRepository.class);
+        AfterSalesTicketContextService ticketContextService = mock(AfterSalesTicketContextService.class);
         AfterSalesToolExecutor toolExecutor = mock(AfterSalesToolExecutor.class);
         AfterSalesRunEventService eventService = mock(AfterSalesRunEventService.class);
         List<CapturedEvent> appended = new ArrayList<>();
@@ -110,10 +115,12 @@ class AfterSalesAgentLoopServiceTest {
             return null;
         }).when(eventService).append(anyString(), anyString(), anyString(), anyString(), anyString(), any());
         AfterSalesAgentLoopService service = new AfterSalesAgentLoopService(
-                toolExecutor, eventService, runRepository, ticketRepository, objectMapper, 0L);
+                toolExecutor, eventService, runRepository, ticketRepository, ticketContextService, intakeService(), objectMapper, 0L);
 
         when(runRepository.findById("run-1")).thenReturn(Optional.of(run()));
-        when(ticketRepository.findById("ticket-1")).thenReturn(Optional.of(ticket()));
+        AfterSalesTicketEntity ticket = ticket();
+        when(ticketContextService.load("ticket-1"))
+                .thenReturn(new AfterSalesTicketContextService.TicketContext(ticket, ticket.getCustomerMessage()));
         when(runRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
         when(ticketRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
         when(toolExecutor.trustedArguments(anyString(), any())).thenReturn(Map.of());
@@ -133,6 +140,98 @@ class AfterSalesAgentLoopServiceTest {
     }
 
     @Test
+    void intakeClassifiedAndExposedWithoutCountingToolSteps() {
+        AfterSalesRunRepository runRepository = mock(AfterSalesRunRepository.class);
+        AfterSalesTicketRepository ticketRepository = mock(AfterSalesTicketRepository.class);
+        AfterSalesTicketContextService ticketContextService = mock(AfterSalesTicketContextService.class);
+        AfterSalesToolExecutor toolExecutor = mock(AfterSalesToolExecutor.class);
+        AfterSalesRunEventService eventService = mock(AfterSalesRunEventService.class);
+        List<CapturedEvent> appended = new ArrayList<>();
+        doAnswer(invocation -> {
+            appended.add(new CapturedEvent(invocation.getArgument(1), invocation.getArgument(5)));
+            return null;
+        }).when(eventService).append(anyString(), anyString(), anyString(), anyString(), anyString(), any());
+        AfterSalesAgentLoopService service = new AfterSalesAgentLoopService(
+                toolExecutor, eventService, runRepository, ticketRepository, ticketContextService, intakeService(), objectMapper, 0L);
+
+        when(runRepository.findById("run-1")).thenReturn(Optional.of(run()));
+        AfterSalesTicketEntity ticket = ticket();
+        when(ticketContextService.load("ticket-1"))
+                .thenReturn(new AfterSalesTicketContextService.TicketContext(ticket, ticket.getCustomerMessage()));
+        when(runRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(ticketRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(toolExecutor.trustedArguments(anyString(), any())).thenReturn(Map.of());
+        doAnswer(invocation -> {
+            AfterSalesAgentState state = invocation.getArgument(1);
+            switch ((String) invocation.getArgument(0)) {
+                case AfterSalesToolExecutor.GET_ORDER_DETAIL -> state.setOrder(new AfterSalesTypes.OrderSnapshot(
+                        "O-VN-5002", "sea_vn_002", "shopify", "VN", "VND", "CN",
+                        new BigDecimal("1899000.00"), true, "customs_document_required", 10, "SF-VN-5002"));
+                case AfterSalesToolExecutor.GET_SHIPMENT_TRACE -> state.setShipment(new AfterSalesTypes.ShipmentSnapshot(
+                        "SF-VN-5002", "customs_document_required", Instant.now(), 10, 0, List.of()));
+                case AfterSalesToolExecutor.SEARCH_POLICY -> state.setPolicy(new AfterSalesTypes.PolicyEvidence(
+                        "policy:VN_SHIPMENT_DELAY:v3#section-4.2", "VN_SHIPMENT_DELAY", "v3", "VN",
+                        "SHIPMENT_DELAY", Instant.now(), 7, new BigDecimal("0.10"),
+                        new BigDecimal("150000.00"), "DELAY_COMPENSATION_COUPON", "4.2", "delay coupon"));
+                case AfterSalesToolExecutor.CALCULATE_COMPENSATION -> state.setCompensation(
+                        new AfterSalesTypes.CompensationResult(true, "DELAY_COMPENSATION_COUPON",
+                                new BigDecimal("150000.00"), "VND", "SHIPMENT_INACTIVE_POLICY_MATCHED"));
+                case AfterSalesToolExecutor.CREATE_ACTION_PROPOSAL -> state.setProposalId("proposal-1");
+                default -> throw new IllegalStateException("UNEXPECTED_ACTION");
+            }
+            return new AfterSalesTypes.ToolResult("stubbed", Map.of(), List.of());
+        }).when(toolExecutor).execute(anyString(), any());
+
+        service.run("run-1", "ticket-1");
+
+        // intake_completed 事件：只含结构化字段 + source + latencyMs + 安全 summary。
+        Map<String, Object> intakeData = appended.stream()
+                .filter(event -> "intake_completed".equals(event.type()))
+                .map(CapturedEvent::data)
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("intake_completed event missing; captured: " + appended));
+        assertThat(intakeData).containsEntry("issueType", "SHIPMENT_DELAY");
+        assertThat(intakeData).containsEntry("source", "RULE_FALLBACK");
+        assertThat(intakeData).containsEntry("fallbackReason", "RULES_MODE");
+        assertThat(intakeData.get("latencyMs")).isInstanceOf(Number.class);
+        @SuppressWarnings("unchecked")
+        List<String> intents = (List<String>) intakeData.get("intents");
+        assertThat(intents).containsExactly("TRACK_SHIPMENT");
+        // 工具事件仍只有既定五个（get_order_detail / get_shipment_trace / search_policy /
+        // calculate_compensation / create_action_proposal），Intake 不计入 stepCount。
+        long toolEvents = appended.stream()
+                .filter(event -> "tool_completed".equals(event.type()) || "retrieval_completed".equals(event.type()))
+                .count();
+        assertThat(toolEvents).isEqualTo(5);
+
+        // run_completed.finalAnswer 含 intake。
+        Map<String, Object> runCompletedData = appended.stream()
+                .filter(event -> "run_completed".equals(event.type()))
+                .map(CapturedEvent::data)
+                .findFirst()
+                .orElseThrow();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> finalAnswer = (Map<String, Object>) runCompletedData.get("finalAnswer");
+        assertThat(finalAnswer).containsKey("intake");
+
+        // 持久化 run.finalAnswerJson 含 intake，stepCount 不变。
+        ArgumentCaptor<AfterSalesRunEntity> runCaptor = ArgumentCaptor.forClass(AfterSalesRunEntity.class);
+        verify(runRepository, atLeastOnce()).save(runCaptor.capture());
+        AfterSalesRunEntity savedRun = runCaptor.getAllValues().stream()
+                .filter(item -> "COMPLETED".equals(item.getStatus()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("COMPLETED run not saved"));
+        assertThat(savedRun.getStepCount()).isEqualTo(5);
+        try {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> persistedAnswer = objectMapper.readValue(savedRun.getFinalAnswerJson(), Map.class);
+            assertThat(persistedAnswer).containsKey("intake");
+        } catch (Exception error) {
+            throw new AssertionError("finalAnswerJson unreadable", error);
+        }
+    }
+
+    @Test
     void durationMsSurvivesJsonSerializationRoundTrip() {
         Map<String, Object> payload = Map.of(
                 "summary", "done",
@@ -149,6 +248,13 @@ class AfterSalesAgentLoopServiceTest {
         } catch (Exception error) {
             throw new AssertionError("serialization failed", error);
         }
+    }
+
+    /** RULES 模式 Intake：不发网络请求，分类结果确定，用于 Agent Loop 集成测试。 */
+    private AfterSalesIntakeService intakeService() {
+        ChatClient.Builder builder = mock(ChatClient.Builder.class);
+        when(builder.build()).thenReturn(mock(ChatClient.class));
+        return new AfterSalesIntakeService(builder, objectMapper, "RULES", 1000, "your_api_key_here");
     }
 
     private AfterSalesRunEntity run() {

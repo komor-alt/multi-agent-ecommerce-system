@@ -74,6 +74,18 @@ export type CompensationResult = {
   reason: string;
 };
 
+/** Intake Agent 的结构化分类结果（不可变，后端 AfterSalesTypes.IntakeResult 序列化而来）。 */
+export type AfterSalesIntake = {
+  issueType: string;
+  intents: string[];
+  urgency: "LOW" | "MEDIUM" | "HIGH";
+  entities?: { deadline?: string };
+  missingInfo: string[];
+  requiredEvidence: string[];
+  source: "LLM" | "RULE_FALLBACK";
+  fallbackReason?: string;
+};
+
 export type AfterSalesFinalAnswer = {
   ticketId: string;
   order: OrderSnapshot;
@@ -83,6 +95,7 @@ export type AfterSalesFinalAnswer = {
   proposalId: string;
   requiresApproval: boolean;
   evidenceIds: string[];
+  intake?: AfterSalesIntake;
   decisionSummary: string;
 };
 
@@ -124,11 +137,15 @@ export type AfterSalesTicket = {
   id: string;
   ticketNo: string;
   orderId: string;
+  /** 后端从已知订单数据推导；未知订单为 undefined，前端展示「未知」。 */
+  country?: string;
   userId?: string;
   issueType: string;
   customerMessage: string;
   status: AfterSalesTicketStatus;
   runId?: string;
+  /** 队列列表可选字段：工单最新执行任务的执行状态（仅存在执行任务时由后端输出）。 */
+  executionStatus?: ExecutionStatus;
   createdAt: string;
   updatedAt: string;
   proposal?: ActionProposal;

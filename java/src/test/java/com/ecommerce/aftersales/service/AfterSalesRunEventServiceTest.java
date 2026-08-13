@@ -16,6 +16,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -46,6 +47,26 @@ class AfterSalesRunEventServiceTest {
         @Override
         public void complete() {
             completed = true;
+        }
+    }
+
+    private static final class DisconnectedSseEmitter extends SseEmitter {
+        private boolean disconnected;
+
+        DisconnectedSseEmitter() {
+            super(0L);
+        }
+
+        @Override
+        public void send(SseEventBuilder builder) throws java.io.IOException {
+            if (disconnected) {
+                throw new java.io.IOException("client disconnected");
+            }
+        }
+
+        @Override
+        public void completeWithError(Throwable ex) {
+            throw new IllegalStateException("AsyncContext already closed");
         }
     }
 
@@ -162,6 +183,31 @@ class AfterSalesRunEventServiceTest {
         assertThat(emitter.frames.get(0).headers).contains("event:stream_ready");
         assertThat(emitter.completed).isTrue();
         verify(eventRepository, never()).save(any());
+    }
+
+    @Test
+    void disconnectedSubscriberCannotBreakBusinessEventAppend() {
+        DisconnectedSseEmitter emitter = new DisconnectedSseEmitter();
+        AfterSalesRunEventService localService = new AfterSalesRunEventService(
+                eventRepository, runRepository, new ObjectMapper()) {
+            @Override
+            protected SseEmitter createEmitter() {
+                return emitter;
+            }
+        };
+        when(runRepository.existsById("run-1")).thenReturn(true);
+        when(runRepository.findById("run-1")).thenReturn(Optional.of(run("RUNNING")));
+        when(eventRepository.findByRunIdAndSequenceGreaterThanOrderBySequenceAsc("run-1", 0))
+                .thenReturn(List.of());
+        when(eventRepository.findTopByRunIdOrderBySequenceDesc("run-1")).thenReturn(Optional.empty());
+        when(eventRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        localService.stream("run-1", null);
+        emitter.disconnected = true;
+
+        assertThatCode(() -> localService.append(
+                "run-1", "approval_recorded", "approved", "success", "approved",
+                Map.of("summary", "approved"))).doesNotThrowAnyException();
     }
 
     @Test

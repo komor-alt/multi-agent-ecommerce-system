@@ -18,6 +18,7 @@ public class AfterSalesAgentState {
     private AfterSalesTypes.ShipmentSnapshot shipment;
     private AfterSalesTypes.PolicyEvidence policy;
     private AfterSalesTypes.CompensationResult compensation;
+    private AfterSalesTypes.IntakeResult intake;
     private String proposalId;
     private final List<String> evidenceIds = new ArrayList<>();
 }

@@ -3,6 +3,7 @@ package com.ecommerce.aftersales.service;
 import com.ecommerce.aftersales.entity.*;
 import com.ecommerce.aftersales.model.AfterSalesTypes;
 import com.ecommerce.aftersales.repository.*;
+import com.ecommerce.data.DemoFulfillmentDataFactory;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -13,6 +14,7 @@ import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.stream.Collectors;
 
 @Service
 public class AfterSalesService {
@@ -27,6 +29,12 @@ public class AfterSalesService {
     private final ExecutionService executionService;
     private final ObjectMapper objectMapper;
     private final Executor agentExecutor;
+
+    /** 已知演示订单 → 国家。与 MockShopifyAfterSalesConnector 共用同一份订单数据，未知订单返回 null（前端展示「未知」）。 */
+    private static final Map<String, String> KNOWN_ORDER_COUNTRIES = DemoFulfillmentDataFactory.createOrders().stream()
+            .collect(Collectors.toMap(
+                    order -> String.valueOf(order.get("order_id")),
+                    order -> String.valueOf(order.get("country"))));
 
     public AfterSalesService(
             AfterSalesTicketRepository ticketRepository,
@@ -53,9 +61,24 @@ public class AfterSalesService {
         this.agentExecutor = agentExecutor;
     }
 
+    @Transactional(readOnly = true)
     public List<Map<String, Object>> list() {
-        return ticketRepository.findTop20ByOrderByCreatedAtDesc().stream()
-                .map(this::ticketSummary)
+        List<AfterSalesTicketEntity> tickets = ticketRepository.findTop20ByOrderByCreatedAtDesc();
+        // 一次批量查询所有工单的最新执行任务，避免逐工单 N+1；同一工单多任务时取 updatedAt 最新者。
+        // 空列表时不发起 findByTicketIdIn(empty)：避免无意义的 IN () 查询。
+        Map<String, ExecutionJobEntity> latestJobByTicketId = tickets.isEmpty()
+                ? Map.of()
+                : executionJobRepository
+                .findByTicketIdIn(tickets.stream().map(AfterSalesTicketEntity::getId).toList())
+                .stream()
+                .collect(Collectors.toMap(
+                        ExecutionJobEntity::getTicketId,
+                        job -> job,
+                        (first, second) -> first.getUpdatedAt() == null ? second
+                                : second.getUpdatedAt() == null ? first
+                                : second.getUpdatedAt().isAfter(first.getUpdatedAt()) ? second : first));
+        return tickets.stream()
+                .map(ticket -> ticketSummary(ticket, latestJobByTicketId.get(ticket.getId())))
                 .toList();
     }
 
@@ -151,6 +174,7 @@ public class AfterSalesService {
         return result;
     }
 
+    @Transactional(readOnly = true)
     public Map<String, Object> detail(String ticketId) {
         AfterSalesTicketEntity ticket = ticketRepository.findById(ticketId)
                 .orElseThrow(() -> new IllegalArgumentException("TICKET_NOT_FOUND"));
@@ -214,10 +238,15 @@ public class AfterSalesService {
     }
 
     private Map<String, Object> ticketSummary(AfterSalesTicketEntity ticket) {
+        return ticketSummary(ticket, null);
+    }
+
+    private Map<String, Object> ticketSummary(AfterSalesTicketEntity ticket, ExecutionJobEntity latestJob) {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("id", ticket.getId());
         result.put("ticketNo", ticket.getTicketNo());
         result.put("orderId", ticket.getOrderId());
+        result.put("country", KNOWN_ORDER_COUNTRIES.get(ticket.getOrderId()));
         result.put("userId", ticket.getUserId());
         result.put("issueType", ticket.getIssueType());
         result.put("customerMessage", ticket.getCustomerMessage());
@@ -225,6 +254,10 @@ public class AfterSalesService {
         result.put("runId", ticket.getCurrentRunId());
         result.put("createdAt", ticket.getCreatedAt());
         result.put("updatedAt", ticket.getUpdatedAt());
+        // 可选字段：仅当存在执行任务时输出，供队列展示「执行异常」（RETRY_WAIT / DEAD_LETTER）。
+        if (latestJob != null) {
+            result.put("executionStatus", latestJob.getStatus().name());
+        }
         return result;
     }
 

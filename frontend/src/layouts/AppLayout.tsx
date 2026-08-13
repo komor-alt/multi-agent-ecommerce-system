@@ -21,7 +21,7 @@ const menuItems: MenuProps["items"] = [
   { key: "/dashboard", icon: <HomeOutlined />, label: "Dashboard" },
   { key: "/runs", icon: <OrderedListOutlined />, label: "Agent Runs" },
   { key: "/recommendations", icon: <AppstoreOutlined />, label: "Recommendations" },
-  { key: "/after-sales", icon: <CustomerServiceOutlined />, label: "After Sales" },
+  { key: "/after-sales", icon: <CustomerServiceOutlined />, label: "售后运营" },
   { key: "/products", icon: <ProductOutlined />, label: "Products" },
   { key: "/users", icon: <TeamOutlined />, label: "Users" },
   { key: "/orders", icon: <ShoppingCartOutlined />, label: "Orders" },

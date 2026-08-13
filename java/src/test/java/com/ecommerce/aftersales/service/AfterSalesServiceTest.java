@@ -2,6 +2,7 @@ package com.ecommerce.aftersales.service;
 
 import com.ecommerce.aftersales.entity.AfterSalesRunEntity;
 import com.ecommerce.aftersales.entity.AfterSalesTicketEntity;
+import com.ecommerce.aftersales.entity.ExecutionJobEntity;
 import com.ecommerce.aftersales.model.AfterSalesTypes;
 import com.ecommerce.aftersales.repository.ActionProposalRepository;
 import com.ecommerce.aftersales.repository.AfterSalesRunRepository;
@@ -12,7 +13,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.Executor;
@@ -193,6 +196,62 @@ class AfterSalesServiceTest {
     }
 
     @Test
+    void listBatchLoadsExecutionStatusWithoutNPlusOne() {
+        AfterSalesTicketEntity ticket1 = ticket(AfterSalesTypes.TicketStatus.PENDING_APPROVAL);
+        AfterSalesTicketEntity ticket2 = ticket(AfterSalesTypes.TicketStatus.PENDING_APPROVAL);
+        ticket2.setId("ticket-2");
+        when(ticketRepository.findTop20ByOrderByCreatedAtDesc()).thenReturn(List.of(ticket1, ticket2));
+
+        ExecutionJobEntity retryWaiting = ExecutionJobEntity.builder()
+                .id("job-1")
+                .ticketId("ticket-1")
+                .proposalId("proposal-1")
+                .idempotencyKey("key-1")
+                .actionType("ISSUE_VOUCHER")
+                .amount(new BigDecimal("10.00"))
+                .currency("VND")
+                .status(AfterSalesTypes.ExecutionStatus.RETRY_WAIT)
+                .attemptCount(2)
+                .build();
+        when(executionJobRepository.findByTicketIdIn(List.of("ticket-1", "ticket-2"))).thenReturn(List.of(retryWaiting));
+
+        List<Map<String, Object>> items = service().list();
+
+        assertThat(items).hasSize(2);
+        assertThat(items.get(0)).containsEntry("executionStatus", "RETRY_WAIT");
+        // 无执行任务的工单不输出该字段（可选字段）。
+        assertThat(items.get(1)).doesNotContainKey("executionStatus");
+        // 一次批量查询，不逐工单查询。
+        verify(executionJobRepository).findByTicketIdIn(List.of("ticket-1", "ticket-2"));
+        verify(executionJobRepository, never()).findByProposalId(anyString());
+    }
+
+    @Test
+    void listWithNoTicketsSkipsExecutionJobBatchQuery() {
+        when(ticketRepository.findTop20ByOrderByCreatedAtDesc()).thenReturn(List.of());
+
+        assertThat(service().list()).isEmpty();
+        // 空列表时不发起 findByTicketIdIn(empty)。
+        verify(executionJobRepository, never()).findByTicketIdIn(any());
+    }
+
+    @Test
+    void listReportsDeadLetterAndSucceededExecutionStatuses() {
+        AfterSalesTicketEntity deadLetter = ticket(AfterSalesTypes.TicketStatus.PENDING_APPROVAL);
+        AfterSalesTicketEntity succeeded = ticket(AfterSalesTypes.TicketStatus.RESOLVED);
+        succeeded.setId("ticket-2");
+        when(ticketRepository.findTop20ByOrderByCreatedAtDesc()).thenReturn(List.of(deadLetter, succeeded));
+        when(executionJobRepository.findByTicketIdIn(any())).thenReturn(List.of(
+                executionJob("job-1", "ticket-1", AfterSalesTypes.ExecutionStatus.DEAD_LETTER),
+                executionJob("job-2", "ticket-2", AfterSalesTypes.ExecutionStatus.SUCCEEDED)));
+
+        List<Map<String, Object>> items = service().list();
+
+        assertThat(items.get(0)).containsEntry("executionStatus", "DEAD_LETTER");
+        assertThat(items.get(1)).containsEntry("executionStatus", "SUCCEEDED");
+    }
+
+    @Test
     void startOnMissingRunThrows() {
         when(runRepository.claimReady(eq("nope"), any())).thenReturn(0);
         when(runRepository.findById("nope")).thenReturn(Optional.empty());
@@ -211,6 +270,20 @@ class AfterSalesServiceTest {
                 .customerMessage("my parcel is stuck")
                 .status(status)
                 .createdAt(Instant.now())
+                .build();
+    }
+
+    private ExecutionJobEntity executionJob(String id, String ticketId, AfterSalesTypes.ExecutionStatus status) {
+        return ExecutionJobEntity.builder()
+                .id(id)
+                .ticketId(ticketId)
+                .proposalId("proposal-" + id)
+                .idempotencyKey("key-" + id)
+                .actionType("ISSUE_VOUCHER")
+                .amount(new BigDecimal("10.00"))
+                .currency("VND")
+                .status(status)
+                .attemptCount(1)
                 .build();
     }
 }

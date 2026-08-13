@@ -31,6 +31,8 @@ public class AfterSalesAgentLoopService {
     private final AfterSalesRunEventService eventService;
     private final AfterSalesRunRepository runRepository;
     private final AfterSalesTicketRepository ticketRepository;
+    private final AfterSalesTicketContextService ticketContextService;
+    private final AfterSalesIntakeService intakeService;
     private final ObjectMapper objectMapper;
     private final long stepDelayMs;
 
@@ -39,26 +41,32 @@ public class AfterSalesAgentLoopService {
             AfterSalesRunEventService eventService,
             AfterSalesRunRepository runRepository,
             AfterSalesTicketRepository ticketRepository,
+            AfterSalesTicketContextService ticketContextService,
+            AfterSalesIntakeService intakeService,
             ObjectMapper objectMapper,
             @Value("${agent.aftersales.demo-step-delay-ms:0}") long stepDelayMs) {
         this.toolExecutor = toolExecutor;
         this.eventService = eventService;
         this.runRepository = runRepository;
         this.ticketRepository = ticketRepository;
+        this.ticketContextService = ticketContextService;
+        this.intakeService = intakeService;
         this.objectMapper = objectMapper;
         this.stepDelayMs = Math.max(0, stepDelayMs);
     }
 
     public void run(String runId, String ticketId) {
         AfterSalesRunEntity run = runRepository.findById(runId).orElseThrow();
-        AfterSalesTicketEntity ticket = ticketRepository.findById(ticketId).orElseThrow();
+        AfterSalesTicketContextService.TicketContext ticketContext = ticketContextService.load(ticketId);
+        AfterSalesTicketEntity ticket = ticketContext.ticket();
         AfterSalesAgentState state = new AfterSalesAgentState(runId, ticket);
         Set<String> fingerprints = new HashSet<>();
         // 单调时钟测量分析总耗时：不受系统时间跳变影响。总耗时是用户感知的完整 run 时长
         // （含演示等待），工具事件里的 latencyMs 才不含演示等待。
         long startedNanos = System.nanoTime();
 
-        eventService.append(runId, "run_started", "售后分析开始", "running",
+        try {
+            eventService.append(runId, "run_started", "售后分析开始", "running",
                 "工单进入受限 Agent Loop。", Map.of(
                         "summary", "正在核验订单、物流和适用政策。",
                         "ticketId", ticketId,
@@ -66,7 +74,19 @@ public class AfterSalesAgentLoopService {
                         "maxSteps", run.getMaxSteps()
                 ));
 
-        try {
+        // Intake：结构化分类先于工具循环执行。不进入工具循环，不计入工具 stepCount；
+        // LLM 失败由 AfterSalesIntakeService 降级为规则分类，Intake 自身失败不影响整条工单。
+        long intakeStartedNanos = System.nanoTime();
+        eventService.append(runId, "intake_started", "提取工单意图", "running",
+                "正在从客户消息中提取问题类型、意图与紧急度。", Map.of(
+                        "summary", "正在从客户消息中提取问题类型、意图与紧急度。",
+                        "ticketId", ticketId
+                ));
+        AfterSalesTypes.IntakeResult intake = intakeService.classify(ticketContext.customerMessage());
+        state.setIntake(intake);
+        eventService.append(runId, "intake_completed", "Intake 分析完成", "success",
+                intakeSummary(intake), intakeEventData(intake, elapsedMs(intakeStartedNanos)));
+
             for (int step = 1; step <= run.getMaxSteps(); step++) {
                 String action = nextAction(state);
                 if (action == null) {
@@ -143,6 +163,7 @@ public class AfterSalesAgentLoopService {
         finalAnswer.put("proposalId", state.getProposalId());
         finalAnswer.put("requiresApproval", true);
         finalAnswer.put("evidenceIds", state.getEvidenceIds());
+        finalAnswer.put("intake", state.getIntake());
         finalAnswer.put("decisionSummary", "The shipment is inactive beyond policy threshold. A deterministic delay coupon proposal is pending operator approval.");
 
         run.setStatus("COMPLETED");
@@ -166,6 +187,37 @@ public class AfterSalesAgentLoopService {
 
     private long elapsedMs(long startedNanos) {
         return (System.nanoTime() - startedNanos) / 1_000_000;
+    }
+
+    /** intake_completed 只携带结构化分类字段、source、latencyMs 和安全 summary。 */
+    private Map<String, Object> intakeEventData(AfterSalesTypes.IntakeResult intake, long latencyMs) {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("summary", intakeSummary(intake));
+        data.put("issueType", intake.issueType());
+        data.put("intents", intake.intents());
+        data.put("urgency", intake.urgency());
+        data.put("entities", intake.entities());
+        data.put("missingInfo", intake.missingInfo());
+        data.put("requiredEvidence", intake.requiredEvidence());
+        data.put("source", intake.source());
+        data.put("latencyMs", latencyMs);
+        if (intake.fallbackReason() != null) {
+            data.put("fallbackReason", intake.fallbackReason());
+        }
+        return data;
+    }
+
+    private String intakeSummary(AfterSalesTypes.IntakeResult intake) {
+        String source = "LLM".equals(intake.source()) ? "模型识别" : "规则降级";
+        return "识别为物流延迟，紧急度" + urgencyLabel(intake.urgency()) + "，来源：" + source + "。";
+    }
+
+    private String urgencyLabel(String urgency) {
+        return switch (urgency) {
+            case "HIGH" -> "高";
+            case "MEDIUM" -> "中";
+            default -> "低";
+        };
     }
 
     private String nextAction(AfterSalesAgentState state) {

@@ -7,6 +7,7 @@ import com.ecommerce.aftersales.repository.AfterSalesRunRepository;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
@@ -37,6 +38,7 @@ public class AfterSalesRunEventService {
         this.objectMapper = objectMapper;
     }
 
+    @Transactional
     public AfterSalesRunEventEntity append(
             String runId,
             String type,
@@ -65,6 +67,7 @@ public class AfterSalesRunEventService {
         }
     }
 
+    @Transactional(readOnly = true)
     public SseEmitter stream(String runId, String lastEventId) {
         if (!runRepository.existsById(runId)) {
             throw new IllegalArgumentException("AGENT_RUN_NOT_FOUND");
@@ -128,6 +131,7 @@ public class AfterSalesRunEventService {
         );
     }
 
+    @Transactional(readOnly = true)
     public List<Map<String, Object>> history(String runId) {
         return eventRepository.findByRunIdOrderBySequenceAsc(runId).stream()
                 .map(this::payload)
@@ -168,9 +172,14 @@ public class AfterSalesRunEventService {
         for (SseEmitter emitter : current) {
             try {
                 send(emitter, event);
-            } catch (IOException error) {
-                emitter.completeWithError(error);
+            } catch (Exception error) {
+                // 客户端断线属于传输层事件，不能反向击穿审批/执行等业务事务。
                 current.remove(emitter);
+                try {
+                    emitter.complete();
+                } catch (Exception ignored) {
+                    // 容器可能已经结束 AsyncContext；订阅者已移除，无需二次完成。
+                }
             }
         }
     }

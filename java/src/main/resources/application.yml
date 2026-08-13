@@ -35,3 +35,7 @@ agent:
   aftersales:
     demo-step-delay-ms: ${ECOM_AFTERSALES_STEP_DELAY_MS:0}
     retry-scan-ms: ${ECOM_AFTERSALES_RETRY_SCAN_MS:5000}
+    intake:
+      # AUTO: key 缺失/占位时走规则，否则尝试 LLM；LLM: 强制 LLM，失败回退规则；RULES: 仅规则。
+      mode: ${ECOM_AFTERSALES_INTAKE_MODE:AUTO}
+      timeout-ms: ${ECOM_AFTERSALES_INTAKE_TIMEOUT_MS:4000}

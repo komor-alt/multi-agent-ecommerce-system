@@ -9,12 +9,16 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
 public interface ExecutionJobRepository extends JpaRepository<ExecutionJobEntity, String> {
     Optional<ExecutionJobEntity> findByProposalId(String proposalId);
     Optional<ExecutionJobEntity> findByIdempotencyKey(String idempotencyKey);
+
+    /** 队列聚合用：一次批量查询多个工单的最新执行任务，避免逐工单 N+1。 */
+    List<ExecutionJobEntity> findByTicketIdIn(Collection<String> ticketIds);
     List<ExecutionJobEntity> findTop10ByStatusAndNextRetryAtLessThanEqualOrderByNextRetryAtAsc(
             AfterSalesTypes.ExecutionStatus status,
             Instant now
