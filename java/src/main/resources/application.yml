@@ -39,3 +39,7 @@ agent:
       # AUTO: key 缺失/占位时走规则，否则尝试 LLM；LLM: 强制 LLM，失败回退规则；RULES: 仅规则。
       mode: ${ECOM_AFTERSALES_INTAKE_MODE:AUTO}
       timeout-ms: ${ECOM_AFTERSALES_INTAKE_TIMEOUT_MS:4000}
+    planner:
+      # Evidence Planner：同样支持 AUTO/LLM/RULES，AUTO 在 key 缺失/占位时直接走规则（不发网络请求）。
+      mode: ${ECOM_AFTERSALES_PLANNER_MODE:AUTO}
+      timeout-ms: ${ECOM_AFTERSALES_PLANNER_TIMEOUT_MS:3000}

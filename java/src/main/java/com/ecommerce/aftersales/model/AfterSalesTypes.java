@@ -117,4 +117,46 @@ public final class AfterSalesTypes {
 
     public record ExecutionResult(String externalReference, String status, Instant executedAt) {
     }
+
+    /**
+     * 不可变证据类型：Evidence Planner 只允许在这四个值之间规划。
+     * ORDER/SHIPMENT/POLICY 对应只读取证工具；READY_FOR_DECISION 表示证据齐备、离开取证循环。
+     * 模型输出中出现这四个值之外的任何证据名都视为非法。
+     */
+    public enum EvidenceType {
+        ORDER,
+        SHIPMENT,
+        POLICY,
+        READY_FOR_DECISION
+    }
+
+    /**
+     * Evidence Planner 的不可变规划结果。字段不可变（record），只承载规划数据：
+     * - nextEvidence：下一步要收集的证据（或 READY_FOR_DECISION；invalidInput 时为占位值，不可执行）；
+     * - reasonCode：安全理由码（ORDER_CONTEXT_REQUIRED / SHIPMENT_STATUS_REQUIRED / POLICY_REQUIRED /
+     *   EVIDENCE_COMPLETE / INVALID_REQUIRED_EVIDENCE），模型给出的理由码经过白名单与精确配对校验；
+     * - source：LLM 或 RULE_FALLBACK；
+     * - fallbackReason：仅允许安全错误码（见 AfterSalesEvidencePlannerService），非降级结果为 null；
+     * - latencyMs：本次规划耗时（毫秒）；
+     * - invalidInput：服务端输入非法（如 requiredEvidence 含未知证据）时为 true，调用方必须拒绝
+     *   该规划（Agent 循环以 PLANNER_INVALID_REQUIRED_EVIDENCE 失败），不得执行也不得声称 READY。
+     */
+    public record PlanningResult(
+            EvidenceType nextEvidence,
+            String reasonCode,
+            String source,
+            String fallbackReason,
+            long latencyMs,
+            boolean invalidInput
+    ) {
+        /** 便捷构造：正常（非无效输入）规划结果。 */
+        public PlanningResult(
+                EvidenceType nextEvidence,
+                String reasonCode,
+                String source,
+                String fallbackReason,
+                long latencyMs) {
+            this(nextEvidence, reasonCode, source, fallbackReason, latencyMs, false);
+        }
+    }
 }

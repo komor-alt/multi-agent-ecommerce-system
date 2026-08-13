@@ -270,6 +270,42 @@
   font-size: 12px;
 }
 
+.after-sales-page .evidence-plan {
+  border: 1px solid #f2f4f7;
+  border-radius: 8px;
+  background: #fafbfc;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+}
+
+.after-sales-page .evidence-plan-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.after-sales-page .evidence-plan-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.after-sales-page .evidence-plan-tag {
+  margin-inline-end: 0;
+}
+
+.after-sales-page .planner-kind-tag {
+  margin-inline-end: 0;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.after-sales-page .planner-source-tag {
+  margin-inline-end: 0;
+  font-size: 12px;
+}
+
 .after-sales-page .suggestion-head {
   display: flex;
   align-items: flex-start;

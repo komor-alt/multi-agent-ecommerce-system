@@ -290,6 +290,9 @@ export function eventTypeLabel(type: string): string {
     run_started: "开始分析",
     intake_started: "开始提取",
     intake_completed: "提取完成",
+    planning_started: "开始取证规划",
+    planning_completed: "取证规划完成",
+    planning_fallback: "规划降级",
     tool_started: "工具调用",
     tool_completed: "工具完成",
     retrieval_completed: "检索完成",
@@ -301,6 +304,83 @@ export function eventTypeLabel(type: string): string {
     error: "异常",
   };
   return labels[type] || type;
+}
+
+/** Planner 证据类型展示名（与后端 AfterSalesTypes.EvidenceType 一致）。 */
+export function evidenceTypeLabel(type?: string): string {
+  const labels: Record<string, string> = {
+    ORDER: "订单",
+    SHIPMENT: "物流",
+    POLICY: "政策",
+    READY_FOR_DECISION: "就绪决策",
+  };
+  return type ? labels[type] || type : "—";
+}
+
+/**
+ * Planner 理由码 / 降级码的本地化展示。reasonCode（ORDER_CONTEXT_REQUIRED 等）与
+ * fallbackReason（LLM_TIMEOUT / LLM_INVALID_PLAN 等）共用同一张表，只暴露安全错误码。
+ */
+export function plannerReasonLabel(code?: string): string {
+  const labels: Record<string, string> = {
+    ORDER_CONTEXT_REQUIRED: "缺少订单上下文",
+    SHIPMENT_STATUS_REQUIRED: "缺少物流状态",
+    POLICY_REQUIRED: "缺少适用政策",
+    EVIDENCE_COMPLETE: "证据齐备，可进入决策",
+    RULES_MODE: "规则模式规划",
+    LLM_API_KEY_MISSING: "API Key 未配置，降级规则",
+    LLM_TIMEOUT: "模型超时，降级规则",
+    LLM_BUSY: "模型繁忙，降级规则",
+    LLM_EMPTY_RESPONSE: "模型空响应，降级规则",
+    LLM_INVALID_JSON: "模型输出非法 JSON，降级规则",
+    LLM_INVALID_OUTPUT: "模型输出非法字段，降级规则",
+    LLM_INVALID_PLAN: "模型规划无效，降级规则",
+    LLM_ERROR: "模型异常，降级规则",
+  };
+  return code ? labels[code] || code : "—";
+}
+
+export function plannerSourceLabel(source?: string): string {
+  return source === "LLM" ? "模型规划" : source === "RULE_FALLBACK" ? "规则规划" : source || "—";
+}
+
+export type EvidencePlanItem = {
+  type: "ORDER" | "SHIPMENT" | "POLICY";
+  /** Planner 已请求过该证据（planning_completed.nextEvidence） */
+  requested: boolean;
+  /** 该类别证据已实际产生（tool_completed.evidenceIds） */
+  verified: boolean;
+};
+
+export type EvidencePlanState = {
+  items: EvidencePlanItem[];
+  readyForDecision: boolean;
+};
+
+/**
+ * 从 run 事件推导紧凑证据规划：Planner 请求过（planning_completed.nextEvidence）+
+ * 实际已产生证据（evidenceIds 前缀分类）。READY_FOR_DECISION 由 Planner 事件权威给出；
+ * 兼容无 Planner 事件的历史 run：三类证据齐备也算就绪。
+ */
+export function deriveEvidencePlan(events: AfterSalesEvent[]): EvidencePlanState {
+  const requested = new Set<string>();
+  let readyForDecision = false;
+  for (const event of events) {
+    if (event.type !== "planning_completed") continue;
+    const evidence = typeof event.data.nextEvidence === "string" ? event.data.nextEvidence : "";
+    if (evidence === "READY_FOR_DECISION") readyForDecision = true;
+    else if (evidence) requested.add(evidence);
+  }
+  const verified = new Set(
+    collectEvidence(events).filter((item) => item.verified).map((item) => item.category),
+  );
+  const items: EvidencePlanItem[] = (["ORDER", "SHIPMENT", "POLICY"] as const).map((type) => ({
+    type,
+    requested: requested.has(type),
+    verified: verified.has(type),
+  }));
+  if (!readyForDecision && items.every((item) => item.verified)) readyForDecision = true;
+  return { items, readyForDecision };
 }
 
 export function streamLabel(status: string): string {

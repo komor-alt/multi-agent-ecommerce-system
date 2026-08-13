@@ -37,13 +37,17 @@ import type { AfterSalesEvent, AfterSalesIntake, AfterSalesTicket } from "../../
 import { formatDuration } from "../../utils/format";
 import {
   countryLabel,
+  deriveEvidencePlan,
   EVIDENCE_CATEGORIES,
   eventTypeLabel,
   evidenceCategoryLabel,
+  evidenceTypeLabel,
   executionStatusLabel,
   formatDateTime,
   formatMoney,
   issueTypeLabel,
+  plannerReasonLabel,
+  plannerSourceLabel,
   policyVersionLabel,
   proposalStatusLabel,
   riskLevelColor,
@@ -55,6 +59,7 @@ import type {
   ApprovalChecks,
   EvidenceCategory,
   EvidenceItem,
+  EvidencePlanState,
   RiskAssessment,
   RiskLevel,
 } from "./afterSalesLogic";
@@ -121,9 +126,10 @@ export function AfterSalesWorkspace({
         </section>
       </div>
 
+      {/* Debug 轨迹默认折叠：决策中心才是页面焦点，轨迹只按需展开，且从不展示思维链。 */}
       <Collapse
         className="trace-collapse"
-        defaultActiveKey={["trace"]}
+        defaultActiveKey={[]}
         items={[{
           key: "trace",
           label: (
@@ -245,6 +251,47 @@ function intentLabel(intent: string): string {
   return ({ TRACK_SHIPMENT: "查询物流", REQUEST_REFUND: "申请退款" } as Record<string, string>)[intent] || intent;
 }
 
+/**
+ * 紧凑 Evidence Plan：Planner 驱动的取证进度。ORDER/SHIPMENT/POLICY 三份证据的
+ * 请求与完成状态 + Ready for Decision。只依赖 Planner 事件与证据 ID，不展示任何模型输出。
+ */
+function EvidencePlanPanel({ plan }: { plan: EvidencePlanState }) {
+  return (
+    <div className="evidence-plan">
+      <div className="evidence-plan-head">
+        <Typography.Text strong>Evidence Plan</Typography.Text>
+        {plan.readyForDecision ? (
+          <Tag color="green">Ready for Decision</Tag>
+        ) : (
+          <Tag color="processing">取证中</Tag>
+        )}
+      </div>
+      <div className="evidence-plan-row">
+        {plan.items.map((item) => (
+          <Tooltip
+            key={item.type}
+            title={
+              item.verified
+                ? `${evidenceTypeLabel(item.type)}证据已核验`
+                : item.requested
+                  ? `${evidenceTypeLabel(item.type)}证据已请求，待核验`
+                  : `${evidenceTypeLabel(item.type)}证据未请求`
+            }
+          >
+            <Tag
+              icon={item.verified ? <CheckCircleOutlined /> : item.requested ? <ClockCircleOutlined /> : <CloseCircleOutlined />}
+              color={item.verified ? "success" : item.requested ? "processing" : "default"}
+              className="evidence-plan-tag"
+            >
+              {evidenceTypeLabel(item.type)}
+            </Tag>
+          </Tooltip>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function DecisionCenterPanel({
   ticket,
   loading,
@@ -260,8 +307,18 @@ function DecisionCenterPanel({
   const finalAnswer = ticket?.run?.finalAnswer;
   const proposal = ticket?.proposal;
   const policy = finalAnswer?.policy;
+  const evidencePlan = deriveEvidencePlan(events);
   if (!finalAnswer && !proposal) {
-    return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={ticket?.status === "ANALYZING" ? "Agent 正在分析…" : "Agent 完成分析后展示建议与证据"} />;
+    if (ticket?.status === "ANALYZING" && events.length > 0) {
+      // 直播分析中：先展示实时的 Evidence Plan，再提示建议尚未生成。
+      return (
+        <div className="panel-body">
+          <EvidencePlanPanel plan={evidencePlan} />
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Agent 正在分析…" />
+        </div>
+      );
+    }
+    return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Agent 完成分析后展示建议与证据" />;
   }
   const evidenceRows = evidenceItems.map((item) => ({
     key: item.category,
@@ -276,6 +333,7 @@ function DecisionCenterPanel({
   return (
     <div className="panel-body">
       {finalAnswer?.intake ? <IntakeAnalysisPanel intake={finalAnswer.intake} /> : null}
+      <EvidencePlanPanel plan={evidencePlan} />
       <div className="suggestion-head">
         <div>
           <Typography.Text type="secondary">AI 建议金额</Typography.Text>
@@ -565,10 +623,13 @@ function TraceTable({ events, running }: { events: AfterSalesEvent[]; running: b
         {
           title: "事件",
           key: "name",
-          width: 170,
+          width: 190,
           render: (_, event) => (
             <div className="queue-cell">
-              <Typography.Text strong>{event.name}</Typography.Text>
+              <Space size={6}>
+                <Typography.Text strong>{event.name}</Typography.Text>
+                {event.type.startsWith("planning_") ? <Tag className="planner-kind-tag">Planner</Tag> : null}
+              </Space>
               <Typography.Text type="secondary" className="queue-cell-sub">{eventTypeLabel(event.type)}</Typography.Text>
             </div>
           ),
@@ -578,18 +639,24 @@ function TraceTable({ events, running }: { events: AfterSalesEvent[]; running: b
           key: "summary",
           render: (_, event) => (
             <div className="trace-summary">
-              {event.data.summary ? (
-                <Tooltip title={event.data.summary}>
-                  <Typography.Text type="secondary" className="trace-summary-text">{event.data.summary}</Typography.Text>
-                </Tooltip>
-              ) : <Typography.Text type="secondary">—</Typography.Text>}
-              {event.data.evidenceIds?.length ? (
-                <Space wrap size={4} className="evidence-list">
-                  {event.data.evidenceIds.map((id) => (
-                    <Typography.Text code key={id} className="evidence-id">{id}</Typography.Text>
-                  ))}
-                </Space>
-              ) : null}
+              {event.type.startsWith("planning_") ? (
+                <PlannerTraceSummary event={event} />
+              ) : (
+                <>
+                  {event.data.summary ? (
+                    <Tooltip title={event.data.summary}>
+                      <Typography.Text type="secondary" className="trace-summary-text">{event.data.summary}</Typography.Text>
+                    </Tooltip>
+                  ) : <Typography.Text type="secondary">—</Typography.Text>}
+                  {event.data.evidenceIds?.length ? (
+                    <Space wrap size={4} className="evidence-list">
+                      {event.data.evidenceIds.map((id) => (
+                        <Typography.Text code key={id} className="evidence-id">{id}</Typography.Text>
+                      ))}
+                    </Space>
+                  ) : null}
+                </>
+              )}
             </div>
           ),
         },
@@ -599,7 +666,8 @@ function TraceTable({ events, running }: { events: AfterSalesEvent[]; running: b
           width: 110,
           render: (_, event) => {
             const value =
-              event.type === "tool_completed" || event.type === "retrieval_completed" || event.type === "intake_completed"
+              event.type === "tool_completed" || event.type === "retrieval_completed"
+                || event.type === "intake_completed" || event.type === "planning_completed"
                 ? event.data.latencyMs
                 : event.type === "run_completed" || event.type === "error"
                   ? event.data.durationMs
@@ -619,6 +687,25 @@ function TraceTable({ events, running }: { events: AfterSalesEvent[]; running: b
         },
       ]}
     />
+  );
+}
+
+/**
+ * Planner 事件的结构化摘要：证据 + 本地化理由 + 来源。只展示后端输出的安全字段，
+ * 从不展示思维链或模型原始输出。
+ */
+function PlannerTraceSummary({ event }: { event: AfterSalesEvent }) {
+  const evidence = typeof event.data.nextEvidence === "string" ? event.data.nextEvidence : undefined;
+  const reasonCode = typeof event.data.reasonCode === "string" ? event.data.reasonCode : undefined;
+  const fallbackReason = typeof event.data.fallbackReason === "string" ? event.data.fallbackReason : undefined;
+  const source = typeof event.data.source === "string" ? event.data.source : undefined;
+  return (
+    <Space wrap size={4}>
+      {evidence ? <Tag color="blue">{evidenceTypeLabel(evidence)}</Tag> : null}
+      {reasonCode ? <Typography.Text type="secondary">{plannerReasonLabel(reasonCode)}</Typography.Text> : null}
+      {fallbackReason ? <Tag color="orange">{plannerReasonLabel(fallbackReason)}</Tag> : null}
+      <Tag className="planner-source-tag">{plannerSourceLabel(source)}</Tag>
+    </Space>
   );
 }
 
