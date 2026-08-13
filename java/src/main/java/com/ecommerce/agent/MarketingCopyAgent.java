@@ -2,18 +2,20 @@ package com.ecommerce.agent;
 
 import com.ecommerce.model.AgentResult;
 import com.ecommerce.model.Product;
+import com.ecommerce.model.RecommendationRequest;
 import com.ecommerce.model.UserProfile;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Component;
 
-import java.util.*;
-import java.util.regex.Pattern;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
- * 营销文案Agent — Prompt模板引擎 + 个性化生成 + 广告法合规校验
+ * Marketing copy Agent: localized prompt + personalized copy + compliance check.
  */
 @Component
 public class MarketingCopyAgent extends BaseAgent {
@@ -22,16 +24,15 @@ public class MarketingCopyAgent extends BaseAgent {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private static final Map<String, String> TEMPLATES = Map.of(
-            "new_user", "为新用户撰写欢迎文案,风格热情友好,突出新人优惠。",
-            "high_value", "为VIP用户撰写推荐文案,风格品质尊享,突出品牌价值。",
-            "price_sensitive", "为价格敏感用户撰写文案,突出性价比和促销优惠。",
-            "active", "为活跃用户撰写文案,突出商品亮点和使用场景。",
-            "churn_risk", "为流失风险用户撰写召回文案,突出专属折扣。"
+            "new_user", "welcome new shoppers and highlight first-order value",
+            "high_value", "use a premium, service-focused tone",
+            "price_sensitive", "highlight value, bundles, and transparent shipping",
+            "active", "focus on product use cases and cross-border delivery clarity",
+            "churn_risk", "use a friendly win-back tone with practical benefits"
     );
 
-    private static final List<String> FORBIDDEN_WORDS = List.of(
-            "最好", "第一", "国家级", "全球首", "绝对", "100%", "永久", "万能"
-    );
+    private static final List<String> FORBIDDEN_ZH = List.of("最好", "第一", "国家级", "全球首", "绝对", "100%", "永久", "万能");
+    private static final List<String> FORBIDDEN_EN = List.of("best ever", "number one", "guaranteed", "100%", "forever", "miracle");
 
     public MarketingCopyAgent(ChatClient.Builder chatClientBuilder) {
         super("marketing_copy", 10.0, 2);
@@ -41,34 +42,55 @@ public class MarketingCopyAgent extends BaseAgent {
     @Override
     @SuppressWarnings("unchecked")
     protected AgentResult execute(Map<String, Object> params) throws Exception {
+        RecommendationRequest request = requestFrom(params);
         UserProfile profile = (UserProfile) params.get("userProfile");
         List<Product> products = (List<Product>) params.getOrDefault("products", List.of());
 
         if (products.isEmpty()) {
             return AgentResult.builder().agentName(name).success(true)
-                    .data(Map.of("copies", List.of())).confidence(1.0).build();
+                    .data(Map.of("copies", List.of(), "copy_locale", request.localeOrDefault()))
+                    .confidence(1.0).build();
         }
 
         String templateKey = selectTemplate(profile);
-        String systemPrompt = TEMPLATES.getOrDefault(templateKey, TEMPLATES.get("active"))
-                + "\n每个商品生成一条文案(30-50字)。输出JSON数组: [{\"product_id\":\"xxx\",\"copy\":\"文案\"}]";
-
+        String systemPrompt = localizedSystemPrompt(request, templateKey);
         String productInfo = products.stream()
-                .map(p -> "ID:" + p.getProductId() + " " + p.getName() + " ¥" + p.getPrice() + " " + p.getTags())
+                .map(p -> String.format("ID:%s name:%s price:%s %.2f country:%s warehouse:%s deliveryDays:%d tags:%s",
+                        p.getProductId(), p.getName(), p.getCurrency(), p.getPrice(), request.countryOrDefault(),
+                        p.getWarehouseRegion(), p.getDeliveryDays(), p.getTags()))
                 .collect(Collectors.joining("\n"));
 
-        String response = chatClient.prompt()
-                .system(systemPrompt)
-                .user("商品列表:\n" + productInfo)
-                .call()
-                .content();
+        List<Map<String, String>> copies;
+        try {
+            String response = chatClient.prompt()
+                    .system(systemPrompt)
+                    .user("Products:\n" + productInfo)
+                    .call()
+                    .content();
+            copies = parseCopies(response);
+            if (copies.isEmpty()) {
+                copies = fallbackCopies(products, request);
+            }
+        } catch (Exception e) {
+            log.warn("Localized copy LLM failed, using template fallback: {}", e.getMessage());
+            copies = fallbackCopies(products, request);
+        }
 
-        List<Map<String, String>> copies = parseCopies(response);
-        copies = copies.stream().map(this::complianceCheck).collect(Collectors.toList());
+        copies = copies.stream()
+                .map(item -> complianceCheck(item, request.localeOrDefault()))
+                .map(item -> addLocale(item, request.localeOrDefault()))
+                .collect(Collectors.toList());
 
         Map<String, Object> data = new HashMap<>();
         data.put("copies", copies);
         data.put("template_used", templateKey);
+        data.put("copy_locale", request.localeOrDefault());
+        data.put("cross_border_context", Map.of(
+                "country", request.countryOrDefault(),
+                "locale", request.localeOrDefault(),
+                "currency", request.currencyOrDefault(),
+                "platform", request.platformOrDefault()
+        ));
 
         return AgentResult.builder()
                 .agentName(name)
@@ -76,6 +98,27 @@ public class MarketingCopyAgent extends BaseAgent {
                 .data(data)
                 .confidence(0.9)
                 .build();
+    }
+
+    private String localizedSystemPrompt(RecommendationRequest request, String templateKey) {
+        String language = languageInstruction(request.localeOrDefault());
+        return String.format("""
+                You are a localized cross-border ecommerce marketing copy agent.
+                Locale=%s, country=%s, currency=%s, platform=%s.
+                Write in: %s.
+                Tone instruction: %s.
+                Mention local currency and delivery estimate when useful. Do not invent product IDs, warehouse, delivery days, discounts, or claims.
+                Return JSON array only: [{"product_id":"xxx","copy":"localized copy"}]
+                """,
+                request.localeOrDefault(), request.countryOrDefault(), request.currencyOrDefault(), request.platformOrDefault(),
+                language, TEMPLATES.getOrDefault(templateKey, TEMPLATES.get("active")));
+    }
+
+    private String languageInstruction(String locale) {
+        if (locale.startsWith("zh")) return "Simplified Chinese";
+        if (locale.startsWith("ms")) return "Malay";
+        if (locale.startsWith("th")) return "Thai";
+        return "English";
     }
 
     private String selectTemplate(UserProfile profile) {
@@ -101,13 +144,47 @@ public class MarketingCopyAgent extends BaseAgent {
         }
     }
 
-    private Map<String, String> complianceCheck(Map<String, String> copyItem) {
+    private List<Map<String, String>> fallbackCopies(List<Product> products, RecommendationRequest request) {
+        return products.stream()
+                .map(product -> Map.of(
+                        "product_id", product.getProductId(),
+                        "copy", fallbackCopy(product, request),
+                        "locale", request.localeOrDefault()
+                ))
+                .collect(Collectors.toList());
+    }
+
+    private String fallbackCopy(Product product, RecommendationRequest request) {
+        if (request.localeOrDefault().startsWith("zh")) {
+            return String.format("%s 现以 %s %.2f 推荐给%s用户，预计%d天送达，适合日常跨境选购。",
+                    product.getName(), product.getCurrency(), product.getPrice(), request.countryOrDefault(), product.getDeliveryDays());
+        }
+        return String.format("%s is available for %s %.2f in %s, with an estimated %d-day delivery window.",
+                product.getName(), product.getCurrency(), product.getPrice(), request.countryOrDefault(), product.getDeliveryDays());
+    }
+
+    private Map<String, String> complianceCheck(Map<String, String> copyItem, String locale) {
         String text = copyItem.getOrDefault("copy", "");
-        for (String word : FORBIDDEN_WORDS) {
+        List<String> forbidden = locale.startsWith("zh") ? FORBIDDEN_ZH : FORBIDDEN_EN;
+        for (String word : forbidden) {
             text = text.replace(word, "***");
         }
         Map<String, String> result = new HashMap<>(copyItem);
         result.put("copy", text);
         return result;
+    }
+
+    private Map<String, String> addLocale(Map<String, String> copyItem, String locale) {
+        Map<String, String> result = new HashMap<>(copyItem);
+        result.put("locale", locale);
+        return result;
+    }
+
+    private RecommendationRequest requestFrom(Map<String, Object> params) {
+        Object request = params.get("request");
+        if (request instanceof RecommendationRequest recommendationRequest) {
+            return recommendationRequest;
+        }
+        return RecommendationRequest.builder().userId(String.valueOf(params.getOrDefault("userId", "anonymous"))).build();
     }
 }

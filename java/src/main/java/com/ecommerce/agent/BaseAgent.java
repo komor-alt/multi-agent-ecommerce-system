@@ -6,11 +6,15 @@ import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Base agent with retry, timeout, fallback, and metrics.
- * All four domain agents extend this class.
+ * Base agent with retry, timeout fallback, and basic in-agent counters.
  */
 public abstract class BaseAgent {
 
@@ -31,38 +35,59 @@ public abstract class BaseAgent {
     protected abstract AgentResult execute(Map<String, Object> params) throws Exception;
 
     public CompletableFuture<AgentResult> runAsync(Map<String, Object> params) {
-        return CompletableFuture.supplyAsync(() -> {
-            callCount.incrementAndGet();
-            long start = System.nanoTime();
-            int attempt = 0;
-            Exception lastError = null;
+        return CompletableFuture.completedFuture(runWithRetry(params));
+    }
 
-            while (attempt < maxRetries) {
-                try {
-                    AgentResult result = execute(params);
-                    double latency = (System.nanoTime() - start) / 1_000_000.0;
-                    result.setLatencyMs(latency);
-                    log.info("[{}] success in {:.1f}ms", name, latency);
-                    return result;
-                } catch (Exception e) {
-                    lastError = e;
-                    attempt++;
-                    log.warn("[{}] attempt {} failed: {}", name, attempt, e.getMessage());
-                    if (attempt < maxRetries) {
-                        try {
-                            Thread.sleep((long) (500 * Math.pow(2, attempt - 1)));
-                        } catch (InterruptedException ie) {
-                            Thread.currentThread().interrupt();
-                            break;
+    public CompletableFuture<AgentResult> runAsync(Map<String, Object> params, Executor executor) {
+        long timeoutMs = Math.max(1L, Math.round(timeoutSeconds * 1000));
+        try {
+            return CompletableFuture.supplyAsync(() -> runWithRetry(params), executor)
+                    .orTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+                    .exceptionally(error -> {
+                        Throwable root = unwrap(error);
+                        errorCount.incrementAndGet();
+                        if (root instanceof TimeoutException) {
+                            return fallback(timeoutMs, new TimeoutException(name + " timeout after " + timeoutMs + " ms"));
                         }
+                        return fallback(timeoutMs, root instanceof Exception exception ? exception : new RuntimeException(root));
+                    });
+        } catch (RejectedExecutionException e) {
+            errorCount.incrementAndGet();
+            return CompletableFuture.completedFuture(fallback(0.0, new RejectedExecutionException(name + " rejected by bounded executor", e)));
+        }
+    }
+
+    protected AgentResult runWithRetry(Map<String, Object> params) {
+        callCount.incrementAndGet();
+        long start = System.nanoTime();
+        int attempt = 0;
+        Exception lastError = null;
+
+        while (attempt < maxRetries) {
+            try {
+                AgentResult result = execute(params);
+                double latency = (System.nanoTime() - start) / 1_000_000.0;
+                result.setLatencyMs(latency);
+                log.info("[{}] success in {}ms", name, String.format("%.1f", latency));
+                return result;
+            } catch (Exception e) {
+                lastError = e;
+                attempt++;
+                log.warn("[{}] attempt {} failed: {}", name, attempt, e.getMessage());
+                if (attempt < maxRetries) {
+                    try {
+                        Thread.sleep((long) (500 * Math.pow(2, attempt - 1)));
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
                     }
                 }
             }
+        }
 
-            errorCount.incrementAndGet();
-            double latency = (System.nanoTime() - start) / 1_000_000.0;
-            return fallback(latency, lastError);
-        });
+        errorCount.incrementAndGet();
+        double latency = (System.nanoTime() - start) / 1_000_000.0;
+        return fallback(latency, lastError);
     }
 
     protected AgentResult fallback(double latencyMs, Exception e) {
@@ -79,4 +104,13 @@ public abstract class BaseAgent {
         int calls = callCount.get();
         return calls == 0 ? 0.0 : (double) errorCount.get() / calls;
     }
+
+    private Throwable unwrap(Throwable error) {
+        if (error instanceof CompletionException && error.getCause() != null) {
+            return error.getCause();
+        }
+        return error;
+    }
 }
+
+

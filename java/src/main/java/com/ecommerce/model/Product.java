@@ -22,4 +22,10 @@ public class Product {
     private int stock;
     private List<String> tags;
     private double score;
+    private List<String> supportedRegions;
+    private String currency;
+    private String warehouseRegion;
+    private int deliveryDays;
+    private String platform;
+    private boolean crossBorderEligible;
 }

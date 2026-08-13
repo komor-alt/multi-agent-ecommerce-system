@@ -69,7 +69,7 @@ class MarketingCopyAgent(BaseAgent):
             base_url=settings.llm_base_url,
             model=settings.llm_model,
             temperature=0.9,
-            max_tokens=2048,
+            max_tokens=512,
         )
 
     async def _execute(self, **kwargs: Any) -> MarketingCopyResult:

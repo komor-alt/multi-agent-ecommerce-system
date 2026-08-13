@@ -1,25 +1,21 @@
-version: "3.8"
-
 services:
-  # Python API Server
-  api:
-    build:
-      context: ./python
-      dockerfile: Dockerfile
+  postgres:
+    image: pgvector/pgvector:pg16
     ports:
-      - "8000:8000"
+      - "5432:5432"
     environment:
-      - ECOM_LLM_API_KEY=${ECOM_LLM_API_KEY:-your_api_key_here}
-      - ECOM_LLM_BASE_URL=${ECOM_LLM_BASE_URL:-https://api.minimax.chat/v1}
-      - ECOM_LLM_MODEL=${ECOM_LLM_MODEL:-MiniMax-M1}
-      - ECOM_REDIS_URL=redis://redis:6379/0
-      - ECOM_MILVUS_HOST=milvus
-      - ECOM_DATABASE_URL=sqlite:///./ecommerce.db
-    depends_on:
-      - redis
+      POSTGRES_USER: ecommerce
+      POSTGRES_PASSWORD: ecommerce
+      POSTGRES_DB: ecommerce_agent
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ecommerce -d ecommerce_agent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
-  # Redis - Feature Store
   redis:
     image: redis:7-alpine
     ports:
@@ -27,34 +23,65 @@ services:
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
-  # Milvus - Vector Database (standalone mode)
-  milvus:
-    image: milvusdb/milvus:v2.4-latest
+  agent-service:
+    build:
+      context: ./python
+      dockerfile: Dockerfile
     ports:
-      - "19530:19530"
-      - "9091:9091"
+      - "8000:8000"
     environment:
-      - ETCD_USE_EMBED=true
-      - COMMON_STORAGETYPE=local
-    volumes:
-      - milvus_data:/var/lib/milvus
+      ECOM_LLM_API_KEY: ${ECOM_LLM_API_KEY:-your_api_key_here}
+      ECOM_LLM_BASE_URL: ${ECOM_LLM_BASE_URL:-https://api.deepseek.com}
+      ECOM_LLM_MODEL: ${ECOM_LLM_MODEL:-deepseek-v4-flash}
+      ECOM_REDIS_URL: redis://redis:6379/0
+      ECOM_DATABASE_URL: postgresql+psycopg://ecommerce:ecommerce@postgres:5432/ecommerce_agent
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
-  # MySQL - Business Data
-  mysql:
-    image: mysql:8.0
+  gateway:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     ports:
-      - "3306:3306"
+      - "3000:3000"
     environment:
-      - MYSQL_ROOT_PASSWORD=ecommerce123
-      - MYSQL_DATABASE=ecommerce
-    volumes:
-      - mysql_data:/var/lib/mysql
+      PORT: 3000
+      DATABASE_URL: postgresql://ecommerce:ecommerce@postgres:5432/ecommerce_agent?schema=public
+      AGENT_SERVICE_BASE_URL: http://agent-service:8000
+      JWT_SECRET: ${JWT_SECRET:-replace-me-in-local-env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      agent-service:
+        condition: service_started
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_BASE_URL: http://localhost:3000/api/v1
+    depends_on:
+      - gateway
     restart: unless-stopped
 
 volumes:
+  postgres_data:
   redis_data:
-  milvus_data:
-  mysql_data:
+

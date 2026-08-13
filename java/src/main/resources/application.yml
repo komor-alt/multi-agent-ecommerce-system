@@ -18,3 +18,15 @@ spring:
 
 server:
   port: 8080
+agent:
+  guard:
+    # Upper bound for concurrent recommendation / tool-loop / agent-loop requests.
+    max-concurrent-runs: ${ECOM_AGENT_MAX_CONCURRENT_RUNS:12}
+  executor:
+    core-size: ${ECOM_AGENT_EXECUTOR_CORE_SIZE:8}
+    max-size: ${ECOM_AGENT_EXECUTOR_MAX_SIZE:16}
+    queue-capacity: ${ECOM_AGENT_EXECUTOR_QUEUE_CAPACITY:32}
+  sse:
+    core-size: ${ECOM_AGENT_SSE_CORE_SIZE:2}
+    max-size: ${ECOM_AGENT_SSE_MAX_SIZE:6}
+    queue-capacity: ${ECOM_AGENT_SSE_QUEUE_CAPACITY:16}

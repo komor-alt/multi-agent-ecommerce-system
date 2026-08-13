@@ -1,0 +1,125 @@
+.app-shell {
+  min-height: 100vh;
+  background: #f5f7fb;
+}
+
+.app-sider {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow: auto;
+  border-right: 1px solid #eef0f4;
+  box-shadow: 1px 0 8px rgba(15, 23, 42, 0.03);
+}
+
+.app-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 64px;
+  padding: 0 18px;
+  border-bottom: 1px solid #eef0f4;
+}
+
+.app-brand-mark {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid #d9e3f0;
+  border-radius: 8px;
+  color: #1677ff;
+  background: #f3f8ff;
+}
+
+.app-brand-subtitle {
+  margin-top: 2px;
+  color: #8c8c8c;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 72px;
+  border-bottom: 1px solid #eef0f4;
+  padding: 0 24px;
+  box-shadow: 0 1px 8px rgba(15, 23, 42, 0.03);
+}
+
+.app-header h4 {
+  margin: 0;
+}
+
+.app-content {
+  min-width: 0;
+  padding: 24px;
+}
+
+.page-stack {
+  display: grid;
+  gap: 16px;
+  max-width: 1360px;
+  margin: 0 auto;
+}
+
+.page-stack h3 {
+  margin: 0 0 4px;
+}
+
+.table-toolbar {
+  width: 100%;
+  margin-bottom: 16px;
+}
+
+@media (max-width: 1024px) {
+  .app-sider {
+    width: 220px !important;
+    min-width: 220px !important;
+    max-width: 220px !important;
+  }
+
+  .app-content {
+    padding: 16px;
+  }
+}
+
+.mode-switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid #2d2d2d;
+  border-radius: 8px;
+  padding: 10px 11px;
+  color: #dcdcdc;
+  background: #151515;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.event-line {
+  display: grid;
+  gap: 6px;
+}
+
+.event-line-summary {
+  color: #6b7280;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.json-view {
+  max-height: 420px;
+  overflow: auto;
+  border: 1px solid #eef0f4;
+  border-radius: 8px;
+  padding: 12px;
+  margin: 0;
+  background: #f8fafc;
+  color: #1f2937;
+  font-size: 12px;
+  line-height: 1.55;
+}

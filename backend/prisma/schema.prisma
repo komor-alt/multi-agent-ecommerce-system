@@ -1,0 +1,364 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  OPERATOR
+  VIEWER
+}
+
+enum UserStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum ProductStatus {
+  ACTIVE
+  INACTIVE
+  ARCHIVED
+}
+
+enum EmbeddingStatus {
+  PENDING
+  READY
+  FAILED
+}
+
+enum OrderStatus {
+  CREATED
+  PAID
+  FULFILLED
+  CANCELLED
+  REFUNDED
+}
+
+enum RecommendationTaskStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+  REVIEWING
+  APPROVED
+  REJECTED
+}
+
+enum AgentTaskType {
+  PRODUCT_RECOMMENDATION
+  AFTER_SALES_ASSISTANT
+  EVALUATION
+}
+
+enum AgentRunStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+  TIMEOUT
+}
+
+enum AgentEventType {
+  RUN_STARTED
+  MODEL_STARTED
+  MODEL_COMPLETED
+  TOOL_STARTED
+  TOOL_COMPLETED
+  RETRIEVAL_COMPLETED
+  WARNING
+  ERROR
+  RUN_COMPLETED
+  HEARTBEAT
+}
+
+enum AgentEventStatus {
+  PENDING
+  RUNNING
+  SUCCESS
+  FAILED
+  SKIPPED
+}
+
+enum ToolCallStatus {
+  RUNNING
+  SUCCESS
+  FAILED
+  BLOCKED
+}
+
+enum EvidenceSourceType {
+  PRODUCT
+  POLICY
+  ORDER
+  LOGISTICS
+  DOCUMENT
+}
+
+enum EvaluationRunStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  APPROVE
+  REJECT
+  LOGIN
+  RUN_AGENT
+  UPDATE_CONFIG
+}
+
+model User {
+  id                  String               @id @default(uuid())
+  email               String               @unique
+  name                String
+  role                UserRole             @default(VIEWER)
+  status              UserStatus           @default(ACTIVE)
+  region              String               @default("SEA")
+  createdAt           DateTime             @default(now()) @map("created_at")
+  updatedAt           DateTime             @updatedAt @map("updated_at")
+  orders              Order[]
+  recommendationTasks RecommendationTask[]
+  agentRuns           AgentRun[]
+  auditLogs           AuditLog[]
+
+  @@map("users")
+}
+
+model Product {
+  id              String                 @id @default(uuid())
+  productId       String                 @unique @map("product_id")
+  sku             String?                @unique
+  name            String
+  category        String
+  brand           String?
+  sellerId        String?                @map("seller_id")
+  price           Decimal                @db.Decimal(12, 2)
+  currency        String                 @default("CNY")
+  stock           Int                    @default(0)
+  tags            String[]               @default([])
+  description     String                 @default("")
+  status          ProductStatus          @default(ACTIVE)
+  knowledgeStatus EmbeddingStatus        @default(PENDING) @map("knowledge_status")
+  embeddingStatus EmbeddingStatus        @default(PENDING) @map("embedding_status")
+  embedding       Unsupported("vector")?
+  metadata        Json                   @default("{}")
+  createdAt       DateTime               @default(now()) @map("created_at")
+  updatedAt       DateTime               @updatedAt @map("updated_at")
+
+  @@index([category])
+  @@index([status])
+  @@map("products")
+}
+
+model Order {
+  id          String      @id @default(uuid())
+  orderNo     String      @unique @map("order_no")
+  userId      String      @map("user_id")
+  user        User        @relation(fields: [userId], references: [id])
+  status      OrderStatus @default(CREATED)
+  platform    String      @default("shopify")
+  region      String      @default("SEA")
+  totalAmount Decimal     @map("total_amount") @db.Decimal(12, 2)
+  currency    String      @default("CNY")
+  rawPayload  Json        @default("{}") @map("raw_payload")
+  createdAt   DateTime    @default(now()) @map("created_at")
+  updatedAt   DateTime    @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@index([status])
+  @@map("orders")
+}
+
+model RecommendationTask {
+  id          String                   @id @default(uuid())
+  taskType    AgentTaskType            @default(PRODUCT_RECOMMENDATION) @map("task_type")
+  userId      String                   @map("user_id")
+  user        User                     @relation(fields: [userId], references: [id])
+  runId       String?                  @unique @map("run_id")
+  agentRun    AgentRun?                @relation(fields: [runId], references: [id])
+  scene       String                   @default("homepage")
+  status      RecommendationTaskStatus @default(PENDING)
+  input       Json                     @default("{}")
+  finalAnswer Json?                    @map("final_answer")
+  createdAt   DateTime                 @default(now()) @map("created_at")
+  updatedAt   DateTime                 @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@index([status])
+  @@map("recommendation_tasks")
+}
+
+model AgentRun {
+  id                 String              @id @default(uuid())
+  taskType           AgentTaskType       @map("task_type")
+  userId             String?             @map("user_id")
+  user               User?               @relation(fields: [userId], references: [id])
+  status             AgentRunStatus      @default(PENDING)
+  modelName          String              @map("model_name")
+  promptVersion      String              @default("v1") @map("prompt_version")
+  startedAt          DateTime?           @map("started_at")
+  completedAt        DateTime?           @map("completed_at")
+  latencyMs          Int?                @map("latency_ms")
+  inputTokens        Int                 @default(0) @map("input_tokens")
+  outputTokens       Int                 @default(0) @map("output_tokens")
+  totalTokens        Int                 @default(0) @map("total_tokens")
+  toolCallCount      Int                 @default(0) @map("tool_call_count")
+  errorCode          String?             @map("error_code")
+  errorMessage       String?             @map("error_message")
+  requestPayload     Json                @default("{}") @map("request_payload")
+  responsePayload    Json?               @map("response_payload")
+  createdAt          DateTime            @default(now()) @map("created_at")
+  updatedAt          DateTime            @updatedAt @map("updated_at")
+  recommendationTask RecommendationTask?
+  events             AgentEvent[]
+  toolCalls          ToolCall[]
+  retrievalEvidences RetrievalEvidence[]
+
+  @@index([taskType])
+  @@index([status])
+  @@index([createdAt])
+  @@map("agent_runs")
+}
+
+model AgentEvent {
+  id            String              @id @default(uuid())
+  runId         String              @map("run_id")
+  run           AgentRun            @relation(fields: [runId], references: [id], onDelete: Cascade)
+  sequence      Int
+  eventType     AgentEventType      @map("event_type")
+  eventName     String              @map("event_name")
+  inputSummary  String?             @map("input_summary")
+  outputSummary String?             @map("output_summary")
+  latencyMs     Int?                @map("latency_ms")
+  status        AgentEventStatus    @default(SUCCESS)
+  rawPayload    Json                @default("{}") @map("raw_payload")
+  createdAt     DateTime            @default(now()) @map("created_at")
+  toolCalls     ToolCall[]
+  evidences     RetrievalEvidence[]
+
+  @@unique([runId, sequence])
+  @@index([runId, eventType])
+  @@map("agent_events")
+}
+
+model ToolCall {
+  id            String         @id @default(uuid())
+  runId         String         @map("run_id")
+  run           AgentRun       @relation(fields: [runId], references: [id], onDelete: Cascade)
+  eventId       String?        @map("event_id")
+  event         AgentEvent?    @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  toolName      String         @map("tool_name")
+  arguments     Json           @default("{}")
+  resultSummary String?        @map("result_summary")
+  status        ToolCallStatus @default(RUNNING)
+  latencyMs     Int?           @map("latency_ms")
+  errorMessage  String?        @map("error_message")
+  createdAt     DateTime       @default(now()) @map("created_at")
+
+  @@index([runId])
+  @@index([toolName])
+  @@map("tool_calls")
+}
+
+model RetrievalEvidence {
+  id             String             @id @default(uuid())
+  runId          String             @map("run_id")
+  run            AgentRun           @relation(fields: [runId], references: [id], onDelete: Cascade)
+  eventId        String?            @map("event_id")
+  event          AgentEvent?        @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  sourceType     EvidenceSourceType @map("source_type")
+  sourceId       String             @map("source_id")
+  title          String
+  contentSnippet String             @map("content_snippet")
+  score          Float?
+  metadata       Json               @default("{}")
+  createdAt      DateTime           @default(now()) @map("created_at")
+
+  @@index([runId])
+  @@index([sourceType, sourceId])
+  @@map("retrieval_evidences")
+}
+
+model EvaluationDataset {
+  id          String           @id @default(uuid())
+  name        String
+  description String           @default("")
+  version     String           @default("v1")
+  cases       EvaluationCase[]
+  runs        EvaluationRun[]
+  createdAt   DateTime         @default(now()) @map("created_at")
+  updatedAt   DateTime         @updatedAt @map("updated_at")
+
+  @@map("evaluation_datasets")
+}
+
+model EvaluationRun {
+  id           String              @id @default(uuid())
+  datasetId    String              @map("dataset_id")
+  dataset      EvaluationDataset   @relation(fields: [datasetId], references: [id])
+  agentVersion String              @map("agent_version")
+  status       EvaluationRunStatus @default(PENDING)
+  successRate  Float?              @map("success_rate")
+  accuracy     Float?
+  avgLatencyMs Int?                @map("avg_latency_ms")
+  avgToolCalls Float?              @map("avg_tool_calls")
+  totalTokens  Int                 @default(0) @map("total_tokens")
+  createdAt    DateTime            @default(now()) @map("created_at")
+  completedAt  DateTime?           @map("completed_at")
+
+  @@index([datasetId])
+  @@map("evaluation_runs")
+}
+
+model EvaluationCase {
+  id             String            @id @default(uuid())
+  datasetId      String            @map("dataset_id")
+  dataset        EvaluationDataset @relation(fields: [datasetId], references: [id])
+  input          Json
+  expectedOutput Json?             @map("expected_output")
+  tags           String[]          @default([])
+  createdAt      DateTime          @default(now()) @map("created_at")
+
+  @@index([datasetId])
+  @@map("evaluation_cases")
+}
+
+model SystemConfig {
+  key         String   @id
+  value       Json
+  category    String   @default("agent")
+  description String   @default("")
+  updatedBy   String?  @map("updated_by")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("system_configs")
+}
+
+model AuditLog {
+  id           String      @id @default(uuid())
+  actorId      String?     @map("actor_id")
+  actor        User?       @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  action       AuditAction
+  resourceType String      @map("resource_type")
+  resourceId   String      @map("resource_id")
+  before       Json?
+  after        Json?
+  requestId    String?     @map("request_id")
+  ipAddress    String?     @map("ip_address")
+  createdAt    DateTime    @default(now()) @map("created_at")
+
+  @@index([actorId])
+  @@index([resourceType, resourceId])
+  @@map("audit_logs")
+}

@@ -16,6 +16,11 @@ import java.util.Map;
 public class RecommendationResponse {
     private String requestId;
     private String userId;
+    private String platform;
+    private String region;
+    private String country;
+    private String locale;
+    private String currency;
     private List<Product> products;
     private List<Map<String, String>> marketingCopies;
     private String experimentGroup;

@@ -69,7 +69,7 @@ class ProductRecAgent(BaseAgent):
             base_url=settings.llm_base_url,
             model=settings.llm_model,
             temperature=0.3,
-            max_tokens=512,
+            max_tokens=128,
         )
         self.vector_store: Any = None  # injected in Phase 2
 

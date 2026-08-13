@@ -50,6 +50,11 @@ class RecommendationRequest(BaseModel):
     context: dict[str, Any] = Field(default_factory=dict)
 
 
+class BehaviorEventRequest(BaseModel):
+    behavior_type: str = Field(pattern="^(view|click|purchase|favorite|cart)$")
+    item_id: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
 class AgentResult(BaseModel):
     agent_name: str
     success: bool = True

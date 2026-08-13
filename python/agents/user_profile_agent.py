@@ -49,7 +49,7 @@ class UserProfileAgent(BaseAgent):
             base_url=settings.llm_base_url,
             model=settings.llm_model,
             temperature=0.3,
-            max_tokens=1024,
+            max_tokens=512,
         )
         self.feature_store: Any = None  # injected in Phase 2
 
