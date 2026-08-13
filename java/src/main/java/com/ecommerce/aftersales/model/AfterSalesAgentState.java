@@ -1,0 +1,23 @@
+package com.ecommerce.aftersales.model;
+
+import com.ecommerce.aftersales.entity.AfterSalesTicketEntity;
+import lombok.Getter;
+import lombok.RequiredArgsConstructor;
+import lombok.Setter;
+
+import java.util.ArrayList;
+import java.util.List;
+
+@Getter
+@Setter
+@RequiredArgsConstructor
+public class AfterSalesAgentState {
+    private final String runId;
+    private final AfterSalesTicketEntity ticket;
+    private AfterSalesTypes.OrderSnapshot order;
+    private AfterSalesTypes.ShipmentSnapshot shipment;
+    private AfterSalesTypes.PolicyEvidence policy;
+    private AfterSalesTypes.CompensationResult compensation;
+    private String proposalId;
+    private final List<String> evidenceIds = new ArrayList<>();
+}
