@@ -4,23 +4,25 @@ spring:
   ai:
     openai:
       api-key: ${ECOM_LLM_API_KEY:your_api_key_here}
-      base-url: ${ECOM_LLM_BASE_URL:https://api.minimax.chat/v1}
+      base-url: ${ECOM_LLM_BASE_URL:https://api.deepseek.com}
       chat:
         options:
-          model: ${ECOM_LLM_MODEL:MiniMax-M1}
-          temperature: 0.7
+          model: ${ECOM_LLM_MODEL:deepseek-v4-flash}
+          temperature: 0.3
   datasource:
-    url: jdbc:h2:mem:ecommerce
-    driver-class-name: org.h2.Driver
+    url: ${SPRING_DATASOURCE_URL:jdbc:h2:mem:ecommerce}
+    username: ${SPRING_DATASOURCE_USERNAME:sa}
+    password: ${SPRING_DATASOURCE_PASSWORD:}
+    driver-class-name: ${SPRING_DATASOURCE_DRIVER_CLASS_NAME:org.h2.Driver}
   jpa:
     hibernate:
-      ddl-auto: update
+      ddl-auto: ${SPRING_JPA_HIBERNATE_DDL_AUTO:update}
 
 server:
   port: 8080
+
 agent:
   guard:
-    # Upper bound for concurrent recommendation / tool-loop / agent-loop requests.
     max-concurrent-runs: ${ECOM_AGENT_MAX_CONCURRENT_RUNS:12}
   executor:
     core-size: ${ECOM_AGENT_EXECUTOR_CORE_SIZE:8}
@@ -30,3 +32,6 @@ agent:
     core-size: ${ECOM_AGENT_SSE_CORE_SIZE:2}
     max-size: ${ECOM_AGENT_SSE_MAX_SIZE:6}
     queue-capacity: ${ECOM_AGENT_SSE_QUEUE_CAPACITY:16}
+  aftersales:
+    demo-step-delay-ms: ${ECOM_AFTERSALES_STEP_DELAY_MS:220}
+    retry-scan-ms: ${ECOM_AFTERSALES_RETRY_SCAN_MS:5000}

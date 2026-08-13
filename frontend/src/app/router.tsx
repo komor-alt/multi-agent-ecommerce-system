@@ -10,6 +10,7 @@ import { UsersPage } from "../pages/users/UsersPage";
 import { OrdersPage } from "../pages/orders/OrdersPage";
 import { EvaluationsPage } from "../pages/evaluations/EvaluationsPage";
 import { SettingsPage } from "../pages/settings/SettingsPage";
+import { AfterSalesPage } from "../pages/after-sales/AfterSalesPage";
 
 const router = createBrowserRouter([
   {
@@ -21,6 +22,7 @@ const router = createBrowserRouter([
       { path: "runs", element: <RunsPage /> },
       { path: "runs/:runId", element: <RunDetailPage /> },
       { path: "recommendations", element: <RecommendationConsole /> },
+      { path: "after-sales", element: <AfterSalesPage /> },
       { path: "products", element: <ProductsPage /> },
       { path: "products/:productId", element: <ProductDetailPage /> },
       { path: "users", element: <UsersPage /> },

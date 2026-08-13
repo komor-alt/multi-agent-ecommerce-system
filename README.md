@@ -9,6 +9,33 @@
 
 ---
 
+## 售后 Agent 闭环
+
+项目新增了一个聚焦跨境物流异常的 Java 售后 Agent MVP：
+
+```text
+创建工单 → 核验订单 → 查询物流 → 检索版本化政策
+→ Java 规则计算补偿 → 生成待审批方案 → 人工审批 → 幂等执行
+```
+
+演示订单为 `O-VN-5002`。Agent 只开放查询、检索、规则计算和方案生成工具；补偿金额由可信订单数据与政策版本确定性计算，退款、补发等副作用操作不暴露给模型。审批后由 Java 服务创建带数据库唯一约束的执行任务，并提供失败重试、死信状态、审计记录以及支持历史回放的 SSE 决策轨迹。
+
+主要入口：
+
+- React 工作台：`/after-sales`
+- Gateway API：`/api/v1/after-sales/**`
+- Java 业务模块：`java/src/main/java/com/ecommerce/aftersales/`
+- 回归测试：`java/src/test/java/com/ecommerce/aftersales/`
+
+完整容器启动：
+
+```bash
+docker compose up --build
+```
+
+启动后访问 `http://localhost:5173/after-sales`。
+
+
 ## 📖 目录
 
 1. [这个项目是什么？](#-这个项目是什么)

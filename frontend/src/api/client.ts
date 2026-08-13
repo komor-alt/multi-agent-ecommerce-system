@@ -9,6 +9,10 @@ function resolveApiBaseUrl() {
 
 const API_BASE_URL = resolveApiBaseUrl();
 
+export function getApiBaseUrl() {
+  return API_BASE_URL;
+}
+
 export class ApiClientError extends Error {
   constructor(
     message: string,

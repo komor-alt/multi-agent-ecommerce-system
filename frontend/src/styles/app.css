@@ -123,3 +123,71 @@
   font-size: 12px;
   line-height: 1.55;
 }
+.page-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.after-sales-page .decision-trace {
+  margin-top: 12px;
+  background: #ffffff;
+}
+
+.after-sales-page .decision-trace .ant-collapse-content-box {
+  max-height: 430px;
+  overflow-y: auto;
+  padding-top: 18px;
+}
+
+.after-sales-detail-card {
+  min-height: 430px;
+}
+
+.after-sales-detail-card .ant-card-body {
+  min-height: 370px;
+}
+
+.decision-event {
+  display: grid;
+  gap: 7px;
+}
+
+.evidence-list {
+  margin-top: 2px;
+}
+
+.evidence-list code {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.shipment-timeline {
+  margin-top: 24px;
+}
+
+.proposal-amount {
+  border-left: 3px solid #1677ff;
+  padding-left: 14px;
+}
+
+.proposal-amount h2 {
+  margin: 3px 0 0;
+}
+
+@media (max-width: 768px) {
+  .page-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .after-sales-detail-card {
+    min-height: auto;
+  }
+
+  .after-sales-detail-card .ant-card-body {
+    min-height: auto;
+  }
+}

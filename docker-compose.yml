@@ -49,6 +49,26 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  java-agent-service:
+    build:
+      context: ./java
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/ecommerce_agent
+      SPRING_DATASOURCE_USERNAME: ecommerce
+      SPRING_DATASOURCE_PASSWORD: ecommerce
+      SPRING_DATASOURCE_DRIVER_CLASS_NAME: org.postgresql.Driver
+      SPRING_JPA_HIBERNATE_DDL_AUTO: update
+      ECOM_LLM_API_KEY: ${ECOM_LLM_API_KEY:-your_api_key_here}
+      ECOM_LLM_BASE_URL: ${ECOM_LLM_BASE_URL:-https://api.deepseek.com}
+      ECOM_LLM_MODEL: ${ECOM_LLM_MODEL:-deepseek-v4-flash}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
   gateway:
     build:
       context: ./backend
@@ -59,6 +79,7 @@ services:
       PORT: 3000
       DATABASE_URL: postgresql://ecommerce:ecommerce@postgres:5432/ecommerce_agent?schema=public
       AGENT_SERVICE_BASE_URL: http://agent-service:8000
+      JAVA_AGENT_SERVICE_BASE_URL: http://java-agent-service:8080
       JWT_SECRET: ${JWT_SECRET:-replace-me-in-local-env}
     depends_on:
       postgres:
@@ -66,6 +87,8 @@ services:
       redis:
         condition: service_healthy
       agent-service:
+        condition: service_started
+      java-agent-service:
         condition: service_started
     restart: unless-stopped
 
@@ -77,6 +100,7 @@ services:
       - "5173:5173"
     environment:
       VITE_API_BASE_URL: http://localhost:3000/api/v1
+      VITE_ASSET_BASE: "/"
     depends_on:
       - gateway
     restart: unless-stopped
@@ -84,4 +108,3 @@ services:
 volumes:
   postgres_data:
   redis_data:
-

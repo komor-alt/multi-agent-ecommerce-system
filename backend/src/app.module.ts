@@ -12,6 +12,7 @@ import { RecommendationsModule } from "./modules/recommendations/recommendations
 import { AgentRunsModule } from "./modules/agent-runs/agent-runs.module";
 import { EvaluationsModule } from "./modules/evaluations/evaluations.module";
 import { SettingsModule } from "./modules/settings/settings.module";
+import { AfterSalesModule } from "./modules/after-sales/after-sales.module";
 
 @Module({
   imports: [
@@ -28,6 +29,7 @@ import { SettingsModule } from "./modules/settings/settings.module";
     AgentRunsModule,
     EvaluationsModule,
     SettingsModule,
+    AfterSalesModule,
   ],
 })
 export class AppModule {}

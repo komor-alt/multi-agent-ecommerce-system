@@ -3,7 +3,7 @@ import react from "@vitejs/plugin-react";
 import { resolve } from "node:path";
 
 export default defineConfig({
-  base: "/ui-static/",
+  base: process.env.VITE_ASSET_BASE || "/ui-static/",
   plugins: [react()],
   server: {
     proxy: {
