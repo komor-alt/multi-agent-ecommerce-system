@@ -1,6 +1,10 @@
 import { Body, Controller, Get, Headers, Param, Post, Query, Sse } from "@nestjs/common";
 import { AfterSalesService } from "./after-sales.service";
-import { CreateAfterSalesTicketDto, ReviewAfterSalesProposalDto } from "./dto/after-sales.dto";
+import {
+  AnalyzeAfterSalesTicketDto,
+  CreateAfterSalesTicketDto,
+  ReviewAfterSalesProposalDto,
+} from "./dto/after-sales.dto";
 
 @Controller("after-sales")
 export class AfterSalesController {
@@ -23,9 +27,15 @@ export class AfterSalesController {
   }
 
   @Post("tickets/:ticketId/analyze")
-  async analyzeTicket(@Param("ticketId") ticketId: string) {
-    const data = await this.service.analyzeTicket(ticketId);
+  async analyzeTicket(@Param("ticketId") ticketId: string, @Body() dto: AnalyzeAfterSalesTicketDto) {
+    const data = await this.service.analyzeTicket(ticketId, dto);
     return this.success(data, String(data.runId || ticketId));
+  }
+
+  @Post("runs/:runId/start")
+  async startRun(@Param("runId") runId: string) {
+    const data = await this.service.startRun(runId);
+    return this.success(data, runId);
   }
 
   @Sse("runs/:runId/stream")

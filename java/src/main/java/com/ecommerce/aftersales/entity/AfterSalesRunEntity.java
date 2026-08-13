@@ -30,6 +30,9 @@ public class AfterSalesRunEntity {
     private Instant startedAt;
     private Instant completedAt;
 
+    /** 分析总耗时（毫秒），由单调时钟测得，完成或失败时写入。 */
+    private Long durationMs;
+
     @Lob
     private String finalAnswerJson;
 }

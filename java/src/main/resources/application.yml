@@ -33,5 +33,5 @@ agent:
     max-size: ${ECOM_AGENT_SSE_MAX_SIZE:6}
     queue-capacity: ${ECOM_AGENT_SSE_QUEUE_CAPACITY:16}
   aftersales:
-    demo-step-delay-ms: ${ECOM_AFTERSALES_STEP_DELAY_MS:220}
+    demo-step-delay-ms: ${ECOM_AFTERSALES_STEP_DELAY_MS:0}
     retry-scan-ms: ${ECOM_AFTERSALES_RETRY_SCAN_MS:5000}

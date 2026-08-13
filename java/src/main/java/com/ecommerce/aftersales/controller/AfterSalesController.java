@@ -37,8 +37,15 @@ public class AfterSalesController {
     }
 
     @PostMapping("/tickets/{ticketId}/analyze")
-    public Map<String, Object> analyze(@PathVariable String ticketId) {
-        return afterSalesService.analyze(ticketId);
+    public Map<String, Object> analyze(
+            @PathVariable String ticketId,
+            @RequestParam(value = "deferred", required = false, defaultValue = "false") boolean deferred) {
+        return afterSalesService.analyze(ticketId, deferred);
+    }
+
+    @PostMapping("/runs/{runId}/start")
+    public Map<String, Object> startRun(@PathVariable String runId) {
+        return afterSalesService.start(runId);
     }
 
     @GetMapping(value = "/runs/{runId}/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)

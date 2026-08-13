@@ -1,4 +1,4 @@
-import { IsOptional, IsString, MinLength } from "class-validator";
+import { IsBoolean, IsOptional, IsString, MinLength } from "class-validator";
 
 export class CreateAfterSalesTicketDto {
   @IsString()
@@ -8,6 +8,12 @@ export class CreateAfterSalesTicketDto {
   @IsString()
   @MinLength(5)
   customerMessage!: string;
+}
+
+export class AnalyzeAfterSalesTicketDto {
+  @IsOptional()
+  @IsBoolean()
+  deferred?: boolean;
 }
 
 export class ReviewAfterSalesProposalDto {

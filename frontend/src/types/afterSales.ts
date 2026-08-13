@@ -16,6 +16,8 @@ export type AfterSalesEvent = {
     arguments?: Record<string, unknown>;
     observation?: unknown;
     evidenceIds?: string[];
+    latencyMs?: number;
+    durationMs?: number;
     finalAnswer?: AfterSalesFinalAnswer;
     [key: string]: unknown;
   };
@@ -144,6 +146,7 @@ export type AfterSalesTicket = {
     stepCount: number;
     maxSteps: number;
     stopReason?: string;
+    durationMs?: number;
     finalAnswer?: AfterSalesFinalAnswer;
   };
   events?: AfterSalesEvent[];
@@ -153,5 +156,18 @@ export type AnalyzeTicketResponse = {
   ticketId: string;
   runId: string;
   status: string;
+  runStatus?: RunStatus;
   streamUrl: string;
+};
+
+export type RunStatus = "READY" | "RUNNING" | "COMPLETED" | "FAILED";
+
+export type StartRunResponse = {
+  runId: string;
+  ticketId: string;
+  status: RunStatus;
+  startedAt?: string;
+  completedAt?: string;
+  durationMs?: number;
+  stopReason?: string;
 };

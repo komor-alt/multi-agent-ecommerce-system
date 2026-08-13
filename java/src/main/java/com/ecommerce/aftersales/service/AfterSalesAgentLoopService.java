@@ -40,7 +40,7 @@ public class AfterSalesAgentLoopService {
             AfterSalesRunRepository runRepository,
             AfterSalesTicketRepository ticketRepository,
             ObjectMapper objectMapper,
-            @Value("${agent.aftersales.demo-step-delay-ms:220}") long stepDelayMs) {
+            @Value("${agent.aftersales.demo-step-delay-ms:0}") long stepDelayMs) {
         this.toolExecutor = toolExecutor;
         this.eventService = eventService;
         this.runRepository = runRepository;
@@ -54,6 +54,9 @@ public class AfterSalesAgentLoopService {
         AfterSalesTicketEntity ticket = ticketRepository.findById(ticketId).orElseThrow();
         AfterSalesAgentState state = new AfterSalesAgentState(runId, ticket);
         Set<String> fingerprints = new HashSet<>();
+        // 单调时钟测量分析总耗时：不受系统时间跳变影响。总耗时是用户感知的完整 run 时长
+        // （含演示等待），工具事件里的 latencyMs 才不含演示等待。
+        long startedNanos = System.nanoTime();
 
         eventService.append(runId, "run_started", "售后分析开始", "running",
                 "工单进入受限 Agent Loop。", Map.of(
@@ -67,7 +70,7 @@ public class AfterSalesAgentLoopService {
             for (int step = 1; step <= run.getMaxSteps(); step++) {
                 String action = nextAction(state);
                 if (action == null) {
-                    complete(run, ticket, state, step - 1);
+                    complete(run, ticket, state, step - 1, startedNanos);
                     return;
                 }
                 if (!TOOL_WHITELIST.contains(action)) {
@@ -107,14 +110,19 @@ public class AfterSalesAgentLoopService {
             }
             throw new IllegalStateException("MAX_STEPS_EXCEEDED");
         } catch (Exception error) {
+            long durationMs = elapsedMs(startedNanos);
             run.setStatus("FAILED");
             run.setStopReason(error.getMessage());
             run.setCompletedAt(Instant.now());
+            run.setDurationMs(durationMs);
             runRepository.save(run);
             ticket.setStatus(AfterSalesTypes.TicketStatus.FAILED);
             ticketRepository.save(ticket);
             eventService.append(runId, "error", "售后分析失败", "failed",
-                    error.getMessage(), Map.of("summary", error.getMessage()));
+                    error.getMessage(), Map.of(
+                            "summary", error.getMessage(),
+                            "durationMs", durationMs
+                    ));
             eventService.complete(runId);
         }
     }
@@ -123,7 +131,9 @@ public class AfterSalesAgentLoopService {
             AfterSalesRunEntity run,
             AfterSalesTicketEntity ticket,
             AfterSalesAgentState state,
-            int stepCount) {
+            int stepCount,
+            long startedNanos) {
+        long durationMs = elapsedMs(startedNanos);
         Map<String, Object> finalAnswer = new LinkedHashMap<>();
         finalAnswer.put("ticketId", ticket.getId());
         finalAnswer.put("order", state.getOrder());
@@ -139,6 +149,7 @@ public class AfterSalesAgentLoopService {
         run.setStepCount(stepCount);
         run.setStopReason("ACTION_PROPOSAL_CREATED");
         run.setCompletedAt(Instant.now());
+        run.setDurationMs(durationMs);
         run.setFinalAnswerJson(writeJson(finalAnswer));
         runRepository.save(run);
 
@@ -148,9 +159,14 @@ public class AfterSalesAgentLoopService {
         eventService.append(run.getId(), "run_completed", "生成待审批方案", "success",
                 "分析完成，Agent 未执行任何副作用操作。", Map.of(
                         "summary", "补偿方案已生成，等待人工审批。",
+                        "durationMs", durationMs,
                         "finalAnswer", finalAnswer
                 ));
    }
+
+    private long elapsedMs(long startedNanos) {
+        return (System.nanoTime() - startedNanos) / 1_000_000;
+    }
 
     private String nextAction(AfterSalesAgentState state) {
         if (state.getOrder() == null) {

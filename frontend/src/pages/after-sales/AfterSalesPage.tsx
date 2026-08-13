@@ -29,7 +29,7 @@ import {
   Timeline,
   Typography,
 } from "antd";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   analyzeAfterSalesTicket,
   approveAfterSalesProposal,
@@ -39,8 +39,10 @@ import {
   parseAfterSalesEvent,
   rejectAfterSalesProposal,
   retryAfterSalesExecution,
+  startAfterSalesRun,
 } from "../../api/afterSales";
 import type { AfterSalesEvent, AfterSalesTicket } from "../../types/afterSales";
+import { formatDuration } from "../../utils/format";
 
 const streamEventTypes = [
   "run_started",
@@ -67,6 +69,16 @@ export function AfterSalesPage() {
   const [runId, setRunId] = useState("");
   const [liveEvents, setLiveEvents] = useState<AfterSalesEvent[]>([]);
   const [streamStatus, setStreamStatus] = useState<"idle" | "connecting" | "live" | "closed" | "error">("idle");
+  const [analysisStartedAt, setAnalysisStartedAt] = useState<number | null>(null);
+  const [tickNow, setTickNow] = useState(0);
+  const [backendDurationMs, setBackendDurationMs] = useState<number | null>(null);
+  // 「先订阅、后启动」：stream_ready 握手后调用 start；重连/重试通过 epoch 重建 EventSource。
+  const [streamEpoch, setStreamEpoch] = useState(0);
+  const [startError, setStartError] = useState<string | null>(null);
+  const sourceRef = useRef<EventSource | null>(null);
+  const lastEventIdRef = useRef<string | undefined>(undefined);
+  const closedRef = useRef(false);
+  const reconnectAttemptsRef = useRef(0);
 
   const ticketQuery = useQuery({
     queryKey: ["after-sales-ticket", ticketId],
@@ -74,10 +86,28 @@ export function AfterSalesPage() {
     enabled: Boolean(ticketId),
   });
 
+  const ticket = ticketQuery.data;
+
+  // 后端 durationMs（run_completed / error 事件或工单详情 run 对象）优先；
+  // 否则在分析期间用本地时钟实时递增估算。
+  const finalDurationMs = backendDurationMs ?? ticket?.run?.durationMs ?? null;
+  const liveDurationMs = analysisStartedAt != null ? tickNow - analysisStartedAt : null;
+  const analysisDurationMs = finalDurationMs != null ? finalDurationMs : liveDurationMs;
+
+  // 仅当「没有后端终值」且「分析仍在进行」时启动本地计时；
+  // 收到终值或流结束（closed/error）后 cleanup 停止，避免泄漏。
+  const isAnalyzing = streamStatus !== "closed" && streamStatus !== "error";
+  useEffect(() => {
+    if (analysisStartedAt == null || finalDurationMs != null || !isAnalyzing) return;
+    const timer = window.setInterval(() => setTickNow(Date.now()), 200);
+    return () => window.clearInterval(timer);
+  }, [analysisStartedAt, finalDurationMs, isAnalyzing]);
+
   const createMutation = useMutation({
     mutationFn: async () => {
       const ticket = await createAfterSalesTicket({ orderId, customerMessage });
-      const analysis = await analyzeAfterSalesTicket(ticket.id);
+      // deferred=true：只创建 READY run 并进入 ANALYZING，等 stream_ready 握手后再启动。
+      const analysis = await analyzeAfterSalesTicket(ticket.id, { deferred: true });
       return { ticket, analysis };
     },
     onSuccess: ({ ticket, analysis }) => {
@@ -85,8 +115,38 @@ export function AfterSalesPage() {
       setRunId(analysis.runId);
       setLiveEvents([]);
       setStreamStatus("connecting");
+      setAnalysisStartedAt(null);
+      setBackendDurationMs(null);
+      setTickNow(0);
+      setStartError(null);
+      closedRef.current = false;
+      reconnectAttemptsRef.current = 0;
+      lastEventIdRef.current = undefined;
+      setStreamEpoch((epoch) => epoch + 1);
     },
   });
+
+  // stream_ready 握手后调用 start；后端原子认领 READY->RUNNING，重连时重复调用是幂等的。
+  const startRun = useCallback(async () => {
+    try {
+      await startAfterSalesRun(runId);
+      setStartError(null);
+    } catch (error) {
+      setStartError(errorMessage(error));
+      setStreamStatus("error");
+      closedRef.current = true;
+      sourceRef.current?.close();
+      refreshTicket(ticketId, queryClient);
+    }
+  }, [queryClient, runId, ticketId]);
+
+  const retryStart = () => {
+    setStartError(null);
+    closedRef.current = false;
+    reconnectAttemptsRef.current = 0;
+    setStreamStatus("connecting");
+    setStreamEpoch((epoch) => epoch + 1);
+  };
 
   const reviewMutation = useMutation({
     mutationFn: async (decision: "approve" | "reject") => {
@@ -107,19 +167,40 @@ export function AfterSalesPage() {
 
   useEffect(() => {
     if (!runId) return;
-    const source = createAfterSalesEventSource(runId);
+    // 重连时携带 Last-Event-ID 只回放缺失事件；服务端仍会先发 stream_ready，
+    // 客户端再次调用 start —— 幂等，安全。
+    const source = createAfterSalesEventSource(runId, lastEventIdRef.current);
+    sourceRef.current = source;
     setStreamStatus("connecting");
 
     const handleEvent = (raw: Event) => {
       try {
         const event = parseAfterSalesEvent(raw as MessageEvent<string>);
+        if (event.type === "stream_ready") {
+          // 握手事件：只作「流已就绪、可以启动」的信号，不进入决策时间线。
+          reconnectAttemptsRef.current = 0;
+          setStreamStatus("live");
+          void startRun();
+          return;
+        }
+        if (event.eventId) lastEventIdRef.current = event.eventId;
         setStreamStatus("live");
         setLiveEvents((current) => appendEvent(current, event));
+        if (event.type === "run_started") {
+          // run_started 之后才开始本地计时。
+          setAnalysisStartedAt(Date.now());
+          setTickNow(Date.now());
+          setBackendDurationMs(null);
+        }
+        if (typeof event.data.durationMs === "number") {
+          setBackendDurationMs(event.data.durationMs);
+        }
         if (event.type === "run_completed") {
           refreshTicket(ticketId, queryClient);
         }
         const rejected = event.type === "approval_recorded" && event.data.decision === "REJECTED";
         if (event.type === "execution_completed" || event.type === "error" || rejected) {
+          closedRef.current = true;
           setStreamStatus("closed");
           source.close();
           refreshTicket(ticketId, queryClient);
@@ -132,15 +213,26 @@ export function AfterSalesPage() {
     source.onopen = () => setStreamStatus("live");
     source.onmessage = handleEvent;
     streamEventTypes.forEach((type) => source.addEventListener(type, handleEvent));
+    source.addEventListener("stream_ready", handleEvent);
     source.onerror = () => {
-      setStreamStatus((current) => current === "closed" ? current : "error");
-      source.close();
-      refreshTicket(ticketId, queryClient);
+      if (closedRef.current) return;
+      const attempts = reconnectAttemptsRef.current;
+      if (attempts >= 3) {
+        closedRef.current = true;
+        setStreamStatus("error");
+        refreshTicket(ticketId, queryClient);
+        return;
+      }
+      reconnectAttemptsRef.current = attempts + 1;
+      setStreamStatus("connecting");
+      window.setTimeout(() => setStreamEpoch((epoch) => epoch + 1), 600 * attempts + 600);
     };
-    return () => source.close();
-  }, [queryClient, runId, ticketId]);
+    return () => {
+      sourceRef.current = null;
+      source.close();
+    };
+  }, [queryClient, runId, startRun, streamEpoch, ticketId]);
 
-  const ticket = ticketQuery.data;
   const events = useMemo(
     () => [...(ticket?.events || []), ...liveEvents].reduce<AfterSalesEvent[]>(appendEvent, []),
     [liveEvents, ticket?.events],
@@ -169,6 +261,16 @@ export function AfterSalesPage() {
           type="error"
           message="售后链路暂不可用"
           description={errorMessage(createMutation.error || ticketQuery.error || reviewMutation.error)}
+        />
+      ) : null}
+
+      {startError ? (
+        <Alert
+          showIcon
+          type="error"
+          message="启动 Agent 失败"
+          description={startError}
+          action={<Button size="small" danger onClick={retryStart}>重试启动</Button>}
         />
       ) : null}
 
@@ -207,17 +309,25 @@ export function AfterSalesPage() {
 
         <Col xs={24} xl={16}>
           <Row gutter={[12, 12]}>
-            <Col xs={12} lg={6}>
+            <Col xs={12} md={8} lg={{ flex: "20%" }}>
               <Card size="small"><Statistic title="工单状态" value={ticketStatusLabel(ticket?.status)} /></Card>
             </Col>
-            <Col xs={12} lg={6}>
+            <Col xs={12} md={8} lg={{ flex: "20%" }}>
               <Card size="small"><Statistic title="执行步骤" value={ticket?.run?.stepCount || events.filter((item) => item.type === "tool_completed" || item.type === "retrieval_completed").length} suffix="/ 5" /></Card>
             </Col>
-            <Col xs={12} lg={6}>
+            <Col xs={12} md={8} lg={{ flex: "20%" }}>
               <Card size="small"><Statistic title="证据数量" value={finalAnswer?.evidenceIds?.length || proposal?.evidenceIds?.length || 0} /></Card>
             </Col>
-            <Col xs={12} lg={6}>
+            <Col xs={12} md={8} lg={{ flex: "20%" }}>
               <Card size="small"><Statistic title="执行状态" value={executionStatusLabel(execution?.status)} /></Card>
+            </Col>
+            <Col xs={12} md={8} lg={{ flex: "20%" }}>
+              <Card size="small" className="duration-stat">
+                <Statistic
+                  title="本次分析耗时"
+                  value={analysisDurationMs == null ? "—" : formatDuration(analysisDurationMs)}
+                />
+              </Card>
             </Col>
           </Row>
 
@@ -382,6 +492,16 @@ function DecisionTimeline({ events, running }: { events: AfterSalesEvent[]; runn
               <Typography.Text type="secondary">#{event.sequence}</Typography.Text>
             </Space>
             <div className="event-line-summary">{event.data.summary || "-"}</div>
+            {isToolCompletion(event) && event.data.latencyMs != null ? (
+              <Typography.Text type="secondary" className="event-metric">
+                工具耗时 {formatDuration(event.data.latencyMs)}
+              </Typography.Text>
+            ) : null}
+            {isRunTerminal(event) && event.data.durationMs != null ? (
+              <Typography.Text type="secondary" className="event-metric">
+                分析总耗时 {formatDuration(event.data.durationMs)}
+              </Typography.Text>
+            ) : null}
             {event.data.evidenceIds?.length ? (
               <Space wrap className="evidence-list">
                 {event.data.evidenceIds.map((id) => <Typography.Text code key={id}>{id}</Typography.Text>)}
@@ -413,6 +533,14 @@ function ExecutionStatusBlock({ ticket, onRetry }: { ticket?: AfterSalesTicket; 
       )}
     />
   );
+}
+
+function isToolCompletion(event: AfterSalesEvent) {
+  return event.type === "tool_completed" || event.type === "retrieval_completed";
+}
+
+function isRunTerminal(event: AfterSalesEvent) {
+  return event.type === "run_completed" || event.type === "error";
 }
 
 function appendEvent(events: AfterSalesEvent[], next: AfterSalesEvent) {

@@ -154,6 +154,16 @@
   gap: 7px;
 }
 
+.event-metric {
+  color: #6b7280;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.duration-stat .ant-statistic-content {
+  font-variant-numeric: tabular-nums;
+}
+
 .evidence-list {
   margin-top: 2px;
 }

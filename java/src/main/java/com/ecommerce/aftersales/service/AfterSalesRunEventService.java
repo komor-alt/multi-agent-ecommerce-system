@@ -19,6 +19,9 @@ import java.util.concurrent.CopyOnWriteArrayList;
 
 @Service
 public class AfterSalesRunEventService {
+    /** 握手事件：SSE 建立后立即发送，不落库、不带 id（不影响 Last-Event-ID），不计入时间线。 */
+    static final String STREAM_READY_EVENT = "stream_ready";
+
     private final AfterSalesRunEventRepository eventRepository;
     private final AfterSalesRunRepository runRepository;
     private final ObjectMapper objectMapper;
@@ -66,7 +69,17 @@ public class AfterSalesRunEventService {
         if (!runRepository.existsById(runId)) {
             throw new IllegalArgumentException("AGENT_RUN_NOT_FOUND");
         }
-        SseEmitter emitter = new SseEmitter(0L);
+        SseEmitter emitter = createEmitter();
+        try {
+            // 握手事件：连接建立后立即发送以刷新响应，让客户端尽早收到「流已就绪」信号。
+            // 不落库、不带 id（浏览器不会更新 Last-Event-ID），不影响持久化 sequence 与时间线计数。
+            emitter.send(SseEmitter.event()
+                    .name(STREAM_READY_EVENT)
+                    .data(streamReadyPayload(runId)));
+        } catch (IOException error) {
+            emitter.completeWithError(error);
+            return emitter;
+        }
         Object lock = runLocks.computeIfAbsent(runId, ignored -> new Object());
         synchronized (lock) {
             int lastSequence = resolveLastSequence(runId, lastEventId);
@@ -97,6 +110,22 @@ public class AfterSalesRunEventService {
         emitter.onTimeout(remove);
         emitter.onError(ignored -> remove.run());
         return emitter;
+    }
+
+    /** 测试可覆写：注入能捕获 SSE 帧的 SseEmitter。 */
+    protected SseEmitter createEmitter() {
+        return new SseEmitter(0L);
+    }
+
+    private Map<String, Object> streamReadyPayload(String runId) {
+        return Map.of(
+                "runId", runId,
+                "type", STREAM_READY_EVENT,
+                "name", "实时流已就绪",
+                "status", "running",
+                "timestamp", Instant.now().toString(),
+                "data", Map.of("summary", "SSE 连接已建立，可以启动 Agent 运行。")
+        );
     }
 
     public List<Map<String, Object>> history(String runId) {

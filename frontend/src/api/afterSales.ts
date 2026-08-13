@@ -5,6 +5,7 @@ import type {
   AfterSalesTicket,
   AnalyzeTicketResponse,
   ExecutionJob,
+  StartRunResponse,
 } from "../types/afterSales";
 
 export function listAfterSalesTickets() {
@@ -19,8 +20,12 @@ export function getAfterSalesTicket(ticketId: string) {
   return apiGet<AfterSalesTicket>(`/after-sales/tickets/${encodeURIComponent(ticketId)}`);
 }
 
-export function analyzeAfterSalesTicket(ticketId: string) {
-  return apiPost<AnalyzeTicketResponse>(`/after-sales/tickets/${encodeURIComponent(ticketId)}/analyze`, {});
+export function analyzeAfterSalesTicket(ticketId: string, input: { deferred?: boolean } = {}) {
+  return apiPost<AnalyzeTicketResponse>(`/after-sales/tickets/${encodeURIComponent(ticketId)}/analyze`, input);
+}
+
+export function startAfterSalesRun(runId: string) {
+  return apiPost<StartRunResponse>(`/after-sales/runs/${encodeURIComponent(runId)}/start`, {});
 }
 
 export function approveAfterSalesProposal(

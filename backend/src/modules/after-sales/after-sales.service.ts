@@ -28,8 +28,16 @@ export class AfterSalesService {
     return this.request<Record<string, unknown>>(`/tickets/${encodeURIComponent(ticketId)}`);
   }
 
-  analyzeTicket(ticketId: string) {
-    return this.request<Record<string, unknown>>(`/tickets/${encodeURIComponent(ticketId)}/analyze`, {
+  analyzeTicket(ticketId: string, dto?: { deferred?: boolean }) {
+    const suffix = dto?.deferred ? "?deferred=true" : "";
+    return this.request<Record<string, unknown>>(
+      `/tickets/${encodeURIComponent(ticketId)}/analyze${suffix}`,
+      { method: "POST", body: "{}" },
+    );
+  }
+
+  startRun(runId: string) {
+    return this.request<Record<string, unknown>>(`/runs/${encodeURIComponent(runId)}/start`, {
       method: "POST",
       body: "{}",
     });

@@ -79,7 +79,7 @@ public class AfterSalesService {
         return ticketSummary(ticket);
     }
 
-    public Map<String, Object> analyze(String ticketId) {
+    public Map<String, Object> analyze(String ticketId, boolean deferred) {
         AfterSalesTicketEntity ticket = ticketRepository.findById(ticketId)
                 .orElseThrow(() -> new IllegalArgumentException("TICKET_NOT_FOUND"));
         if (ticket.getStatus() == AfterSalesTypes.TicketStatus.ANALYZING) {
@@ -96,25 +96,59 @@ public class AfterSalesService {
         }
 
         String runId = UUID.randomUUID().toString();
+        String runStatus = deferred ? "READY" : "RUNNING";
         runRepository.save(AfterSalesRunEntity.builder()
                 .id(runId)
                 .ticketId(ticketId)
-                .status("RUNNING")
+                .status(runStatus)
                 .maxSteps(6)
                 .stepCount(0)
-                .startedAt(Instant.now())
+                .startedAt(deferred ? null : Instant.now())
                 .build());
         ticket.setStatus(AfterSalesTypes.TicketStatus.ANALYZING);
         ticket.setCurrentRunId(runId);
         ticketRepository.save(ticket);
 
-        CompletableFuture.runAsync(() -> agentLoopService.run(runId, ticketId), agentExecutor);
+        if (!deferred) {
+            // 立即模式：两个 save 各自提交后才异步启动，Agent 线程一定能读到已提交的 run。
+            CompletableFuture.runAsync(() -> agentLoopService.run(runId, ticketId), agentExecutor);
+        }
         return Map.of(
                 "ticketId", ticketId,
                 "runId", runId,
                 "status", "ANALYZING",
+                "runStatus", runStatus,
                 "streamUrl", "/api/v1/after-sales/runs/" + runId + "/stream"
         );
+    }
+
+    /**
+     * 「先订阅、后启动」的启动入口：原子认领 READY -> RUNNING（startedAt 在认领时写入），
+     * 认领事务提交后才把 run 提交给 agentExecutor，异步线程读到的一定是已提交的 RUNNING。
+     * 并发或重复调用最多启动一次；READY（尚未认领到）/RUNNING/COMPLETED/FAILED 均返回结构化状态。
+     */
+    public Map<String, Object> start(String runId) {
+        int claimed = runRepository.claimReady(runId, Instant.now());
+        if (claimed == 1) {
+            AfterSalesRunEntity run = runRepository.findById(runId)
+                    .orElseThrow(() -> new IllegalArgumentException("AGENT_RUN_NOT_FOUND"));
+            CompletableFuture.runAsync(() -> agentLoopService.run(runId, run.getTicketId()), agentExecutor);
+        }
+        return runStatus(runId);
+    }
+
+    private Map<String, Object> runStatus(String runId) {
+        AfterSalesRunEntity run = runRepository.findById(runId)
+                .orElseThrow(() -> new IllegalArgumentException("AGENT_RUN_NOT_FOUND"));
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("runId", run.getId());
+        result.put("ticketId", run.getTicketId());
+        result.put("status", run.getStatus());
+        result.put("startedAt", run.getStartedAt());
+        result.put("completedAt", run.getCompletedAt());
+        result.put("durationMs", run.getDurationMs());
+        result.put("stopReason", run.getStopReason());
+        return result;
     }
 
     public Map<String, Object> detail(String ticketId) {
@@ -247,6 +281,7 @@ public class AfterSalesService {
         result.put("stopReason", run.getStopReason());
         result.put("startedAt", run.getStartedAt());
         result.put("completedAt", run.getCompletedAt());
+        result.put("durationMs", run.getDurationMs());
         result.put("finalAnswer", readMap(run.getFinalAnswerJson()));
         return result;
     }
