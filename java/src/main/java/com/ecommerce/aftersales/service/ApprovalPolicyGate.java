@@ -10,8 +10,11 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 审批策略 Gate：对 ApprovalService 已用 findByIdForUpdate 锁定的 ActionProposalEntity
@@ -23,14 +26,17 @@ import java.util.Map;
  * 1. proposal PENDING；
  * 2. ticket PENDING_APPROVAL；
  * 3. ticket.currentRunId 对应 run COMPLETED 且 stopReason=ACTION_PROPOSAL_CREATED 且 run.ticketId 匹配；
- * 4. proposal.evidenceIdsJson 必须含 order:/shipment:/policy:/calculation: 四类证据；
- * 5. 解析 run.finalAnswerJson 为可信 OrderSnapshot / ShipmentSnapshot / PolicyEvidence；
- * 6. proposal.policyVersion = finalAnswer policy.version；
- * 7. policy.country=order.country、policy.issueType=ticket.issueType、
+ * 4. 解析 run.finalAnswerJson 为可信 OrderSnapshot / ShipmentSnapshot / PolicyEvidence / evidenceIds；
+ *    evidenceIds 必须是 JSON 字符串数组（非空元素），否则 FINAL_ANSWER_INVALID；
+ * 5. 可信 Run 证据必须含 order:/shipment:/policy:/calculation: 四类证据（APPROVAL_EVIDENCE_INCOMPLETE）；
+ * 6. proposal.evidenceIdsJson 解析为字符串数组后，与可信 Run 证据按集合语义（去重）
+ *    完全相等（APPROVAL_EVIDENCE_SNAPSHOT_MISMATCH）；Proposal 自身不是可信事实来源；
+ * 7. proposal.policyVersion = finalAnswer policy.version；
+ * 8. policy.country=order.country、policy.issueType=ticket.issueType、
  *    policy.effectiveFrom 不晚于 ticket.createdAt（政策上下文一致）；
- * 8. DemoAfterSalesPolicyCatalogService.lookup(order.country, ticket.issueType, ticket.createdAt)
+ * 9. DemoAfterSalesPolicyCatalogService.lookup(order.country, ticket.issueType, ticket.createdAt)
  *    重新匹配历史版本，匹配版本必须与 proposal 一致；
- * 9. CompensationRuleService.calculate(order, shipment, policy) 重算：eligible=true，
+ * 10. CompensationRuleService.calculate(order, shipment, policy) 重算：eligible=true，
  *    amount 以 compareTo 相等、currency/actionType 精确一致。
  */
 @Service
@@ -65,8 +71,9 @@ public class ApprovalPolicyGate {
         requireTicketState(ticket);
         AfterSalesRunEntity run = loadRun(ticket);
         requireRunState(run, proposal);
-        requireEvidenceComplete(proposal);
         FinalAnswer finalAnswer = parseFinalAnswer(run);
+        requireTrustedEvidenceComplete(finalAnswer.evidenceIds);
+        requireSnapshotEquality(proposal, finalAnswer.evidenceIds);
         requirePolicyVersion(proposal, finalAnswer.policy);
         requirePolicyContext(finalAnswer.policy, finalAnswer.order, ticket);
         requireRelookupVersion(proposal, finalAnswer.order, ticket);
@@ -138,27 +145,63 @@ public class ApprovalPolicyGate {
         }
     }
 
-    private void requireEvidenceComplete(ActionProposalEntity proposal) {
-        List<String> evidenceIds = readEvidenceIds(proposal);
+    /** 可信 Run 最终答复中的证据必须覆盖四类前缀；缺失 → APPROVAL_EVIDENCE_INCOMPLETE。 */
+    private static void requireTrustedEvidenceComplete(List<String> trustedEvidenceIds) {
         for (String prefix : REQUIRED_EVIDENCE_PREFIXES) {
-            if (evidenceIds.stream().noneMatch(id -> id.startsWith(prefix))) {
+            if (trustedEvidenceIds.stream().noneMatch(id -> id.startsWith(prefix))) {
                 throw new ApprovalPolicyViolationException(
                         ApprovalPolicyViolationException.APPROVAL_EVIDENCE_INCOMPLETE,
-                        "Proposal evidence is incomplete (missing " + prefix + " evidence).",
-                        "方案证据不完整（缺少 " + prefix + " 证据）。");
+                        "Trusted run evidence is incomplete (missing " + prefix + " evidence).",
+                        "可信运行证据不完整（缺少 " + prefix + " 证据）。");
             }
         }
     }
 
-    /** 解析提案证据清单；不可解析（空/非法 JSON）一律按证据不完整处理。 */
-    private List<String> readEvidenceIds(ActionProposalEntity proposal) {
+    /**
+     * Proposal 证据快照必须与可信 Run 证据完全一致：两者均按集合语义归一化
+     * （去重 / 忽略顺序）后比较；Proposal 缺证据、多出伪造证据或替换证据 ID 均拒绝。
+     */
+    private void requireSnapshotEquality(ActionProposalEntity proposal, List<String> trustedEvidenceIds) {
+        Set<String> trustedEvidence = new HashSet<>(trustedEvidenceIds);
+        Set<String> proposalEvidence = readProposalEvidenceIds(proposal);
+        if (!trustedEvidence.equals(proposalEvidence)) {
+            throw new ApprovalPolicyViolationException(
+                    ApprovalPolicyViolationException.APPROVAL_EVIDENCE_SNAPSHOT_MISMATCH,
+                    "Proposal evidence snapshot does not match the trusted run evidence.",
+                    "方案证据快照与可信运行证据不一致。");
+        }
+    }
+
+    /**
+     * 解析提案证据快照为字符串数组；不可解析（空/非法 JSON）、非数组或含非字符串元素，
+     * 一律按证据不完整处理 —— 无法与可信 Run 证据比较的提案快照不得参与审批。
+     */
+    private Set<String> readProposalEvidenceIds(ActionProposalEntity proposal) {
         try {
-            List<String> evidenceIds = objectMapper.readValue(
-                    proposal.getEvidenceIdsJson(), new TypeReference<>() {
+            List<?> elements = objectMapper.readValue(
+                    proposal.getEvidenceIdsJson(), new TypeReference<List<Object>>() {
                     });
-            return evidenceIds == null ? List.of() : evidenceIds;
+            if (elements == null) {
+                return Set.of();
+            }
+            Set<String> evidenceIds = new HashSet<>();
+            for (Object element : elements) {
+                if (!(element instanceof String id)) {
+                    throw new ApprovalPolicyViolationException(
+                            ApprovalPolicyViolationException.APPROVAL_EVIDENCE_INCOMPLETE,
+                            "Proposal evidence snapshot is not a string array.",
+                            "方案证据快照不是字符串数组。");
+                }
+                evidenceIds.add(id);
+            }
+            return evidenceIds;
+        } catch (ApprovalPolicyViolationException error) {
+            throw error;
         } catch (Exception error) {
-            return List.of();
+            throw new ApprovalPolicyViolationException(
+                    ApprovalPolicyViolationException.APPROVAL_EVIDENCE_INCOMPLETE,
+                    "Proposal evidence snapshot is missing or unreadable.",
+                    "方案证据快照缺失或无法解析。");
         }
     }
 
@@ -177,12 +220,32 @@ public class ApprovalPolicyGate {
             return new FinalAnswer(
                     parseSnapshot(finalAnswer, "order", AfterSalesTypes.OrderSnapshot.class),
                     parseSnapshot(finalAnswer, "shipment", AfterSalesTypes.ShipmentSnapshot.class),
-                    parseSnapshot(finalAnswer, "policy", AfterSalesTypes.PolicyEvidence.class));
+                    parseSnapshot(finalAnswer, "policy", AfterSalesTypes.PolicyEvidence.class),
+                    parseEvidenceIds(finalAnswer));
         } catch (ApprovalPolicyViolationException error) {
             throw error;
         } catch (Exception error) {
             throw invalidFinalAnswer();
         }
+    }
+
+    /**
+     * 解析可信 evidenceIds：必须是非 null 的 JSON 字符串数组，且每个元素都是非空白字符串；
+     * 缺失 / 非数组 / 含非字符串 / 含 null / 空白字符串 → FINAL_ANSWER_INVALID。
+     */
+    private static List<String> parseEvidenceIds(Map<String, Object> finalAnswer) {
+        Object raw = finalAnswer.get("evidenceIds");
+        if (!(raw instanceof List<?> list)) {
+            throw invalidFinalAnswer();
+        }
+        List<String> evidenceIds = new ArrayList<>(list.size());
+        for (Object element : list) {
+            if (!(element instanceof String id) || id.isBlank()) {
+                throw invalidFinalAnswer();
+            }
+            evidenceIds.add(id);
+        }
+        return List.copyOf(evidenceIds);
     }
 
     private <T> T parseSnapshot(Map<String, Object> finalAnswer, String key, Class<T> type) {
@@ -288,10 +351,11 @@ public class ApprovalPolicyGate {
         }
     }
 
-    /** finalAnswer 中必须同时存在的三份可信快照。 */
+    /** finalAnswer 中必须同时存在的三份可信快照 + 可信证据清单（evidenceIds）。 */
     private record FinalAnswer(
             AfterSalesTypes.OrderSnapshot order,
             AfterSalesTypes.ShipmentSnapshot shipment,
-            AfterSalesTypes.PolicyEvidence policy) {
+            AfterSalesTypes.PolicyEvidence policy,
+            List<String> evidenceIds) {
     }
 }

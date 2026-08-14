@@ -11,6 +11,7 @@ public class ApprovalPolicyViolationException extends RuntimeException {
     public static final String APPROVAL_TICKET_STATE_INVALID = "APPROVAL_TICKET_STATE_INVALID";
     public static final String APPROVAL_RUN_STATE_INVALID = "APPROVAL_RUN_STATE_INVALID";
     public static final String APPROVAL_EVIDENCE_INCOMPLETE = "APPROVAL_EVIDENCE_INCOMPLETE";
+    public static final String APPROVAL_EVIDENCE_SNAPSHOT_MISMATCH = "APPROVAL_EVIDENCE_SNAPSHOT_MISMATCH";
     public static final String FINAL_ANSWER_INVALID = "FINAL_ANSWER_INVALID";
     public static final String APPROVAL_POLICY_VERSION_MISMATCH = "APPROVAL_POLICY_VERSION_MISMATCH";
     public static final String POLICY_CONTEXT_MISMATCH = "POLICY_CONTEXT_MISMATCH";

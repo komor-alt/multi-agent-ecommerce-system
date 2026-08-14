@@ -30,6 +30,13 @@ final class ApprovalTestSupport {
     static final ObjectMapper MAPPER = new ObjectMapper().registerModule(new JavaTimeModule());
     static final Instant TICKET_CREATED_AT = Instant.parse("2026-08-01T00:00:00Z");
 
+    /** 默认提案证据快照，与可信 Run 最终答复中的 evidenceIds 完全一致。 */
+    static final List<String> PROPOSAL_EVIDENCE_IDS = List.of(
+            "order:O-VN-5002:v1",
+            "shipment:O-VN-5002:2026-08-01",
+            "policy:VN_SHIPMENT_DELAY:v3#section-4.2",
+            "calculation:ticket-1:v1");
+
     private ApprovalTestSupport() {
     }
 
@@ -85,7 +92,43 @@ final class ApprovalTestSupport {
         return finalAnswerJson(order(), shipment(), policy());
     }
 
+    /** 最终答复默认携带与提案完全一致的证据快照。 */
     static String finalAnswerJson(
+            AfterSalesTypes.OrderSnapshot order,
+            AfterSalesTypes.ShipmentSnapshot shipment,
+            AfterSalesTypes.PolicyEvidence policy) {
+        return finalAnswerJson(order, shipment, policy, PROPOSAL_EVIDENCE_IDS);
+    }
+
+    static String finalAnswerJson(
+            AfterSalesTypes.OrderSnapshot order,
+            AfterSalesTypes.ShipmentSnapshot shipment,
+            AfterSalesTypes.PolicyEvidence policy,
+            List<String> evidenceIds) {
+        Map<String, Object> answer = new LinkedHashMap<>();
+        answer.put("order", order);
+        answer.put("shipment", shipment);
+        answer.put("policy", policy);
+        answer.put("evidenceIds", evidenceIds);
+        return writeJson(answer);
+    }
+
+    /** 用原始值作为 evidenceIds（字符串 / 含非字符串元素等非法形态），仅用于非法类型测试。 */
+    static String finalAnswerJsonRawEvidence(
+            AfterSalesTypes.OrderSnapshot order,
+            AfterSalesTypes.ShipmentSnapshot shipment,
+            AfterSalesTypes.PolicyEvidence policy,
+            Object evidenceIds) {
+        Map<String, Object> answer = new LinkedHashMap<>();
+        answer.put("order", order);
+        answer.put("shipment", shipment);
+        answer.put("policy", policy);
+        answer.put("evidenceIds", evidenceIds);
+        return writeJson(answer);
+    }
+
+    /** 快照齐全但完全缺少 evidenceIds 键的最终答复，仅用于缺失键测试。 */
+    static String finalAnswerJsonWithoutEvidenceIds(
             AfterSalesTypes.OrderSnapshot order,
             AfterSalesTypes.ShipmentSnapshot shipment,
             AfterSalesTypes.PolicyEvidence policy) {
@@ -114,8 +157,7 @@ final class ApprovalTestSupport {
                 .policyVersion("v3")
                 .proposalVersion("v1")
                 .decisionSummary("delay coupon pending operator approval")
-                .evidenceIdsJson("[\"order:O-VN-5002:v1\",\"shipment:O-VN-5002:2026-08-01\","
-                        + "\"policy:VN_SHIPMENT_DELAY:v3#section-4.2\",\"calculation:ticket-1:v1\"]")
+                .evidenceIdsJson(writeJson(PROPOSAL_EVIDENCE_IDS))
                 .status(AfterSalesTypes.ProposalStatus.PENDING)
                 .build();
     }

@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -106,12 +107,103 @@ class ApprovalServiceTest {
     }
 
     @Test
+    void approveWithReorderedDuplicateEvidenceSnapshotCreatesJobAndRecord() {
+        // 提案快照去重/乱序后与可信 Run 证据集合相等：审批通过并落库。
+        ActionProposalEntity proposal = ApprovalTestSupport.proposal();
+        proposal.setEvidenceIdsJson("[\"calculation:ticket-1:v1\",\"order:O-VN-5002:v1\","
+                + "\"order:O-VN-5002:v1\",\"shipment:O-VN-5002:2026-08-01\","
+                + "\"policy:VN_SHIPMENT_DELAY:v3#section-4.2\",\"calculation:ticket-1:v1\"]");
+        Harness harness = new Harness(proposal);
+
+        ApprovalService.ApprovalOutcome outcome = harness.service.approve("proposal-1", "operator-1", "approved");
+
+        assertThat(outcome.newlyApproved()).isTrue();
+        assertThat(outcome.job().getProposalId()).isEqualTo("proposal-1");
+        assertThat(proposal.getStatus()).isEqualTo(AfterSalesTypes.ProposalStatus.APPROVED);
+        verify(harness.executionRepository, times(1)).save(any());
+        verify(harness.approvalRepository, times(1)).save(any());
+    }
+
+    @Test
+    void proposalEvidenceMissingIsRejectedWithoutCreatingJobOrRecord() {
+        ActionProposalEntity proposal = ApprovalTestSupport.proposal();
+        proposal.setEvidenceIdsJson("[\"order:O-VN-5002:v1\",\"shipment:O-VN-5002:2026-08-01\","
+                + "\"policy:VN_SHIPMENT_DELAY:v3#section-4.2\"]");
+
+        assertRejectedWithoutSideEffects(proposal, "APPROVAL_EVIDENCE_SNAPSHOT_MISMATCH");
+    }
+
+    @Test
+    void proposalEvidenceReplacedIsRejectedWithoutCreatingJobOrRecord() {
+        ActionProposalEntity proposal = ApprovalTestSupport.proposal();
+        proposal.setEvidenceIdsJson("[\"order:O-VN-5002:v1\",\"shipment:O-VN-5002:2026-08-01\","
+                + "\"policy:VN_SHIPMENT_DELAY:v2#section-4.2\",\"calculation:ticket-1:v1\"]");
+
+        assertRejectedWithoutSideEffects(proposal, "APPROVAL_EVIDENCE_SNAPSHOT_MISMATCH");
+    }
+
+    @Test
+    void proposalEvidenceExtraFakeEntryIsRejectedWithoutCreatingJobOrRecord() {
+        ActionProposalEntity proposal = ApprovalTestSupport.proposal();
+        proposal.setEvidenceIdsJson("[\"order:O-VN-5002:v1\",\"shipment:O-VN-5002:2026-08-01\","
+                + "\"policy:VN_SHIPMENT_DELAY:v3#section-4.2\",\"calculation:ticket-1:v1\","
+                + "\"fake:approved-by-model\"]");
+
+        assertRejectedWithoutSideEffects(proposal, "APPROVAL_EVIDENCE_SNAPSHOT_MISMATCH");
+    }
+
+    @Test
+    void trustedRunEvidenceIncompleteIsRejectedWithoutCreatingJobOrRecord() {
+        ActionProposalEntity proposal = ApprovalTestSupport.proposal();
+        AfterSalesRunEntity run = ApprovalTestSupport.run();
+        run.setFinalAnswerJson(ApprovalTestSupport.finalAnswerJson(
+                ApprovalTestSupport.order(), ApprovalTestSupport.shipment(), ApprovalTestSupport.policy(),
+                List.of("order:O-VN-5002:v1", "shipment:O-VN-5002:2026-08-01",
+                        "calculation:ticket-1:v1")));
+
+        assertRejectedWithoutSideEffects(proposal, ApprovalTestSupport.ticket(), run,
+                "APPROVAL_EVIDENCE_INCOMPLETE");
+    }
+
+    @Test
+    void missingTrustedEvidenceIdsIsRejectedWithoutCreatingJobOrRecord() {
+        ActionProposalEntity proposal = ApprovalTestSupport.proposal();
+        AfterSalesRunEntity run = ApprovalTestSupport.run();
+        run.setFinalAnswerJson(ApprovalTestSupport.finalAnswerJsonWithoutEvidenceIds(
+                ApprovalTestSupport.order(), ApprovalTestSupport.shipment(), ApprovalTestSupport.policy()));
+
+        assertRejectedWithoutSideEffects(proposal, ApprovalTestSupport.ticket(), run, "FINAL_ANSWER_INVALID");
+    }
+
+    @Test
+    void nonArrayTrustedEvidenceIdsIsRejectedWithoutCreatingJobOrRecord() {
+        ActionProposalEntity proposal = ApprovalTestSupport.proposal();
+        AfterSalesRunEntity run = ApprovalTestSupport.run();
+        run.setFinalAnswerJson(ApprovalTestSupport.finalAnswerJsonRawEvidence(
+                ApprovalTestSupport.order(), ApprovalTestSupport.shipment(), ApprovalTestSupport.policy(),
+                "order:O-VN-5002:v1"));
+
+        assertRejectedWithoutSideEffects(proposal, ApprovalTestSupport.ticket(), run, "FINAL_ANSWER_INVALID");
+    }
+
+    @Test
+    void nonStringTrustedEvidenceIdsIsRejectedWithoutCreatingJobOrRecord() {
+        ActionProposalEntity proposal = ApprovalTestSupport.proposal();
+        AfterSalesRunEntity run = ApprovalTestSupport.run();
+        run.setFinalAnswerJson(ApprovalTestSupport.finalAnswerJsonRawEvidence(
+                ApprovalTestSupport.order(), ApprovalTestSupport.shipment(), ApprovalTestSupport.policy(),
+                List.of("order:O-VN-5002:v1", 42)));
+
+        assertRejectedWithoutSideEffects(proposal, ApprovalTestSupport.ticket(), run, "FINAL_ANSWER_INVALID");
+    }
+
+    @Test
     void tamperedEvidenceIsRejectedWithoutCreatingJobOrRecord() {
         ActionProposalEntity proposal = ApprovalTestSupport.proposal();
         proposal.setEvidenceIdsJson("[\"order:O-VN-5002:v1\",\"shipment:O-VN-5002:2026-08-01\","
                 + "\"policy:VN_SHIPMENT_DELAY:v3#section-4.2\"]");
 
-        assertRejectedWithoutSideEffects(proposal, "APPROVAL_EVIDENCE_INCOMPLETE");
+        assertRejectedWithoutSideEffects(proposal, "APPROVAL_EVIDENCE_SNAPSHOT_MISMATCH");
     }
 
     @Test
@@ -146,7 +238,15 @@ class ApprovalServiceTest {
     }
 
     private static void assertRejectedWithoutSideEffects(ActionProposalEntity proposal, String expectedCode) {
-        Harness harness = new Harness(proposal);
+        assertRejectedWithoutSideEffects(proposal, ApprovalTestSupport.ticket(), ApprovalTestSupport.run(), expectedCode);
+    }
+
+    private static void assertRejectedWithoutSideEffects(
+            ActionProposalEntity proposal,
+            AfterSalesTicketEntity ticket,
+            AfterSalesRunEntity run,
+            String expectedCode) {
+        Harness harness = new Harness(proposal, ticket, run);
         assertRejected(harness, expectedCode);
         assertThat(proposal.getStatus()).isEqualTo(AfterSalesTypes.ProposalStatus.PENDING);
     }

@@ -10,6 +10,8 @@ import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Optional;
 
 import static com.ecommerce.aftersales.service.ApprovalPolicyViolationException.APPROVAL_ACTION_MISMATCH;
@@ -17,6 +19,7 @@ import static com.ecommerce.aftersales.service.ApprovalPolicyViolationException.
 import static com.ecommerce.aftersales.service.ApprovalPolicyViolationException.APPROVAL_COMPENSATION_NOT_ELIGIBLE;
 import static com.ecommerce.aftersales.service.ApprovalPolicyViolationException.APPROVAL_CURRENCY_MISMATCH;
 import static com.ecommerce.aftersales.service.ApprovalPolicyViolationException.APPROVAL_EVIDENCE_INCOMPLETE;
+import static com.ecommerce.aftersales.service.ApprovalPolicyViolationException.APPROVAL_EVIDENCE_SNAPSHOT_MISMATCH;
 import static com.ecommerce.aftersales.service.ApprovalPolicyViolationException.APPROVAL_POLICY_VERSION_MISMATCH;
 import static com.ecommerce.aftersales.service.ApprovalPolicyViolationException.APPROVAL_PROPOSAL_STATE_INVALID;
 import static com.ecommerce.aftersales.service.ApprovalPolicyViolationException.APPROVAL_RUN_STATE_INVALID;
@@ -84,19 +87,137 @@ class ApprovalPolicyGateTest {
     }
 
     @Test
-    void tamperedEvidenceMissingCalculationIsRejected() {
+    void reorderedDuplicateEvidenceSnapshotPasses() {
+        // 提案快照去重/乱序后与可信 Run 证据完全一致（顺序本身不是安全属性）。
+        ActionProposalEntity proposal = ApprovalTestSupport.proposal();
+        proposal.setEvidenceIdsJson("[\"calculation:ticket-1:v1\",\"order:O-VN-5002:v1\","
+                + "\"order:O-VN-5002:v1\",\"shipment:O-VN-5002:2026-08-01\","
+                + "\"policy:VN_SHIPMENT_DELAY:v3#section-4.2\",\"calculation:ticket-1:v1\"]");
+
+        ApprovalValidationResult result = ApprovalTestSupport.passingGate().validate(proposal);
+
+        assertThat(result.proposalId()).isEqualTo("proposal-1");
+        assertThat(result.recomputedCompensation().eligible()).isTrue();
+    }
+
+    @Test
+    void reorderedDuplicateTrustedEvidencePasses() {
+        // 可信 Run 证据去重/乱序，提案保持默认快照：集合语义相等 → 通过。
+        AfterSalesRunEntity run = ApprovalTestSupport.run();
+        run.setFinalAnswerJson(ApprovalTestSupport.finalAnswerJson(
+                ApprovalTestSupport.order(), ApprovalTestSupport.shipment(), ApprovalTestSupport.policy(),
+                List.of("calculation:ticket-1:v1", "order:O-VN-5002:v1", "order:O-VN-5002:v1",
+                        "shipment:O-VN-5002:2026-08-01", "policy:VN_SHIPMENT_DELAY:v3#section-4.2")));
+
+        ApprovalValidationResult result = ApprovalTestSupport.gate(ApprovalTestSupport.ticket(), run)
+                .validate(ApprovalTestSupport.proposal());
+
+        assertThat(result.proposalId()).isEqualTo("proposal-1");
+        assertThat(result.recomputedCompensation().eligible()).isTrue();
+    }
+
+    @Test
+    void proposalEvidenceMissingCalculationIsRejectedAsSnapshotMismatch() {
         ActionProposalEntity proposal = ApprovalTestSupport.proposal();
         proposal.setEvidenceIdsJson("[\"order:O-VN-5002:v1\",\"shipment:O-VN-5002:2026-08-01\","
                 + "\"policy:VN_SHIPMENT_DELAY:v3#section-4.2\"]");
 
-        assertRejected(proposal, APPROVAL_EVIDENCE_INCOMPLETE);
+        assertRejected(proposal, APPROVAL_EVIDENCE_SNAPSHOT_MISMATCH);
     }
 
     @Test
-    void tamperedEvidenceMissingPolicyIsRejected() {
+    void proposalEvidenceMissingPolicyIsRejectedAsSnapshotMismatch() {
         ActionProposalEntity proposal = ApprovalTestSupport.proposal();
         proposal.setEvidenceIdsJson("[\"order:O-VN-5002:v1\",\"shipment:O-VN-5002:2026-08-01\","
                 + "\"calculation:ticket-1:v1\"]");
+
+        assertRejected(proposal, APPROVAL_EVIDENCE_SNAPSHOT_MISMATCH);
+    }
+
+    @Test
+    void proposalEvidenceReplacedIsRejectedAsSnapshotMismatch() {
+        ActionProposalEntity proposal = ApprovalTestSupport.proposal();
+        proposal.setEvidenceIdsJson("[\"order:O-VN-5002:v1\",\"shipment:O-VN-5002:2026-08-01\","
+                + "\"policy:VN_SHIPMENT_DELAY:v2#section-4.2\",\"calculation:ticket-1:v1\"]");
+
+        assertRejected(proposal, APPROVAL_EVIDENCE_SNAPSHOT_MISMATCH);
+    }
+
+    @Test
+    void proposalEvidenceExtraFakeEntryIsRejectedAsSnapshotMismatch() {
+        ActionProposalEntity proposal = ApprovalTestSupport.proposal();
+        proposal.setEvidenceIdsJson("[\"order:O-VN-5002:v1\",\"shipment:O-VN-5002:2026-08-01\","
+                + "\"policy:VN_SHIPMENT_DELAY:v3#section-4.2\",\"calculation:ticket-1:v1\","
+                + "\"fake:approved-by-model\"]");
+
+        assertRejected(proposal, APPROVAL_EVIDENCE_SNAPSHOT_MISMATCH);
+    }
+
+    @Test
+    void trustedRunEvidenceIncompleteIsRejected() {
+        // 可信 Run 证据缺 policy：即使提案自己声称完整也拒绝。
+        AfterSalesRunEntity run = ApprovalTestSupport.run();
+        run.setFinalAnswerJson(ApprovalTestSupport.finalAnswerJson(
+                ApprovalTestSupport.order(), ApprovalTestSupport.shipment(), ApprovalTestSupport.policy(),
+                List.of("order:O-VN-5002:v1", "shipment:O-VN-5002:2026-08-01", "calculation:ticket-1:v1")));
+
+        assertRejected(ApprovalTestSupport.proposal(), ApprovalTestSupport.ticket(), run,
+                APPROVAL_EVIDENCE_INCOMPLETE);
+    }
+
+    @Test
+    void missingTrustedEvidenceIdsIsRejected() {
+        AfterSalesRunEntity run = ApprovalTestSupport.run();
+        run.setFinalAnswerJson(ApprovalTestSupport.finalAnswerJsonWithoutEvidenceIds(
+                ApprovalTestSupport.order(), ApprovalTestSupport.shipment(), ApprovalTestSupport.policy()));
+
+        assertRejected(ApprovalTestSupport.proposal(), ApprovalTestSupport.ticket(), run, FINAL_ANSWER_INVALID);
+    }
+
+    @Test
+    void nonArrayTrustedEvidenceIdsIsRejected() {
+        AfterSalesRunEntity run = ApprovalTestSupport.run();
+        run.setFinalAnswerJson(ApprovalTestSupport.finalAnswerJsonRawEvidence(
+                ApprovalTestSupport.order(), ApprovalTestSupport.shipment(), ApprovalTestSupport.policy(),
+                "order:O-VN-5002:v1"));
+
+        assertRejected(ApprovalTestSupport.proposal(), ApprovalTestSupport.ticket(), run, FINAL_ANSWER_INVALID);
+    }
+
+    @Test
+    void nonStringTrustedEvidenceIdsIsRejected() {
+        AfterSalesRunEntity run = ApprovalTestSupport.run();
+        run.setFinalAnswerJson(ApprovalTestSupport.finalAnswerJsonRawEvidence(
+                ApprovalTestSupport.order(), ApprovalTestSupport.shipment(), ApprovalTestSupport.policy(),
+                List.of("order:O-VN-5002:v1", 42)));
+
+        assertRejected(ApprovalTestSupport.proposal(), ApprovalTestSupport.ticket(), run, FINAL_ANSWER_INVALID);
+    }
+
+    @Test
+    void nullTrustedEvidenceElementIsRejected() {
+        AfterSalesRunEntity run = ApprovalTestSupport.run();
+        run.setFinalAnswerJson(ApprovalTestSupport.finalAnswerJsonRawEvidence(
+                ApprovalTestSupport.order(), ApprovalTestSupport.shipment(), ApprovalTestSupport.policy(),
+                Arrays.asList("order:O-VN-5002:v1", null)));
+
+        assertRejected(ApprovalTestSupport.proposal(), ApprovalTestSupport.ticket(), run, FINAL_ANSWER_INVALID);
+    }
+
+    @Test
+    void blankTrustedEvidenceIdIsRejected() {
+        AfterSalesRunEntity run = ApprovalTestSupport.run();
+        run.setFinalAnswerJson(ApprovalTestSupport.finalAnswerJsonRawEvidence(
+                ApprovalTestSupport.order(), ApprovalTestSupport.shipment(), ApprovalTestSupport.policy(),
+                List.of("order:O-VN-5002:v1", "  ")));
+
+        assertRejected(ApprovalTestSupport.proposal(), ApprovalTestSupport.ticket(), run, FINAL_ANSWER_INVALID);
+    }
+
+    @Test
+    void nonStringProposalEvidenceIsRejectedAsIncomplete() {
+        ActionProposalEntity proposal = ApprovalTestSupport.proposal();
+        proposal.setEvidenceIdsJson("[1,2,3]");
 
         assertRejected(proposal, APPROVAL_EVIDENCE_INCOMPLETE);
     }

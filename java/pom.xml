@@ -83,6 +83,44 @@
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
             </plugin>
+            <!-- 普通 mvn test 绝不运行 Live LLM Eval（真实模型调用 / 费用 / 网络）：
+                 只排除 Live Runner 集成测试；eval/live 包内的离线单元测试照常运行。 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <excludes>
+                        <exclude>**/eval/live/**/*RunnerTest.java</exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!--
+            Optional Live LLM Eval（手动运行，绝不进入默认 CI）：
+            mvn test -Plive-eval  只选择 Live Runner 集成测试；
+            它仍要求 ECOM_RUN_LIVE_EVAL=true（否则测试类在 JUnit 条件阶段干净跳过，
+            零网络/模型调用）；开启后 ECOM_LLM_API_KEY 缺失/占位 → 清晰失败。
+            combine.self="override"：profile 完整替换基础 surefire 配置
+            （仅 include Live Runner，清空基础 excludes）。
+        -->
+        <profile>
+            <id>live-eval</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration combine.self="override">
+                            <includes>
+                                <include>**/eval/live/**/*RunnerTest.java</include>
+                            </includes>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

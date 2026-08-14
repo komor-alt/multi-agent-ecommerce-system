@@ -133,8 +133,10 @@ docker compose up --build
 ## 测试与评测
 
 ```bash
-cd java && mvn test          # 187 tests：单元 + 集成 + 离线 Agent 评测
+cd java && mvn test          # 单元 + 集成 + 离线 Agent 评测（默认不含 Live LLM Eval）
 ```
+
+### Offline Eval（默认，随 `mvn test` 运行）
 
 离线评测（`AfterSalesEvalHarnessTest`，随 `mvn test` 运行）：
 
@@ -154,17 +156,69 @@ cd java && mvn test          # 187 tests：单元 + 集成 + 离线 Agent 评测
 | Completion Rate | 97.50%（1 条按设计失败关闭：无适用政策版本 → `POLICY_NOT_FOUND`） |
 | Unauthorized Action / Model Amount / Model Tool Args | 0% / 0% / 0% |
 
+### Optional Live LLM Eval（可选，手动运行，默认关闭）
+
+与 Offline Eval 完全分离的另一套评测：使用**真实配置的模型**测量真实模型对客户意图的理解质量与证据规划质量。它调用外部 LLM API、**可能产生费用**、依赖网络、且有随机性——**绝不进入默认 CI 门禁**。普通 `mvn test` 只运行 Offline Eval；Live Eval 需要显式开启 Maven profile **和** 环境变量：
+
+```bash
+cd java
+ECOM_RUN_LIVE_EVAL=true mvn test -Plive-eval
+```
+
+- `-Plive-eval`：Maven profile，只选择 `LiveAfterSalesEvalRunnerTest`（`java/src/test/java/com/ecommerce/aftersales/eval/live/`），普通 `mvn test` 无法选中它（surefire 排除 Live Runner）
+- `ECOM_RUN_LIVE_EVAL=true`：**必须**显式设置（大小写不敏感，`TRUE`/`True` 均可，与 JUnit 条件注解语义一致）；未设置时 Live Runner 在 JUnit 条件阶段干净跳过——不启动 Spring 上下文、零网络/模型调用
+- 开启后 `ECOM_LLM_API_KEY` 缺失或为占位值（`your_api_key_here`）→ 测试**清晰失败**并给出修复指引，绝不静默回退规则
+- Base URL / 模型无硬编码默认值：Live Runner 直接读取 Spring 属性 `spring.ai.openai.base-url` / `spring.ai.openai.chat.options.model`（默认值与 env 覆盖见下表，来自 `application.yml`）
+
+环境变量：
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `ECOM_RUN_LIVE_EVAL` | （无） | `true`（忽略大小写）才运行 Live Eval |
+| `ECOM_LLM_API_KEY` | `your_api_key_here` | 真实 API key，缺失/占位时开启即失败 |
+| `ECOM_LLM_BASE_URL` | `https://api.deepseek.com` | OpenAI 兼容 base URL（`application.yml` 默认值；报告只记录清洗后的 URL） |
+| `ECOM_LLM_MODEL` | `deepseek-v4-flash` | 评测模型（`application.yml` 默认值） |
+
+Live Eval 执行的真实管线（停在副作用之前，绝不审批/建执行任务/调外部业务接口，取证在场为模拟的只读证据）：
+
+```text
+客户消息 → 真实 LLM AfterSalesIntakeService(mode=LLM) → DecisionRouteResolver
+→ 真实 LLM AfterSalesEvidencePlannerService(mode=LLM) → EvidencePreconditionGate
+```
+
+规划循环与生产语义一致：每次 `plan()` 尝试恰好是四类之一——**accepted non-fallback plan**（LLM 输出解析成功且过前置 Gate）、**model output failure**（JSON/输出解析失败、超时、空响应、繁忙等，服务内降级为规则兜底）、**gate rejection**（解析成功但违反业务前置，计为 invalid 并用 `deterministicPlan`，不重复调用模型）、**invalid input**（防御性输入缺陷，fail-closed）。接受的兜底计划必须过同一 Gate；有界循环/无进展按失败关闭。报告输出到：
+
+```text
+java/target/after-sales-live-eval/live-eval-report.json   # 机器可读
+java/target/after-sales-live-eval/live-eval-report.md     # 人读
+```
+
+报告记录：`generatedAt`、清洗后的 `baseUrl`、`model`、case 数、每个 case 的 ID/结果与实测指标（Intake Intent Accuracy、Route Accuracy、Planner Attempts / Accepted Non-Fallback / Invalid Plans（model failures + gate rejections）/ Fallback Cycles 及对应三个 Rate——**分母统一为 raw planner attempts**，任何 Rate 不可能 > 1，100% invalid 场景正确报告 100% Invalid；平均 Planner 调用数/工具调用数、Completion、Intake/Planner/E2E 延迟 p50/p95——**Planner 延迟为 per-case cumulative**，即同一 case 多轮 planner 调用的累计耗时）。**报告绝不包含**客户消息原文、完整 prompt、模型原始输出、思维链、API key 或认证头。
+
+模型对比（分别生成报告，注意同一报告路径，跑第二个模型前请先归档第一个的报告）：
+
+```bash
+ECOM_RUN_LIVE_EVAL=true ECOM_LLM_MODEL=model-a mvn test -Plive-eval
+ECOM_RUN_LIVE_EVAL=true ECOM_LLM_MODEL=model-b mvn test -Plive-eval
+```
+
+Token/Cost 指标限制：当前服务接口（`AfterSalesIntakeService` / `AfterSalesEvidencePlannerService`）只暴露结构化结果，不暴露 ChatResponse usage，因此报告中的 token/cost 指标标记为 **unavailable**，**绝不估算伪造**。
+
+Live Eval 是**人工阅读的报告**，不是 CI 门禁：不用 100% 准确率做硬性断言；只有结构性安全（**未装配任何副作用能力，by construction 不可能产生审批/执行任务/外部工具调用**，报告中的零是结构事实而非观测值）与配置要求（flag/key）会硬性失败。
+
+Live Eval 用例：`java/src/test/resources/after-sales-live-eval.jsonl`（28 条，与 Offline 的 40 条完全分离），覆盖：物流追踪、补偿/退款、模糊表达、英文/东南亚口音表达、Prompt Injection。
+
 ## CI
 
-`.github/workflows/ci.yml`，三个独立 job：
+`.github/workflows/ci.yml`，三个独立 job，触发条件为 **`main` / `feature/agent-platform-workbench` 的 push 与 PR**（当前默认开发分支为 `feature/agent-platform-workbench`，push 会触发 CI；若代码提交后 Actions 尚未出现运行记录，说明 workflow 已配置、等待 GitHub Actions 执行）：
 
-- **java**：`mvn test`（含离线评测），上传 `java/target/after-sales-eval/` 报告为 artifact
+- **java**：`mvn test`（含离线评测，不含 Live Eval），上传 `java/target/after-sales-eval/` 报告为 artifact
 - **gateway**：Node 20 + `npm ci` + `prisma generate` + `typecheck` + `build`
 - **frontend**：Node 20 + `npm ci` + `typecheck` + `build`
 
 没有 Python job：Python 模块的历史依赖锁定与测试环境不稳定，不做 CI 是为了不把不稳定的失败强加到主线上；这是一个已知问题（见 Limitations），应作为独立任务修复依赖与测试后再加入。
 
-CI 全部离线运行：不调用任何外部 LLM API、不需要 API key、不产生费用（无 key 时 AUTO 模式走规则，LLM 相关测试使用注入的模型输出替身）。
+CI 全部离线运行：不调用任何外部 LLM API、不需要 API key、不产生费用（无 key 时 AUTO 模式走规则，LLM 相关测试使用注入的模型输出替身）。Live LLM Eval 需要真实 API key、可能产生费用、依赖外部网络、有随机性，因此**不进入默认 push / PR CI 门禁**。
 
 ## 文档
 
@@ -182,3 +236,4 @@ CI 全部离线运行：不调用任何外部 LLM API、不需要 API key、不�
 - **未接真实生产认证**：审批人身份来自 Gateway 注入的 `X-Authenticated-Operator` Header（Demo 方案）；接入 JWT/统一登录后应改为从认证上下文取 principal
 - **Python 模块未纳入 CI**：依赖与测试环境不稳定，需独立修复
 - **推荐模块与售后模块的 LLM 共用同一 OpenAI 兼容配置**：模型输出被严格白名单解析，但真实模型的少数输出仍可能触发规则降级（评测中的 Planner Invalid Plan Rate 即来自对抗用例的预期降级）
+- **Live LLM Eval 尚未积累长期基线**：需要真实 API key 手动运行（`ECOM_RUN_LIVE_EVAL=true mvn test -Plive-eval`），本仓库不携带任何 Live 评测结果；token/cost 指标当前不可用（服务接口不暴露 usage），不作估算
