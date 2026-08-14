@@ -1,0 +1,52 @@
+# Full Retail base run.
+#
+# Single top-level `run:` block, like smoke.yaml: the FULL official retail
+# base split (114 tasks) x 1 trial. The SAME resolution is used by
+# scripts/run_baseline.sh, scripts/run_guarded.sh and ecommerce_tau3.run
+# (src/ecommerce_tau3/runconfig.py) — a `run:` block always wins, so this
+# config runs the full split no matter what TAU3_STAGE says.
+#
+#   bash scripts/run_baseline.sh configs/full.yaml   # Experiment A (full)
+#   bash scripts/run_guarded.sh  configs/full.yaml   # Experiment B (full)
+#
+# numTasks: null -> ALL tasks of the base split, in split-file order (no gold
+# content read). A 50-task development run can be done with a command-line
+# override where the runner supports it (`--num-tasks` is supported by the
+# official `tau2 run` CLI and by `ecommerce_tau3.run`; both wrapper scripts
+# forward extra arguments):
+#
+#   bash scripts/run_baseline.sh configs/full.yaml --num-tasks 50
+#   bash scripts/run_guarded.sh  configs/full.yaml --num-tasks 50
+#
+# Same rule as smoke.yaml: both experiments share every setting.
+# `implementation` names the GUARDED agent; `baselineImplementation` names
+# the official baseline for Experiment A.
+
+benchmark:
+  repository: sierra-research/tau2-bench
+  commit: 79975ac5741e23fbb1d2ac44262d62398a6d87bd
+  domain: retail
+  taskSplitName: base
+
+run:
+  taskIds: []          # empty -> official numTasks below
+  numTasks: null       # null -> all tasks of the base split (114)
+  numTrials: 1
+  seed: 300
+  maxSteps: 200
+  maxErrors: 10
+  maxConcurrency: 3
+
+agent:
+  implementation: guarded_retail_agent   # registered by src/ecommerce_tau3/factory.py
+  baselineImplementation: llm_agent      # official baseline
+  llm: gpt-4.1-2025-04-14
+  llmArgs: {temperature: 0.0}
+user:
+  implementation: user_simulator
+  llm: gpt-4.1-2025-04-14
+  llmArgs: {temperature: 0.0}
+
+save:
+  baseline: official-baseline
+  guarded: guarded-agent

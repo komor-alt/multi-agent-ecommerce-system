@@ -11,9 +11,9 @@ import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
-import java.util.EnumSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -39,16 +39,20 @@ import java.util.concurrent.atomic.AtomicInteger;
  * - 模型输出严格解析：顶层只允许 nextEvidence/reasonCode 两个键，两个键都必须存在且值层级
  *   只允许标量；任何层级出现未知键、嵌套对象（注入）、禁止键（tool/toolName/arguments/amount/
  *   refund/approved/approve/reject/execute/action）或缺失任一字段，整条作废；
- * - nextEvidence 必须是 EvidenceType 四值之一；reasonCode 必须给出且走白名单
- *   （ORDER_CONTEXT_REQUIRED / SHIPMENT_STATUS_REQUIRED / POLICY_REQUIRED / EVIDENCE_COMPLETE），
+ * - nextEvidence 必须是 EvidenceType 七个取证值或 READY_FOR_DECISION 之一；reasonCode 必须
+ *   给出且走白名单（每个证据对应一个理由码，如 CARRIER_CASE_REQUIRED /
+ *   DELIVERY_PROOF_REQUIRED / DAMAGE_PHOTO_REQUIRED / PRODUCT_CONTEXT_REQUIRED），
  *   并与 nextEvidence 精确配对，缺失或错配一律作废（绝不派生理由码）；
  * - 模型永远不能修改 requiredEvidence（服务端重建、规划器只读），也不能请求工具；
  * - 服务端输入预校验在 plan() 入口、任何模式分支与网络提交之前执行（RULES/LLM/AUTO 一致）：
  *   必需证据中出现未知项、就绪标记或 null，以及 null input / null intake / null evidencePresence，
  *   一律立即返回 invalidInput 规划结果（永不声称 READY，绝不调用模型），由 Agent 循环以
  *   PLANNER_INVALID_REQUIRED_EVIDENCE 拒绝；
- * - 规则规划按固定服务端顺序（ORDER → SHIPMENT → POLICY）遍历去重后的必需证据集合，
- *   与 requiredEvidence 的输入顺序/重复无关；
+ * - 规则规划动态使用服务端重建的 requiredEvidence（问题类型证据图顺序）遍历去重后的
+ *   必需证据集合：SHIPMENT_DELAY = ORDER→SHIPMENT→POLICY，LOST_IN_TRANSIT =
+ *   ORDER→SHIPMENT→CARRIER_CASE→POLICY，DAMAGED_ITEM = ORDER→DELIVERY→DAMAGE_PHOTO→
+ *   PRODUCT→POLICY；绝不存在一个全局固定的 ORDER/SHIPMENT/POLICY 顺序（三条路径
+ *   互不相同），输入重复按首次出现去重；
  * - fallbackReason 只暴露安全错误码（输入预校验失败为 INVALID_INPUT），绝不外泄 key、prompt
  *   或底层异常消息。
  *
@@ -77,12 +81,12 @@ public class AfterSalesEvidencePlannerService {
     private static final Map<String, EvidenceType> REASON_EVIDENCE_PAIRS = Map.of(
             "ORDER_CONTEXT_REQUIRED", EvidenceType.ORDER,
             "SHIPMENT_STATUS_REQUIRED", EvidenceType.SHIPMENT,
+            "CARRIER_CASE_REQUIRED", EvidenceType.CARRIER_CASE,
+            "DELIVERY_PROOF_REQUIRED", EvidenceType.DELIVERY,
+            "DAMAGE_PHOTO_REQUIRED", EvidenceType.DAMAGE_PHOTO,
+            "PRODUCT_CONTEXT_REQUIRED", EvidenceType.PRODUCT,
             "POLICY_REQUIRED", EvidenceType.POLICY,
             "EVIDENCE_COMPLETE", EvidenceType.READY_FOR_DECISION);
-
-    /** 规则规划的服务端固定顺序：与 requiredEvidence 的输入顺序/重复无关。 */
-    private static final List<EvidenceType> SERVER_EVIDENCE_ORDER = List.of(
-            EvidenceType.ORDER, EvidenceType.SHIPMENT, EvidenceType.POLICY);
 
     private static final String SYSTEM_PROMPT = """
             You are an evidence planner for a cross-border ecommerce after-sales system. \
@@ -95,14 +99,19 @@ public class AfterSalesEvidencePlannerService {
             any depth invalidates your output.
 
             Schema (both keys REQUIRED, values are scalar strings; no other keys):
-            - nextEvidence: only "ORDER" | "SHIPMENT" | "POLICY" | "READY_FOR_DECISION".
+            - nextEvidence: only "ORDER" | "SHIPMENT" | "CARRIER_CASE" | "DELIVERY" | \
+              "DAMAGE_PHOTO" | "PRODUCT" | "POLICY" | "READY_FOR_DECISION". \
               Choose the first evidence type that is REQUIRED (present in requiredEvidence) and NOT \
               already present (false in SERVER EVIDENCE PRESENCE). If every required evidence is \
               already present, choose "READY_FOR_DECISION".
             - reasonCode: required, exactly one of \
-              ["ORDER_CONTEXT_REQUIRED", "SHIPMENT_STATUS_REQUIRED", "POLICY_REQUIRED", "EVIDENCE_COMPLETE"], \
+              ["ORDER_CONTEXT_REQUIRED", "SHIPMENT_STATUS_REQUIRED", "CARRIER_CASE_REQUIRED", \
+              "DELIVERY_PROOF_REQUIRED", "DAMAGE_PHOTO_REQUIRED", "PRODUCT_CONTEXT_REQUIRED", \
+              "POLICY_REQUIRED", "EVIDENCE_COMPLETE"], \
               and it must match nextEvidence (ORDER_CONTEXT_REQUIRED pairs with ORDER, \
-              SHIPMENT_STATUS_REQUIRED with SHIPMENT, POLICY_REQUIRED with POLICY, EVIDENCE_COMPLETE \
+              SHIPMENT_STATUS_REQUIRED with SHIPMENT, CARRIER_CASE_REQUIRED with CARRIER_CASE, \
+              DELIVERY_PROOF_REQUIRED with DELIVERY, DAMAGE_PHOTO_REQUIRED with DAMAGE_PHOTO, \
+              PRODUCT_CONTEXT_REQUIRED with PRODUCT, POLICY_REQUIRED with POLICY, EVIDENCE_COMPLETE \
               with READY_FOR_DECISION). Missing or mismatched reasonCode invalidates your output.
 
             You cannot modify requiredEvidence — it is fixed by the server. You cannot request tools, \
@@ -218,8 +227,11 @@ public class AfterSalesEvidencePlannerService {
     }
 
     /**
-     * 确定性规划：把 requiredEvidence 校验为去重集合后，按固定服务端顺序（ORDER、SHIPMENT、POLICY）
-     * 只请求缺失且必需的证据，与输入顺序/重复无关；全部齐备 → READY_FOR_DECISION。
+     * 确定性规划：把 requiredEvidence 校验为按首次出现去重的有序集合后，沿服务端重建的
+     * 证据图顺序（即 requiredEvidence 自身顺序：SHIPMENT_DELAY = ORDER→SHIPMENT→POLICY，
+     * LOST_IN_TRANSIT = ORDER→SHIPMENT→CARRIER_CASE→POLICY，DAMAGED_ITEM =
+     * ORDER→DELIVERY→DAMAGE_PHOTO→PRODUCT→POLICY）只请求缺失且必需的证据；
+     * 全部齐备 → READY_FOR_DECISION。重复按首次出现去重；绝不存在全局固定顺序。
      * 必需证据中出现未知项、就绪标记或 null（含 null input/intake/evidencePresence 防御）→
      * 返回 invalidInput 结果（永不声称 READY），由 Agent 循环以 PLANNER_INVALID_REQUIRED_EVIDENCE
      * 拒绝，而不是静默放行。
@@ -233,8 +245,8 @@ public class AfterSalesEvidencePlannerService {
         if (required == null) {
             return invalidInputResult(latencyMs);
         }
-        for (EvidenceType type : SERVER_EVIDENCE_ORDER) {
-            if (required.contains(type) && !Boolean.TRUE.equals(presence.get(type.name()))) {
+        for (EvidenceType type : required) {
+            if (!Boolean.TRUE.equals(presence.get(type.name()))) {
                 return new AfterSalesTypes.PlanningResult(
                         type, reasonCodeFor(type), "RULE_FALLBACK", fallbackReason, latencyMs);
             }
@@ -244,14 +256,15 @@ public class AfterSalesEvidencePlannerService {
     }
 
     /**
-     * 服务端输入校验：必需证据必须全部是已知取证类型（ORDER/SHIPMENT/POLICY），
-     * 去重后返回集合；未知证据名或就绪标记 → null（规划器无法安全规划，走 invalidInput）。
+     * 服务端输入校验：必需证据必须全部是已知取证类型（七个证据名之一），
+     * 按首次出现去重后返回有序集合（顺序即服务端重建的证据图顺序）；未知证据名或就绪标记
+     * → null（规划器无法安全规划，走 invalidInput）。
      */
     private static Set<EvidenceType> validatedRequiredEvidence(List<String> requiredEvidence) {
         if (requiredEvidence == null) {
             return null;
         }
-        Set<EvidenceType> required = EnumSet.noneOf(EvidenceType.class);
+        Set<EvidenceType> required = new LinkedHashSet<>();
         for (String name : requiredEvidence) {
             EvidenceType type = safeValueOf(name);
             if (type == null || type == EvidenceType.READY_FOR_DECISION) {
@@ -368,6 +381,10 @@ public class AfterSalesEvidencePlannerService {
         return switch (type) {
             case ORDER -> "ORDER_CONTEXT_REQUIRED";
             case SHIPMENT -> "SHIPMENT_STATUS_REQUIRED";
+            case CARRIER_CASE -> "CARRIER_CASE_REQUIRED";
+            case DELIVERY -> "DELIVERY_PROOF_REQUIRED";
+            case DAMAGE_PHOTO -> "DAMAGE_PHOTO_REQUIRED";
+            case PRODUCT -> "PRODUCT_CONTEXT_REQUIRED";
             case POLICY -> "POLICY_REQUIRED";
             case READY_FOR_DECISION -> "EVIDENCE_COMPLETE";
         };

@@ -1,0 +1,45 @@
+# Smoke run: 10 tasks x 1 trial, both agents, same settings (fair comparison).
+#
+# The ten task IDs are from the pinned official retail base split and have
+# been verified to exist in that split. The agent runtime receives neither
+# gold actions nor evaluation criteria.
+
+benchmark:
+  repository: sierra-research/tau2-bench
+  commit: 79975ac5741e23fbb1d2ac44262d62398a6d87bd
+  domain: retail
+  taskSplitName: base
+
+run:
+  taskIds:
+    - "0"
+    - "10"
+    - "17"
+    - "22"
+    - "40"
+    - "48"
+    - "56"
+    - "67"
+    - "89"
+    - "113"
+  numTrials: 1
+  seed: 300            # official tau2 default (src/tau2/config.py)
+  maxSteps: 200        # official tau2 default
+  maxErrors: 10        # official tau2 default
+  maxConcurrency: 1
+
+# Same model + temperature for agent and user simulator in BOTH experiments
+# (requirement: identical agent model, user model, task set, seed, trial count).
+agent:
+  implementation: llm_agent        # baseline (official)
+  llm: gpt-4.1-2025-04-14          # official tau2 default (src/tau2/config.py)
+  llmArgs: {temperature: 0.0}
+user:
+  implementation: user_simulator
+  llm: gpt-4.1-2025-04-14
+  llmArgs: {temperature: 0.0}
+
+# Save names under <TAU2_DATA_DIR>/simulations/ (official runner layout).
+save:
+  baseline: official-baseline
+  guarded: guarded-agent

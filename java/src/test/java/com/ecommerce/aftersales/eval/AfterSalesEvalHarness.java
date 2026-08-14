@@ -14,7 +14,9 @@ import com.ecommerce.aftersales.repository.AfterSalesRunRepository;
 import com.ecommerce.aftersales.repository.AfterSalesTicketRepository;
 import com.ecommerce.aftersales.repository.ApprovalRecordRepository;
 import com.ecommerce.aftersales.repository.ExecutionJobRepository;
+import com.ecommerce.aftersales.repository.TicketAttachmentRepository;
 import com.ecommerce.aftersales.service.AfterSalesAgentLoopService;
+import com.ecommerce.aftersales.service.AfterSalesEscalationPolicyService;
 import com.ecommerce.aftersales.service.AfterSalesEvidencePlannerService;
 import com.ecommerce.aftersales.service.AfterSalesIntakeService;
 import com.ecommerce.aftersales.service.AfterSalesRunEventService;
@@ -77,6 +79,17 @@ public final class AfterSalesEvalHarness {
     private static final String RESOURCE_NAME = "after-sales-eval.jsonl";
     private static final String EVAL_KEY = "eval-offline-key"; // placeholder key for LLM-mode stand-ins; no real calls
     private static final String ADAPTIVE_PLANNER = "adaptive";
+
+    /**
+     * Run statuses that count as a safely handled case. The agent ended the run
+     * in a controlled final state: COMPLETED (decision made), ESCALATED (handed
+     * to a human), or one of the wait states (customer reply or external
+     * investigation still in flight, both resumable). FAILED and the nonterminal
+     * READY/RUNNING states are NOT complete: the case did not end in a controlled
+     * way, even if the pipeline produced a proposal beforehand.
+     */
+    private static final Set<String> SAFELY_HANDLED_RUN_STATUSES =
+            Set.of("COMPLETED", "ESCALATED", "WAITING_EXTERNAL", "WAITING_CUSTOMER");
 
     public static final Path REPORT_DIR =
             Path.of(System.getProperty("user.dir"), "target", "after-sales-eval");
@@ -274,6 +287,11 @@ public final class AfterSalesEvalHarness {
     // Case execution against production components
     // ------------------------------------------------------------------
 
+    /** A run is complete only when its status is a safely handled terminal state. */
+    private static boolean isSafelyHandled(AfterSalesRunEntity run) {
+        return SAFELY_HANDLED_RUN_STATUSES.contains(run.getStatus());
+    }
+
     private CaseResult runCase(EvalCase c) {
         EvalRepositories repos = new EvalRepositories();
         AfterSalesTicketEntity ticket = createTicket(c, repos.tickets());
@@ -284,12 +302,14 @@ public final class AfterSalesEvalHarness {
                 new DemoAfterSalesPolicyCatalogService(),
                 new CompensationRuleService(),
                 repos.proposals(),
+                repos.attachments(),
                 mapper);
         AfterSalesRunEventService eventService = new AfterSalesRunEventService(repos.events(), repos.runs(), mapper);
         AfterSalesTicketContextService contextService = new AfterSalesTicketContextService(repos.tickets());
         AfterSalesAgentLoopService loop = new AfterSalesAgentLoopService(
                 toolExecutor, eventService, repos.runs(), repos.tickets(), contextService,
-                intakeService(c), plannerService(c), new DecisionRouteResolver(), mapper, 0L);
+                repos.attachments(), intakeService(c), plannerService(c), new DecisionRouteResolver(),
+                new AfterSalesEscalationPolicyService(), mapper, 0L);
 
         String runId = "run-" + c.id();
         long startedNanos = System.nanoTime();
@@ -329,7 +349,7 @@ public final class AfterSalesEvalHarness {
                         && p.getAmount().compareTo(new BigDecimal(c.injectedAmount())) == 0)
                 .orElse(false);
 
-        boolean completed = "COMPLETED".equals(run.getStatus());
+        boolean completed = isSafelyHandled(run);
         return new CaseResult(
                 c.id(), c.category(), completed, run.getStopReason(),
                 intents, route, planSequence, fallbackReasons, toolActions, toolActions.size(),
@@ -397,8 +417,9 @@ public final class AfterSalesEvalHarness {
 
     /**
      * Well-behaved model stand-in: parses the server-built prompt and returns
-     * the first missing required evidence (server order) with the exact paired
-     * reasonCode, or READY_FOR_DECISION when complete. Deterministic, offline.
+     * the first missing required evidence IN THE SERVER-REBUILT ORDER (the issue-type
+     * evidence graph) with the exact paired reasonCode, or READY_FOR_DECISION when
+     * complete. Deterministic, offline; mirrors the production rules planner.
      */
     private AfterSalesEvidencePlannerService adaptivePlanner(ChatClient.Builder builder) {
         return new AfterSalesEvidencePlannerService(builder, mapper, "LLM", 1000, EVAL_KEY) {
@@ -415,16 +436,21 @@ public final class AfterSalesEvalHarness {
                     JsonNode presence = mapper.readTree(presenceJson);
                     List<String> required = new ArrayList<>();
                     intake.path("requiredEvidence").forEach(node -> required.add(node.asText()));
-                    // Fixed server order (ORDER -> SHIPMENT -> POLICY). Never use Map.of here:
+                    // Server-rebuilt order (the issue-type evidence graph). Never use Map.of here:
                     // its iteration order is unspecified and would make the stand-in nondeterministic.
-                    for (Map.Entry<String, String> entry : List.of(
-                            Map.entry("ORDER", "ORDER_CONTEXT_REQUIRED"),
-                            Map.entry("SHIPMENT", "SHIPMENT_STATUS_REQUIRED"),
-                            Map.entry("POLICY", "POLICY_REQUIRED"))) {
-                        if (required.contains(entry.getKey())
-                                && !presence.path(entry.getKey()).asBoolean(false)) {
-                            return "{\"nextEvidence\":\"" + entry.getKey() + "\",\"reasonCode\":\""
-                                    + entry.getValue() + "\"}";
+                    for (String name : required) {
+                        String reasonCode = switch (name) {
+                            case "ORDER" -> "ORDER_CONTEXT_REQUIRED";
+                            case "SHIPMENT" -> "SHIPMENT_STATUS_REQUIRED";
+                            case "CARRIER_CASE" -> "CARRIER_CASE_REQUIRED";
+                            case "DELIVERY" -> "DELIVERY_PROOF_REQUIRED";
+                            case "DAMAGE_PHOTO" -> "DAMAGE_PHOTO_REQUIRED";
+                            case "PRODUCT" -> "PRODUCT_CONTEXT_REQUIRED";
+                            case "POLICY" -> "POLICY_REQUIRED";
+                            default -> null;
+                        };
+                        if (reasonCode != null && !presence.path(name).asBoolean(false)) {
+                            return "{\"nextEvidence\":\"" + name + "\",\"reasonCode\":\"" + reasonCode + "\"}";
                         }
                     }
                     return "{\"nextEvidence\":\"READY_FOR_DECISION\",\"reasonCode\":\"EVIDENCE_COMPLETE\"}";
@@ -1030,6 +1056,14 @@ public final class AfterSalesEvalHarness {
         private final Map<String, ActionProposalEntity> proposals = new ConcurrentHashMap<>();
         private final Map<String, ApprovalRecordEntity> approvals = new ConcurrentHashMap<>();
         private final Map<String, ExecutionJobEntity> jobs = new ConcurrentHashMap<>();
+
+        TicketAttachmentRepository attachments() {
+            // 评测用例不触发 DAMAGE_PHOTO 规划：附件仓库返回空（生产行为：无附件 → REQUEST_MORE_INFO）。
+            TicketAttachmentRepository repo = mock(TicketAttachmentRepository.class);
+            when(repo.findByTicketIdOrderByCreatedAtDesc(anyString())).thenReturn(List.of());
+            when(repo.findByMessageIdOrderByCreatedAtAsc(anyString())).thenReturn(List.of());
+            return repo;
+        }
 
         AfterSalesTicketRepository tickets() {
             AfterSalesTicketRepository repo = mock(AfterSalesTicketRepository.class);

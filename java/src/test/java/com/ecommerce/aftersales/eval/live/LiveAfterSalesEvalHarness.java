@@ -366,6 +366,10 @@ public final class LiveAfterSalesEvalHarness {
         Map<String, Boolean> presence = new LinkedHashMap<>();
         presence.put(EvidenceType.ORDER.name(), false);
         presence.put(EvidenceType.SHIPMENT.name(), false);
+        presence.put(EvidenceType.CARRIER_CASE.name(), false);
+        presence.put(EvidenceType.DELIVERY.name(), false);
+        presence.put(EvidenceType.DAMAGE_PHOTO.name(), false);
+        presence.put(EvidenceType.PRODUCT.name(), false);
         presence.put(EvidenceType.POLICY.name(), false);
         return presence;
     }

@@ -112,8 +112,10 @@ export function AfterSalesPage() {
   const [filters, setFilters] = useState<TicketFilters>({ search: "" });
   const [createForm] = Form.useForm();
   // useWatch 保证 preset 变更时响应式刷新 hint（getFieldValue 只在渲染时机快照取值，不触发重渲染）。
+  // 必须放组件顶层：放进 find 回调内会让 Hook 调用次数随回调执行次数变化，违反 Rules of Hooks（#311）。
+  const watchedPreset = Form.useWatch("preset", createForm);
   const activePreset =
-    demoPresets.find((preset) => preset.key === Form.useWatch("preset", createForm)) ?? demoPresets[0];
+    demoPresets.find((preset) => preset.key === watchedPreset) ?? demoPresets[0];
 
   // 直播链路：只对「当前页面新建并分析」的 run 建立 SSE；历史工单只读取持久化事件。
   const [runId, setRunId] = useState("");

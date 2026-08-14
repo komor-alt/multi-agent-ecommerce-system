@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ecommerce-tau3"
+version = "0.1.0"
+description = "τ³-bench Retail adapter: transfers the project's bounded-planning and server-side guard design into the official τ³ Retail environment"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = { text = "MIT" }
+dependencies = [
+    # Official τ³-bench, pinned to the benchmark-lock commit.
+    # The repository is still named tau2-bench; the project is τ³-bench (see upstream README).
+    "tau2 @ git+https://github.com/sierra-research/tau2-bench@79975ac5741e23fbb1d2ac44262d62398a6d87bd",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.5",
+]
+
+[tool.hatch.metadata]
+# The tau2-bench pin is a direct git reference; Hatchling rejects it unless
+# explicitly allowed. The pin is a benchmark-lock commit, so the direct
+# reference is intentional and must not be relaxed to a range.
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ecommerce_tau3"]
+
+[tool.pytest.ini_options]
+testpaths = ["src/ecommerce_tau3/tests"]
+# scripts/ is imported by tests (summarize.py) — keep it on the test path.
+pythonpath = ["scripts"]
+# Tests are offline-only: they never call an LLM and never load official task data.
+addopts = "-m 'not live'"
+markers = [
+    "live: requires real API keys / network (never enabled by default)",
+]

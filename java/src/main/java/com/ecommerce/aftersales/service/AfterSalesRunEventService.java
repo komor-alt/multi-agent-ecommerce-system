@@ -174,12 +174,9 @@ public class AfterSalesRunEventService {
                 send(emitter, event);
             } catch (Exception error) {
                 // 客户端断线属于传输层事件，不能反向击穿审批/执行等业务事务。
+                // send 失败表示容器已关闭或进入 ERROR：此时再次 complete 会触发 Tomcat
+                // 的 AsyncContext 已完成异常；只把订阅者移除，连接收尾交给容器。
                 current.remove(emitter);
-                try {
-                    emitter.complete();
-                } catch (Exception ignored) {
-                    // 容器可能已经结束 AsyncContext；订阅者已移除，无需二次完成。
-                }
             }
         }
     }

@@ -208,6 +208,27 @@ Live Eval 是**人工阅读的报告**，不是 CI 门禁：不用 100% 准确�
 
 Live Eval 用例：`java/src/test/resources/after-sales-live-eval.jsonl`（28 条，与 Offline 的 40 条完全分离），覆盖：物流追踪、补偿/退款、模糊表达、英文/东南亚口音表达、Prompt Injection。
 
+## Public Benchmark: τ³-bench Retail
+
+与内部评测完全独立的第三方公开基准。三套评测数据互不混合、各自成报告：
+
+| | Internal Offline Eval | Internal Live LLM Eval | τ³-bench Retail |
+|---|---|---|---|
+| 数据 | 40 条自建 JSONL | 28 条自建 JSONL | 官方 Retail task（base split，114 条） |
+| 环境 | 自建 Java 组件 | 自建 Java 组件 | 官方 Retail Environment / Tools / Policy |
+| User Simulator | 无 | 无 | 官方 User Simulator |
+| Evaluator | 自建断言 | 自建断言 | 官方 Evaluator（Official Reward） |
+| 运行方式 | `mvn test`（CI 门禁） | `ECOM_RUN_LIVE_EVAL=true mvn test -Plive-eval`（手动） | `benchmarks/tau3-retail/scripts/*.sh`（手动/专用 workflow） |
+
+- 实现为 **benchmark adapter**：`Tau3TrustBoundaryAgent` 把项目的
+  Bounded Planning + Server-side Guard 设计迁移进官方 Retail 环境验证，并
+  非 Java 生产 Agent 直接运行于 τ³（官方工具/政策/DB/协议与生产不同）。
+- τ³ 版本固定：`sierra-research/tau2-bench @ 79975ac5741e23fbb1d2ac44262d62398a6d87bd`，
+  domain `retail`、split `base`（见 `benchmarks/tau3-retail/benchmark-lock.json`）。
+- 主指标为官方 reward；guard 指标（拒绝/确认拦截等）仅作 supplemental。
+- 未修改任何官方组件；不进默认 push/PR CI；未配置 API Key 时明确不运行、
+  不伪造结果。详见 [benchmarks/tau3-retail/README.md](benchmarks/tau3-retail/README.md)。
+
 ## CI
 
 `.github/workflows/ci.yml`，三个独立 job，触发条件为 **`main` / `feature/agent-platform-workbench` 的 push 与 PR**（当前默认开发分支为 `feature/agent-platform-workbench`，push 会触发 CI；若代码提交后 Actions 尚未出现运行记录，说明 workflow 已配置、等待 GitHub Actions 执行）：

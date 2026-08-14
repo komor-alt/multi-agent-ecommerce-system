@@ -44,6 +44,22 @@ public class AfterSalesController {
         return afterSalesService.analyze(ticketId, deferred);
     }
 
+    /**
+     * 客户补充信息（消息 + 附件元数据）：仅 WAITING_CUSTOMER 工单可恢复取证。
+     * deferred=true → 新 run 为 READY（先订阅流再 start），否则立即异步 RUNNING。
+     * 附件的二进制内容不经过本接口，只接收元数据（fileName/contentType/url 或 storageKey）。
+     */
+    @PostMapping("/tickets/{ticketId}/messages")
+    public Map<String, Object> appendMessage(
+            @PathVariable String ticketId,
+            @RequestBody AppendMessageRequest request) {
+        boolean deferred = request.deferred() != null && request.deferred();
+        List<AfterSalesService.AttachmentInput> attachments =
+                request.attachments() == null ? List.of() : request.attachments();
+        return afterSalesService.appendCustomerMessage(
+                ticketId, request.content(), attachments, deferred);
+    }
+
     @PostMapping("/runs/{runId}/start")
     public Map<String, Object> startRun(@PathVariable String runId) {
         return afterSalesService.start(runId);
@@ -83,6 +99,13 @@ public class AfterSalesController {
     }
 
     public record CreateTicketRequest(String orderId, String customerMessage) {
+    }
+
+    /** 客户补充信息请求 body：消息文本 + 附件元数据列表 + 可选 deferred。 */
+    public record AppendMessageRequest(
+            String content,
+            List<AfterSalesService.AttachmentInput> attachments,
+            Boolean deferred) {
     }
 
     /** 审批请求 body：只保留审批意见 comment，绝不携带 operatorId（身份只来自可信 Header）。 */

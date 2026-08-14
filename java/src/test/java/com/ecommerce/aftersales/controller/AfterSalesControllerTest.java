@@ -12,9 +12,13 @@ import org.springframework.http.converter.json.MappingJackson2HttpMessageConvert
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -134,5 +138,42 @@ class AfterSalesControllerTest {
         ArgumentCaptor<OperatorContext> contextCaptor = ArgumentCaptor.forClass(OperatorContext.class);
         verify(afterSalesService).reject(eq("proposal-1"), contextCaptor.capture(), eq("rejected"));
         assertThat(contextCaptor.getValue().id()).isEqualTo("operator-vn-01");
+    }
+
+    @Test
+    void appendMessageBindsContentAttachmentsAndDeferredFlag() throws Exception {
+        when(afterSalesService.appendCustomerMessage(eq("ticket-1"), anyString(), anyList(), anyBoolean()))
+                .thenReturn(Map.of("runId", "run-2", "status", "ANALYZING", "runStatus", "READY"));
+
+        mockMvc.perform(post("/api/v1/after-sales/tickets/ticket-1/messages")
+                        .contentType("application/json")
+                        .content("{\"content\":\"photo attached\",\"deferred\":true,"
+                                + "\"attachments\":[{\"fileName\":\"damage.jpg\",\"contentType\":\"image/jpeg\","
+                                + "\"storageKey\":\"objects/att-1\",\"metadata\":{\"width\":1080}}]}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.runId").value("run-2"))
+                .andExpect(jsonPath("$.runStatus").value("READY"));
+
+        ArgumentCaptor<List<AfterSalesService.AttachmentInput>> attachmentsCaptor = ArgumentCaptor.forClass(List.class);
+        verify(afterSalesService).appendCustomerMessage(eq("ticket-1"), eq("photo attached"), attachmentsCaptor.capture(), eq(true));
+        List<AfterSalesService.AttachmentInput> attachments = attachmentsCaptor.getValue();
+        assertThat(attachments).hasSize(1);
+        assertThat(attachments.get(0).fileName()).isEqualTo("damage.jpg");
+        assertThat(attachments.get(0).contentType()).isEqualTo("image/jpeg");
+        assertThat(attachments.get(0).storageKey()).isEqualTo("objects/att-1");
+        assertThat(attachments.get(0).metadata()).isEqualTo(Map.of("width", 1080));
+    }
+
+    @Test
+    void appendMessageDefaultsDeferredToFalseWhenOmitted() throws Exception {
+        when(afterSalesService.appendCustomerMessage(eq("ticket-1"), anyString(), anyList(), anyBoolean()))
+                .thenReturn(Map.of("runId", "run-2", "status", "ANALYZING", "runStatus", "RUNNING"));
+
+        mockMvc.perform(post("/api/v1/after-sales/tickets/ticket-1/messages")
+                        .contentType("application/json")
+                        .content("{\"content\":\"photo attached\"}"))
+                .andExpect(status().isOk());
+
+        verify(afterSalesService).appendCustomerMessage(eq("ticket-1"), eq("photo attached"), anyList(), eq(false));
     }
 }

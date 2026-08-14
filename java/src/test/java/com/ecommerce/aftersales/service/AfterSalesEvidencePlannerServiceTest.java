@@ -100,22 +100,72 @@ class AfterSalesEvidencePlannerServiceTest {
     }
 
     @Test
-    void deterministicPlannerIgnoresRequiredEvidenceInputOrderAndDuplicates() {
+    void deterministicPlannerFollowsServerRebuiltGraphOrderAndDeduplicates() {
         AfterSalesEvidencePlannerService service = service("RULES", "your_api_key_here", 4000);
-        // 输入乱序且重复：[POLICY, SHIPMENT, ORDER, ORDER] → 仍按服务端固定顺序先请求 ORDER。
-        List<String> unordered = List.of("POLICY", "SHIPMENT", "ORDER", "ORDER");
+        // requiredEvidence 是服务端按问题类型证据图重建的清单：顺序即图顺序，重复按首次出现去重
+        // （LOST_IN_TRANSIT 图含重复项也不影响推进顺序）。
+        List<String> graph = List.of("ORDER", "ORDER", "SHIPMENT", "CARRIER_CASE", "CARRIER_CASE", "POLICY");
 
-        AfterSalesTypes.PlanningResult first = service.plan(input(Map.of(), unordered));
+        AfterSalesTypes.PlanningResult first = service.plan(input(Map.of(), graph));
         assertThat(first.nextEvidence()).isEqualTo(EvidenceType.ORDER);
         assertThat(first.reasonCode()).isEqualTo("ORDER_CONTEXT_REQUIRED");
         assertThat(first.invalidInput()).isFalse();
 
-        // 重复不影响推进：ORDER 在场后请求 SHIPMENT，之后 POLICY。
-        assertThat(service.plan(input(Map.of("ORDER", true), unordered)).nextEvidence()).isEqualTo(EvidenceType.SHIPMENT);
-        assertThat(service.plan(input(Map.of("ORDER", true, "SHIPMENT", true), unordered)).nextEvidence())
+        assertThat(service.plan(input(Map.of("ORDER", true), graph)).nextEvidence()).isEqualTo(EvidenceType.SHIPMENT);
+        assertThat(service.plan(input(Map.of("ORDER", true, "SHIPMENT", true), graph)).nextEvidence())
+                .isEqualTo(EvidenceType.CARRIER_CASE);
+        assertThat(service.plan(input(Map.of("ORDER", true, "SHIPMENT", true, "CARRIER_CASE", true), graph)).nextEvidence())
                 .isEqualTo(EvidenceType.POLICY);
-        assertThat(service.plan(input(Map.of("ORDER", true, "SHIPMENT", true, "POLICY", true), unordered)).nextEvidence())
+        assertThat(service.plan(input(Map.of(
+                "ORDER", true, "SHIPMENT", true, "CARRIER_CASE", true, "POLICY", true), graph)).nextEvidence())
                 .isEqualTo(EvidenceType.READY_FOR_DECISION);
+    }
+
+    @Test
+    void threeEvidenceGraphsProduceExactDeterministicOrderings() {
+        AfterSalesEvidencePlannerService service = service("RULES", "your_api_key_here", 4000);
+
+        // SHIPMENT_DELAY 图：ORDER → SHIPMENT → POLICY → READY。
+        List<String> delay = List.of("ORDER", "SHIPMENT", "POLICY");
+        assertThat(service.plan(input(Map.of(), delay)).nextEvidence()).isEqualTo(EvidenceType.ORDER);
+        assertThat(service.plan(input(Map.of("ORDER", true), delay)).nextEvidence()).isEqualTo(EvidenceType.SHIPMENT);
+        assertThat(service.plan(input(Map.of("ORDER", true, "SHIPMENT", true), delay)).nextEvidence())
+                .isEqualTo(EvidenceType.POLICY);
+        assertThat(service.plan(input(Map.of("ORDER", true, "SHIPMENT", true, "POLICY", true), delay)).nextEvidence())
+                .isEqualTo(EvidenceType.READY_FOR_DECISION);
+
+        // LOST_IN_TRANSIT 图：ORDER → SHIPMENT → CARRIER_CASE → POLICY → READY。
+        List<String> lost = List.of("ORDER", "SHIPMENT", "CARRIER_CASE", "POLICY");
+        assertThat(service.plan(input(Map.of(), lost)).nextEvidence()).isEqualTo(EvidenceType.ORDER);
+        assertThat(service.plan(input(Map.of("ORDER", true), lost)).nextEvidence()).isEqualTo(EvidenceType.SHIPMENT);
+        AfterSalesTypes.PlanningResult carrier = service.plan(input(Map.of("ORDER", true, "SHIPMENT", true), lost));
+        assertThat(carrier.nextEvidence()).isEqualTo(EvidenceType.CARRIER_CASE);
+        assertThat(carrier.reasonCode()).isEqualTo("CARRIER_CASE_REQUIRED");
+        assertThat(service.plan(input(Map.of("ORDER", true, "SHIPMENT", true, "CARRIER_CASE", true), lost)).nextEvidence())
+                .isEqualTo(EvidenceType.POLICY);
+        assertThat(service.plan(input(Map.of(
+                "ORDER", true, "SHIPMENT", true, "CARRIER_CASE", true, "POLICY", true), lost)).nextEvidence())
+                .isEqualTo(EvidenceType.READY_FOR_DECISION);
+
+        // DAMAGED_ITEM 图：ORDER → DELIVERY → DAMAGE_PHOTO → PRODUCT → POLICY → READY。
+        List<String> damaged = List.of("ORDER", "DELIVERY", "DAMAGE_PHOTO", "PRODUCT", "POLICY");
+        assertThat(service.plan(input(Map.of(), damaged)).nextEvidence()).isEqualTo(EvidenceType.ORDER);
+        AfterSalesTypes.PlanningResult delivery = service.plan(input(Map.of("ORDER", true), damaged));
+        assertThat(delivery.nextEvidence()).isEqualTo(EvidenceType.DELIVERY);
+        assertThat(delivery.reasonCode()).isEqualTo("DELIVERY_PROOF_REQUIRED");
+        AfterSalesTypes.PlanningResult photo = service.plan(input(Map.of("ORDER", true, "DELIVERY", true), damaged));
+        assertThat(photo.nextEvidence()).isEqualTo(EvidenceType.DAMAGE_PHOTO);
+        assertThat(photo.reasonCode()).isEqualTo("DAMAGE_PHOTO_REQUIRED");
+        AfterSalesTypes.PlanningResult product = service.plan(input(
+                Map.of("ORDER", true, "DELIVERY", true, "DAMAGE_PHOTO", true), damaged));
+        assertThat(product.nextEvidence()).isEqualTo(EvidenceType.PRODUCT);
+        assertThat(product.reasonCode()).isEqualTo("PRODUCT_CONTEXT_REQUIRED");
+        assertThat(service.plan(input(Map.of(
+                "ORDER", true, "DELIVERY", true, "DAMAGE_PHOTO", true, "PRODUCT", true), damaged)).nextEvidence())
+                .isEqualTo(EvidenceType.POLICY);
+        assertThat(service.plan(input(Map.of(
+                "ORDER", true, "DELIVERY", true, "DAMAGE_PHOTO", true, "PRODUCT", true, "POLICY", true), damaged))
+                .nextEvidence()).isEqualTo(EvidenceType.READY_FOR_DECISION);
     }
 
     @Test
@@ -243,6 +293,56 @@ class AfterSalesEvidencePlannerServiceTest {
         assertThat(result.source()).isEqualTo("LLM");
         assertThat(result.nextEvidence()).isEqualTo(EvidenceType.READY_FOR_DECISION);
         assertThat(result.reasonCode()).isEqualTo("EVIDENCE_COMPLETE");
+    }
+
+    @Test
+    void llmModeAcceptsNewEvidenceTypesWithPairedReasonCodes() {
+        // 新增证据类型 + 配对理由码：模型可以规划 CARRIER_CASE / DELIVERY / DAMAGE_PHOTO / PRODUCT。
+        AfterSalesEvidencePlannerService carrier = llmService(
+                "{\"nextEvidence\":\"CARRIER_CASE\",\"reasonCode\":\"CARRIER_CASE_REQUIRED\"}", 4000);
+        AfterSalesTypes.PlanningResult carrierResult = carrier.plan(input(
+                Map.of("ORDER", true, "SHIPMENT", true), List.of("ORDER", "SHIPMENT", "CARRIER_CASE", "POLICY")));
+        assertThat(carrierResult.source()).isEqualTo("LLM");
+        assertThat(carrierResult.nextEvidence()).isEqualTo(EvidenceType.CARRIER_CASE);
+        assertThat(carrierResult.reasonCode()).isEqualTo("CARRIER_CASE_REQUIRED");
+
+        AfterSalesEvidencePlannerService delivery = llmService(
+                "{\"nextEvidence\":\"DELIVERY\",\"reasonCode\":\"DELIVERY_PROOF_REQUIRED\"}", 4000);
+        AfterSalesTypes.PlanningResult deliveryResult = delivery.plan(input(
+                Map.of("ORDER", true), List.of("ORDER", "DELIVERY", "DAMAGE_PHOTO", "PRODUCT", "POLICY")));
+        assertThat(deliveryResult.source()).isEqualTo("LLM");
+        assertThat(deliveryResult.nextEvidence()).isEqualTo(EvidenceType.DELIVERY);
+        assertThat(deliveryResult.reasonCode()).isEqualTo("DELIVERY_PROOF_REQUIRED");
+
+        AfterSalesEvidencePlannerService photo = llmService(
+                "{\"nextEvidence\":\"DAMAGE_PHOTO\",\"reasonCode\":\"DAMAGE_PHOTO_REQUIRED\"}", 4000);
+        AfterSalesTypes.PlanningResult photoResult = photo.plan(input(
+                Map.of("ORDER", true, "DELIVERY", true), List.of("ORDER", "DELIVERY", "DAMAGE_PHOTO", "PRODUCT", "POLICY")));
+        assertThat(photoResult.source()).isEqualTo("LLM");
+        assertThat(photoResult.nextEvidence()).isEqualTo(EvidenceType.DAMAGE_PHOTO);
+        assertThat(photoResult.reasonCode()).isEqualTo("DAMAGE_PHOTO_REQUIRED");
+
+        AfterSalesEvidencePlannerService product = llmService(
+                "{\"nextEvidence\":\"PRODUCT\",\"reasonCode\":\"PRODUCT_CONTEXT_REQUIRED\"}", 4000);
+        AfterSalesTypes.PlanningResult productResult = product.plan(input(
+                Map.of("ORDER", true, "DELIVERY", true, "DAMAGE_PHOTO", true),
+                List.of("ORDER", "DELIVERY", "DAMAGE_PHOTO", "PRODUCT", "POLICY")));
+        assertThat(productResult.source()).isEqualTo("LLM");
+        assertThat(productResult.nextEvidence()).isEqualTo(EvidenceType.PRODUCT);
+        assertThat(productResult.reasonCode()).isEqualTo("PRODUCT_CONTEXT_REQUIRED");
+    }
+
+    @Test
+    void llmModeRejectsNewEvidenceTypesWithWrongReasonCode() {
+        // 白名单外/错配理由码对新增证据同样作废：CARRIER_CASE 配 POLICY_REQUIRED 是非法配对。
+        AfterSalesEvidencePlannerService service = llmService(
+                "{\"nextEvidence\":\"CARRIER_CASE\",\"reasonCode\":\"POLICY_REQUIRED\"}", 4000);
+        AfterSalesTypes.PlanningResult result = service.plan(input(
+                Map.of("ORDER", true, "SHIPMENT", true), List.of("ORDER", "SHIPMENT", "CARRIER_CASE", "POLICY")));
+
+        assertThat(result.source()).isEqualTo("RULE_FALLBACK");
+        assertThat(result.fallbackReason()).isEqualTo("LLM_INVALID_OUTPUT");
+        assertThat(result.nextEvidence()).isEqualTo(EvidenceType.CARRIER_CASE); // 规则兜底沿图顺序
     }
 
     @Test

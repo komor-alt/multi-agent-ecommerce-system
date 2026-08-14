@@ -40,6 +40,13 @@ public class AfterSalesTicketEntity {
     private Instant createdAt;
     private Instant updatedAt;
 
+    /**
+     * 结构化升级/外部等待原因（EscalationReason JSON CLOB）：转人工升级（ESCALATED）或
+     * 外部等待（WAITING_EXTERNAL）终态写入，工单详情原样输出；其他状态为 null。
+     */
+    @Lob
+    private String escalationReasonJson;
+
     @PrePersist
     void beforeCreate() {
         Instant now = Instant.now();

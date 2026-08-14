@@ -6,6 +6,7 @@ import com.ecommerce.aftersales.repository.*;
 import com.ecommerce.data.DemoFulfillmentDataFactory;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.util.StringUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -23,6 +24,8 @@ public class AfterSalesService {
     private final ActionProposalRepository proposalRepository;
     private final ApprovalRecordRepository approvalRecordRepository;
     private final ExecutionJobRepository executionJobRepository;
+    private final TicketMessageRepository messageRepository;
+    private final TicketAttachmentRepository attachmentRepository;
     private final AfterSalesAgentLoopService agentLoopService;
     private final AfterSalesRunEventService eventService;
     private final ApprovalService approvalService;
@@ -36,12 +39,20 @@ public class AfterSalesService {
                     order -> String.valueOf(order.get("order_id")),
                     order -> String.valueOf(order.get("country"))));
 
+    /** 客户消息 API 允许的附件元数据键：只允许文件事实，核验结论（reviewStatus 等）是服务端持有键。 */
+    private static final Set<String> ALLOWED_ATTACHMENT_METADATA_KEYS = Set.of(
+            TicketAttachmentEntity.METADATA_WIDTH,
+            TicketAttachmentEntity.METADATA_HEIGHT,
+            TicketAttachmentEntity.METADATA_SIZE_BYTES);
+
     public AfterSalesService(
             AfterSalesTicketRepository ticketRepository,
             AfterSalesRunRepository runRepository,
             ActionProposalRepository proposalRepository,
             ApprovalRecordRepository approvalRecordRepository,
             ExecutionJobRepository executionJobRepository,
+            TicketMessageRepository messageRepository,
+            TicketAttachmentRepository attachmentRepository,
             AfterSalesAgentLoopService agentLoopService,
             AfterSalesRunEventService eventService,
             ApprovalService approvalService,
@@ -53,6 +64,8 @@ public class AfterSalesService {
         this.proposalRepository = proposalRepository;
         this.approvalRecordRepository = approvalRecordRepository;
         this.executionJobRepository = executionJobRepository;
+        this.messageRepository = messageRepository;
+        this.attachmentRepository = attachmentRepository;
         this.agentLoopService = agentLoopService;
         this.eventService = eventService;
         this.approvalService = approvalService;
@@ -91,13 +104,22 @@ public class AfterSalesService {
             throw new IllegalArgumentException("CUSTOMER_MESSAGE_REQUIRED");
         }
         String id = UUID.randomUUID().toString();
+        String cleanMessage = customerMessage.trim();
         AfterSalesTicketEntity ticket = ticketRepository.save(AfterSalesTicketEntity.builder()
                 .id(id)
                 .ticketNo("AS-" + Instant.now().toEpochMilli())
                 .orderId(orderId.trim())
                 .issueType("SHIPMENT_DELAY")
-                .customerMessage(customerMessage.trim())
+                .customerMessage(cleanMessage)
                 .status(AfterSalesTypes.TicketStatus.OPEN)
+                .build());
+        // 工单创建时持久化初始客户消息（时间线第一条消息，属于客户）。
+        messageRepository.save(TicketMessageEntity.builder()
+                .id(UUID.randomUUID().toString())
+                .ticketId(id)
+                .role(AfterSalesTypes.MessageRole.CUSTOMER)
+                .content(cleanMessage)
+                .createdAt(Instant.now())
                 .build());
         return ticketSummary(ticket);
     }
@@ -120,11 +142,13 @@ public class AfterSalesService {
 
         String runId = UUID.randomUUID().toString();
         String runStatus = deferred ? "READY" : "RUNNING";
+        // 预算 8：SHIPMENT_DELAY 图（3 取证 + 2 决策 = 5）与 LOST_IN_TRANSIT 图（4 + 2 = 6）
+        // 都在预算内，DAMAGED_ITEM 图（5 取证 + 2 决策 = 7）恰好可完成。
         runRepository.save(AfterSalesRunEntity.builder()
                 .id(runId)
                 .ticketId(ticketId)
                 .status(runStatus)
-                .maxSteps(6)
+                .maxSteps(8)
                 .stepCount(0)
                 .startedAt(deferred ? null : Instant.now())
                 .build());
@@ -143,6 +167,142 @@ public class AfterSalesService {
                 "runStatus", runStatus,
                 "streamUrl", "/api/v1/after-sales/runs/" + runId + "/stream"
         );
+    }
+
+    /**
+     * 客户补充信息（消息 + 附件元数据）：仅 WAITING_CUSTOMER 工单可恢复，其余状态一律拒绝
+     * （TICKET_NOT_RESUMABLE）。持久化客户消息与附件元数据后，创建关联父 run 的新 run
+     * （parentRunId = 等待状态会话），恢复取证：deferred=true → READY（先订阅后 start），
+     * 否则 RUNNING 并立即异步启动。附件的二进制内容永远不落库，只存元数据。
+     */
+    @Transactional
+    public Map<String, Object> appendCustomerMessage(
+            String ticketId,
+            String content,
+            List<AttachmentInput> attachments,
+            boolean deferred) {
+        AfterSalesTicketEntity ticket = ticketRepository.findById(ticketId)
+                .orElseThrow(() -> new IllegalArgumentException("TICKET_NOT_FOUND"));
+        if (ticket.getStatus() != AfterSalesTypes.TicketStatus.WAITING_CUSTOMER) {
+            throw new IllegalStateException("TICKET_NOT_RESUMABLE");
+        }
+        String cleanContent = content == null ? "" : content.trim();
+        List<AttachmentInput> cleanAttachments = attachments == null ? List.of() : attachments;
+        if (cleanContent.isBlank() && cleanAttachments.isEmpty()) {
+            throw new IllegalArgumentException("MESSAGE_OR_ATTACHMENT_REQUIRED");
+        }
+        cleanAttachments.forEach(this::validateAttachment);
+        // 不安全恢复拒绝：父 run 必须存在且携带可恢复会话快照（stopReason CUSTOMER_INFO_REQUIRED）。
+        AfterSalesRunEntity parentRun = runRepository.findById(ticket.getCurrentRunId())
+                .orElseThrow(() -> new IllegalStateException("PARENT_RUN_NOT_FOUND"));
+        if (!"CUSTOMER_INFO_REQUIRED".equals(parentRun.getStopReason())
+                || parentRun.getResumeStateJson() == null
+                || parentRun.getResumeStateJson().isBlank()) {
+            throw new IllegalStateException("PARENT_RUN_NOT_RESUMABLE");
+        }
+
+        TicketMessageEntity message = messageRepository.save(TicketMessageEntity.builder()
+                .id(UUID.randomUUID().toString())
+                .ticketId(ticketId)
+                .runId(parentRun.getId())
+                .role(AfterSalesTypes.MessageRole.CUSTOMER)
+                .content(cleanContent.isBlank() ? "（仅上传附件）" : cleanContent)
+                .createdAt(Instant.now())
+                .build());
+        Instant now = Instant.now();
+        for (AttachmentInput input : cleanAttachments) {
+            attachmentRepository.save(TicketAttachmentEntity.builder()
+                    .id(UUID.randomUUID().toString())
+                    .ticketId(ticketId)
+                    .messageId(message.getId())
+                    .fileName(input.fileName().trim())
+                    .contentType(input.contentType().trim())
+                    .url(blankToNull(input.url()))
+                    .storageKey(blankToNull(input.storageKey()))
+                    .checksum(blankToNull(input.checksum()))
+                    .metadataJson(writeMetadataJson(input.metadata()))
+                    .createdAt(now)
+                    .build());
+        }
+
+        String runId = UUID.randomUUID().toString();
+        String runStatus = deferred ? "READY" : "RUNNING";
+        runRepository.save(AfterSalesRunEntity.builder()
+                .id(runId)
+                .ticketId(ticketId)
+                .parentRunId(parentRun.getId())
+                .status(runStatus)
+                .maxSteps(8)
+                .stepCount(0)
+                .startedAt(deferred ? null : Instant.now())
+                .build());
+        ticket.setStatus(AfterSalesTypes.TicketStatus.ANALYZING);
+        ticket.setCurrentRunId(runId);
+        ticketRepository.save(ticket);
+
+        if (!deferred) {
+            // 立即模式：两个 save 各自提交后才异步启动，Agent 线程一定能读到已提交的 run。
+            CompletableFuture.runAsync(() -> agentLoopService.run(runId, ticketId), agentExecutor);
+        }
+        return Map.of(
+                "ticketId", ticketId,
+                "runId", runId,
+                "status", "ANALYZING",
+                "runStatus", runStatus,
+                "streamUrl", "/api/v1/after-sales/runs/" + runId + "/stream"
+        );
+    }
+
+    /** 附件输入校验（失败关闭）：文件名/类型必填且类型必须为 image/*（破损照片证据只接受图片），
+     *  url 与 storageKey 至少其一；元数据只允许文件事实键且值必须标量。 */
+    private void validateAttachment(AttachmentInput input) {
+        if (input == null
+                || !StringUtils.hasText(input.fileName())
+                || !StringUtils.hasText(input.contentType())) {
+            throw new IllegalArgumentException("ATTACHMENT_INVALID");
+        }
+        if (!input.contentType().trim().toLowerCase().startsWith("image/")) {
+            throw new IllegalArgumentException("ATTACHMENT_CONTENT_TYPE_NOT_IMAGE");
+        }
+        if (!StringUtils.hasText(input.url()) && !StringUtils.hasText(input.storageKey())) {
+            throw new IllegalArgumentException("ATTACHMENT_INVALID");
+        }
+        if (input.metadata() != null) {
+            for (Map.Entry<String, Object> entry : input.metadata().entrySet()) {
+                if (!ALLOWED_ATTACHMENT_METADATA_KEYS.contains(entry.getKey())) {
+                    throw new IllegalArgumentException("ATTACHMENT_METADATA_KEY_NOT_ALLOWED");
+                }
+                Object value = entry.getValue();
+                if (!(value instanceof String || value instanceof Number || value instanceof Boolean)) {
+                    throw new IllegalArgumentException("ATTACHMENT_METADATA_VALUE_INVALID");
+                }
+            }
+        }
+    }
+
+    private String writeMetadataJson(Map<String, Object> metadata) {
+        if (metadata == null || metadata.isEmpty()) {
+            return null;
+        }
+        try {
+            return objectMapper.writeValueAsString(metadata);
+        } catch (Exception error) {
+            throw new IllegalStateException("ATTACHMENT_METADATA_SERIALIZATION_FAILED", error);
+        }
+    }
+
+    private static String blankToNull(String value) {
+        return StringUtils.hasText(value) ? value.trim() : null;
+    }
+
+    /** 客户消息 API 的附件元数据输入（只存元数据，不存二进制；fileName/contentType/url 或 storageKey 必填）。 */
+    public record AttachmentInput(
+            String fileName,
+            String contentType,
+            String url,
+            String storageKey,
+            String checksum,
+            Map<String, Object> metadata) {
     }
 
     /**
@@ -190,6 +350,13 @@ public class AfterSalesService {
         if (ticket.getCurrentRunId() != null) {
             runRepository.findById(ticket.getCurrentRunId()).ifPresent(run -> result.put("run", runMap(run)));
             result.put("events", eventService.history(ticket.getCurrentRunId()));
+        }
+        // 消息时间线（按时间升序）：每条消息带其附件元数据。
+        List<Map<String, Object>> messages = messageRepository.findByTicketIdOrderByCreatedAtAsc(ticketId).stream()
+                .map(this::messageMap)
+                .toList();
+        if (!messages.isEmpty()) {
+            result.put("messages", messages);
         }
         return result;
     }
@@ -260,6 +427,10 @@ public class AfterSalesService {
         if (latestJob != null) {
             result.put("executionStatus", latestJob.getStatus().name());
         }
+        // 可选字段：转人工升级（ESCALATED）或外部等待（WAITING_EXTERNAL）的结构化原因。
+        if (ticket.getEscalationReasonJson() != null && !ticket.getEscalationReasonJson().isBlank()) {
+            result.put("escalationReason", readMap(ticket.getEscalationReasonJson()));
+        }
         return result;
     }
 
@@ -318,6 +489,41 @@ public class AfterSalesService {
         result.put("completedAt", run.getCompletedAt());
         result.put("durationMs", run.getDurationMs());
         result.put("finalAnswer", readMap(run.getFinalAnswerJson()));
+        if (run.getParentRunId() != null) {
+            result.put("parentRunId", run.getParentRunId());
+        }
+        return result;
+    }
+
+    private Map<String, Object> messageMap(TicketMessageEntity message) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("id", message.getId());
+        result.put("role", message.getRole().name());
+        result.put("content", message.getContent());
+        result.put("createdAt", message.getCreatedAt());
+        if (message.getRunId() != null) {
+            result.put("runId", message.getRunId());
+        }
+        List<Map<String, Object>> attachments = attachmentRepository
+                .findByMessageIdOrderByCreatedAtAsc(message.getId()).stream()
+                .map(this::attachmentMap)
+                .toList();
+        if (!attachments.isEmpty()) {
+            result.put("attachments", attachments);
+        }
+        return result;
+    }
+
+    private Map<String, Object> attachmentMap(TicketAttachmentEntity attachment) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("id", attachment.getId());
+        result.put("fileName", attachment.getFileName());
+        result.put("contentType", attachment.getContentType());
+        result.put("url", attachment.getUrl());
+        result.put("storageKey", attachment.getStorageKey());
+        result.put("checksum", attachment.getChecksum());
+        result.put("metadata", readMap(attachment.getMetadataJson()));
+        result.put("createdAt", attachment.getCreatedAt());
         return result;
     }
 

@@ -8,6 +8,7 @@ import com.ecommerce.aftersales.model.AfterSalesTypes;
 import com.ecommerce.aftersales.repository.ActionProposalRepository;
 import com.ecommerce.aftersales.repository.AfterSalesRunRepository;
 import com.ecommerce.aftersales.repository.AfterSalesTicketRepository;
+import com.ecommerce.aftersales.repository.TicketAttachmentRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.junit.jupiter.api.Test;
@@ -44,6 +45,7 @@ class AfterSalesOId4001LoopRegressionTest {
     void oid4001CompletesWithProposalInsteadOfPolicyNotFound() {
         AfterSalesRunRepository runRepository = mock(AfterSalesRunRepository.class);
         AfterSalesTicketRepository ticketRepository = mock(AfterSalesTicketRepository.class);
+        TicketAttachmentRepository attachmentRepository = mock(TicketAttachmentRepository.class);
         AfterSalesTicketContextService ticketContextService = mock(AfterSalesTicketContextService.class);
         ActionProposalRepository proposalRepository = mock(ActionProposalRepository.class);
         AfterSalesRunEventService eventService = mock(AfterSalesRunEventService.class);
@@ -58,10 +60,11 @@ class AfterSalesOId4001LoopRegressionTest {
                 new DemoAfterSalesPolicyCatalogService(),
                 new CompensationRuleService(),
                 proposalRepository,
+                attachmentRepository,
                 objectMapper);
         AfterSalesAgentLoopService service = new AfterSalesAgentLoopService(
                 toolExecutor, eventService, runRepository, ticketRepository, ticketContextService,
-                intakeService(), plannerService(), new DecisionRouteResolver(), objectMapper, 0L);
+                attachmentRepository, intakeService(), plannerService(), new DecisionRouteResolver(), new AfterSalesEscalationPolicyService(), objectMapper, 0L);
 
         when(runRepository.findById("run-id-4001")).thenReturn(Optional.of(run()));
         AfterSalesTicketEntity ticket = ticket();

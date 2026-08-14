@@ -19,6 +19,9 @@ public class AfterSalesRunEntity {
     @Column(nullable = false)
     private String ticketId;
 
+    /** 恢复会话的父 run（客户补充信息后由 WAITING_CUSTOMER 会话创建的新 run）；首次 run 为 null。 */
+    private String parentRunId;
+
     @Column(nullable = false)
     private String status;
 
@@ -35,4 +38,8 @@ public class AfterSalesRunEntity {
 
     @Lob
     private String finalAnswerJson;
+
+    /** 可恢复会话快照（ResumeState JSON）：WAITING_CUSTOMER 终态写入，供客户补充信息后的新 run 还原。 */
+    @Lob
+    private String resumeStateJson;
 }

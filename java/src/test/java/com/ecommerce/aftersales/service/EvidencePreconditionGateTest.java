@@ -56,15 +56,22 @@ class EvidencePreconditionGateTest {
         assertThat(result.passed()).isTrue();
     }
 
-    /** POLICY 也依赖 ORDER：ORDER 缺失时拒绝码为 ORDER_PRECONDITION_MISSING。 */
+    /**
+     * POLICY 的依赖是精确图的紧邻前序（延迟图 = SHIPMENT）；ORDER 前置由链条传递保证
+     * （SHIPMENT 自身依赖 ORDER），不重复强制全部前驱 —— ORDER 缺失而 SHIPMENT 在场
+     * 的状态在真实取证循环中不可达（Gate 在 SHIPMENT 前置就拦截）。
+     */
     @Test
-    void policyWithoutOrderIsRejectedAsOrderPreconditionMissing() {
-        Map<String, Boolean> presence = Map.of("ORDER", false, "SHIPMENT", true, "POLICY", false);
+    void policyDependsOnImmediateGraphPredecessorNotFullAncestorChain() {
+        // SHIPMENT 在场时延迟图 POLICY 通过（SHIPMENT 在场本身已隐含 ORDER 曾通过 Gate）。
+        Map<String, Boolean> presence = Map.of("ORDER", true, "SHIPMENT", true, "POLICY", false);
+        assertThat(gate.validate(EvidenceType.POLICY, COMPENSATION_EVIDENCE, presence).passed()).isTrue();
 
-        ValidationResult rejected = gate.validate(EvidenceType.POLICY, COMPENSATION_EVIDENCE, presence);
-
+        // 缺失紧邻前序 SHIPMENT 时拒绝（链上 ORDER 缺失也以 SHIPMENT 缺失暴露）。
+        Map<String, Boolean> missingChain = Map.of("ORDER", false, "SHIPMENT", false, "POLICY", false);
+        ValidationResult rejected = gate.validate(EvidenceType.POLICY, COMPENSATION_EVIDENCE, missingChain);
         assertThat(rejected.passed()).isFalse();
-        assertThat(rejected.rejectionCode()).isEqualTo(RejectionCode.ORDER_PRECONDITION_MISSING);
+        assertThat(rejected.rejectionCode()).isEqualTo(RejectionCode.SHIPMENT_PRECONDITION_MISSING);
     }
 
     /** 已获取的证据不可重复取证。 */
@@ -76,6 +83,113 @@ class EvidencePreconditionGateTest {
 
         assertThat(rejected.passed()).isFalse();
         assertThat(rejected.rejectionCode()).isEqualTo(RejectionCode.EVIDENCE_ALREADY_ACQUIRED);
+    }
+
+    // ------------------------------------------------------------------
+    // LOST_IN_TRANSIT 图（ORDER → SHIPMENT → CARRIER_CASE → POLICY）
+    // ------------------------------------------------------------------
+
+    private static final List<String> LOST_EVIDENCE = List.of("ORDER", "SHIPMENT", "CARRIER_CASE", "POLICY");
+
+    @Test
+    void carrierCaseWithoutShipmentIsRejectedAndShipmentFallbackPasses() {
+        Map<String, Boolean> presence = Map.of("ORDER", true, "SHIPMENT", false, "CARRIER_CASE", false);
+
+        ValidationResult rejected = gate.validate(EvidenceType.CARRIER_CASE, LOST_EVIDENCE, presence);
+
+        assertThat(rejected.passed()).isFalse();
+        assertThat(rejected.rejectionCode()).isEqualTo(RejectionCode.SHIPMENT_PRECONDITION_MISSING);
+        assertThat(gate.validate(EvidenceType.SHIPMENT, LOST_EVIDENCE, presence).passed()).isTrue();
+    }
+
+    @Test
+    void carrierCaseWithOrderAndShipmentIsAccepted() {
+        Map<String, Boolean> presence = Map.of("ORDER", true, "SHIPMENT", true, "CARRIER_CASE", false);
+
+        assertThat(gate.validate(EvidenceType.CARRIER_CASE, LOST_EVIDENCE, presence).passed()).isTrue();
+    }
+
+    @Test
+    void policyInLostGraphDependsOnCarrierCase() {
+        Map<String, Boolean> presence =
+                Map.of("ORDER", true, "SHIPMENT", true, "CARRIER_CASE", false, "POLICY", false);
+
+        ValidationResult rejected = gate.validate(EvidenceType.POLICY, LOST_EVIDENCE, presence);
+
+        assertThat(rejected.passed()).isFalse();
+        assertThat(rejected.rejectionCode()).isEqualTo(RejectionCode.CARRIER_CASE_PRECONDITION_MISSING);
+        assertThat(gate.validate(EvidenceType.CARRIER_CASE, LOST_EVIDENCE, presence).passed()).isTrue();
+    }
+
+    // ------------------------------------------------------------------
+    // DAMAGED_ITEM 图（ORDER → DELIVERY → DAMAGE_PHOTO → PRODUCT → POLICY）
+    // ------------------------------------------------------------------
+
+    private static final List<String> DAMAGED_EVIDENCE =
+            List.of("ORDER", "DELIVERY", "DAMAGE_PHOTO", "PRODUCT", "POLICY");
+
+    @Test
+    void deliveryWithoutOrderIsRejectedAsOrderPreconditionMissing() {
+        Map<String, Boolean> presence = Map.of("ORDER", false, "DELIVERY", false);
+
+        ValidationResult rejected = gate.validate(EvidenceType.DELIVERY, DAMAGED_EVIDENCE, presence);
+
+        assertThat(rejected.passed()).isFalse();
+        assertThat(rejected.rejectionCode()).isEqualTo(RejectionCode.ORDER_PRECONDITION_MISSING);
+    }
+
+    @Test
+    void damagePhotoWithoutDeliveryIsRejectedAndDeliveryFallbackPasses() {
+        Map<String, Boolean> presence = Map.of("ORDER", true, "DELIVERY", false, "DAMAGE_PHOTO", false);
+
+        ValidationResult rejected = gate.validate(EvidenceType.DAMAGE_PHOTO, DAMAGED_EVIDENCE, presence);
+
+        assertThat(rejected.passed()).isFalse();
+        assertThat(rejected.rejectionCode()).isEqualTo(RejectionCode.DELIVERY_PRECONDITION_MISSING);
+        assertThat(gate.validate(EvidenceType.DELIVERY, DAMAGED_EVIDENCE, presence).passed()).isTrue();
+    }
+
+    @Test
+    void productWithoutDamagePhotoIsRejectedAndDamagePhotoFallbackPasses() {
+        Map<String, Boolean> presence =
+                Map.of("ORDER", true, "DELIVERY", true, "DAMAGE_PHOTO", false, "PRODUCT", false);
+
+        ValidationResult rejected = gate.validate(EvidenceType.PRODUCT, DAMAGED_EVIDENCE, presence);
+
+        assertThat(rejected.passed()).isFalse();
+        assertThat(rejected.rejectionCode()).isEqualTo(RejectionCode.DAMAGE_PHOTO_PRECONDITION_MISSING);
+        assertThat(gate.validate(EvidenceType.DAMAGE_PHOTO, DAMAGED_EVIDENCE, presence).passed()).isTrue();
+    }
+
+    @Test
+    void policyInDamagedGraphDependsOnProductAndNeverOnShipment() {
+        // PRODUCT 缺失 → POLICY 拒绝（PRODUCT_PRECONDITION_MISSING）。
+        Map<String, Boolean> presence =
+                Map.of("ORDER", true, "DELIVERY", true, "DAMAGE_PHOTO", true, "PRODUCT", false, "POLICY", false);
+        ValidationResult rejected = gate.validate(EvidenceType.POLICY, DAMAGED_EVIDENCE, presence);
+        assertThat(rejected.passed()).isFalse();
+        assertThat(rejected.rejectionCode()).isEqualTo(RejectionCode.PRODUCT_PRECONDITION_MISSING);
+
+        // SHIPMENT 不在 DAMAGED_ITEM 图内：即使在场也无关，PRODUCT 在场后 POLICY 通过。
+        Map<String, Boolean> full = Map.of(
+                "ORDER", true, "SHIPMENT", true, "DELIVERY", true,
+                "DAMAGE_PHOTO", true, "PRODUCT", true, "POLICY", false);
+        assertThat(gate.validate(EvidenceType.POLICY, DAMAGED_EVIDENCE, full).passed()).isTrue();
+    }
+
+    @Test
+    void damagedGraphWalkAdheresToPreconditionOrderingUntilReady() {
+        Map<String, Boolean> presence =
+                new java.util.LinkedHashMap<>(Map.of(
+                        "ORDER", true, "DELIVERY", true, "DAMAGE_PHOTO", true, "PRODUCT", true, "POLICY", false));
+        assertThat(gate.validate(EvidenceType.POLICY, DAMAGED_EVIDENCE, presence).passed()).isTrue();
+
+        // 缺 DAMAGE_PHOTO 时 PRODUCT 仍被拒；补齐后 READY 通过。
+        presence.put("DAMAGE_PHOTO", false);
+        assertThat(gate.validate(EvidenceType.PRODUCT, DAMAGED_EVIDENCE, presence).passed()).isFalse();
+        presence.put("DAMAGE_PHOTO", true);
+        presence.put("POLICY", true);
+        assertThat(gate.validate(EvidenceType.READY_FOR_DECISION, DAMAGED_EVIDENCE, presence).passed()).isTrue();
     }
 
     /** 非必需证据不可取证（requiredEvidence 是路线重建后的服务端清单）。 */

@@ -60,15 +60,43 @@ public class AfterSalesIntakeService {
     /** 配置占位值 = 未配置 key：AUTO/LLM 都不发网络请求。 */
     static final String PLACEHOLDER_API_KEY = "your_api_key_here";
 
-    private static final Set<String> INTENT_WHITELIST = Set.of("TRACK_SHIPMENT", "REQUEST_REFUND");
+    private static final Set<String> INTENT_WHITELIST = Set.of(
+            "TRACK_SHIPMENT", "REQUEST_REFUND",
+            // 明确超出受理范围（issueType=UNSUPPORTED）的意图：取消订单 / 退换货 / 账号支付滥用。
+            "CANCEL_ORDER", "EXCHANGE_RETURN", "ACCOUNT_PAYMENT_ABUSE");
     private static final Set<String> URGENCY_WHITELIST = Set.of("LOW", "MEDIUM", "HIGH");
+    private static final Set<String> ISSUE_TYPE_WHITELIST = Set.of(
+            AfterSalesTypes.IntakeResult.SHIPMENT_DELAY,
+            AfterSalesTypes.IntakeResult.LOST_IN_TRANSIT,
+            AfterSalesTypes.IntakeResult.DAMAGED_ITEM,
+            AfterSalesTypes.IntakeResult.UNSUPPORTED);
+    /** 模型可建议的证据名（七个取证证据；只是不可信建议，路线证据由服务端重建）。 */
+    private static final List<String> ALL_EVIDENCE_NAMES = List.of(
+            "ORDER", "SHIPMENT", "CARRIER_CASE", "DELIVERY", "DAMAGE_PHOTO", "PRODUCT", "POLICY");
     private static final Set<String> REQUIRED_EVIDENCE_WHITELIST =
-            new LinkedHashSet<>(AfterSalesTypes.IntakeResult.REQUIRED_EVIDENCE);
+            new LinkedHashSet<>(ALL_EVIDENCE_NAMES);
     private static final Set<String> MISSING_INFO_WHITELIST = Set.of(
             "SHIPMENT_STATUS", "DELIVERY_PROMISE", "PAYMENT_RECEIPT", "CUSTOMER_CONFIRMATION");
     /** 模型输出中一旦出现这些键，整条输出作废（禁止生成金额/工具参数/批准结果/执行动作）。 */
     private static final Set<String> FORBIDDEN_KEYS = Set.of(
             "amount", "arguments", "approved", "approve", "action", "execute", "tool", "refundNow");
+
+    /** 规则识别的问题类型关键词（有界规则模式，与既有 SHIPMENT_DELAY 关键词规则同构）。 */
+    private static final List<String> LOST_KEYWORDS =
+            List.of("丢失", "遗失", "丢了", "寄丢", "找不到了");
+    private static final List<String> DAMAGE_KEYWORDS =
+            List.of("破损", "损坏", "碎了", "裂了", "摔坏", "压坏");
+
+    /**
+     * 明确超出受理范围的关键词（按意图类别分组，检测顺序固定）：命中任一即分类为 UNSUPPORTED，
+     * 由人工处理（取消订单 / 退换货 / 账号支付滥用），绝不进入取证或补偿管线。
+     * 检测先于丢失/破损关键词：消息同时含超范围词与物流词时，超范围诉求优先（取消订单等
+     * 不能被物流话术掩盖）。与既有退款词（退款/退钱/退单/赔偿/补偿/赔付）互不重叠：
+     * 「退单」保持退款意图（既有行为），「退货/换货」才是超范围。
+     */
+    private static final List<String> CANCEL_ORDER_KEYWORDS = List.of("取消订单", "取消");
+    private static final List<String> EXCHANGE_RETURN_KEYWORDS = List.of("退货", "换货");
+    private static final List<String> ACCOUNT_ABUSE_KEYWORDS = List.of("盗刷", "被盗", "被骗", "诈骗", "欺诈");
 
     /** 模型 JSON 顶层只允许这六个 schema 键；entities 对象内只允许 deadline（见 validateModelJson）。 */
     private static final Set<String> ALLOWED_TOP_LEVEL_KEYS = Set.of(
@@ -97,16 +125,23 @@ public class AfterSalesIntakeService {
             invalidates your output.
 
             Schema (all keys allowed): issueType, intents, urgency, entities, missingInfo, requiredEvidence.
-            - issueType: only "SHIPMENT_DELAY" is valid in this MVP.
-            - intents: only from ["TRACK_SHIPMENT", "REQUEST_REFUND"].
+            - issueType: only "SHIPMENT_DELAY" | "LOST_IN_TRANSIT" | "DAMAGED_ITEM" | "UNSUPPORTED" are valid. \
+              "UNSUPPORTED" means the request is outside the supported after-sales scope (cancel order, \
+              exchange/return, account/payment abuse) and will be escalated to an operator — choose it \
+              whenever the customer asks to cancel, exchange or return goods, or reports account/payment \
+              abuse, even if they also mention tracking.
+            - intents: only from ["TRACK_SHIPMENT", "REQUEST_REFUND", "CANCEL_ORDER", \
+              "EXCHANGE_RETURN", "ACCOUNT_PAYMENT_ABUSE"]. For "UNSUPPORTED", use the matching \
+              intent (CANCEL_ORDER / EXCHANGE_RETURN / ACCOUNT_PAYMENT_ABUSE).
             - urgency: only "LOW" | "MEDIUM" | "HIGH".
             - entities: optional object; only "deadline" as a short human-readable string, e.g. "2 days".
             - missingInfo: optional array of strings from \
             ["SHIPMENT_STATUS", "DELIVERY_PROMISE", "PAYMENT_RECEIPT", "CUSTOMER_CONFIRMATION"].
-            - requiredEvidence: optional suggestion array from ["ORDER", "SHIPMENT", "POLICY"]. \
+            - requiredEvidence: optional suggestion array from \
+            ["ORDER", "SHIPMENT", "CARRIER_CASE", "DELIVERY", "DAMAGE_PHOTO", "PRODUCT", "POLICY"]. \
             This is only an untrusted hint — the server rebuilds the authoritative required \
-            evidence from the classified intents afterwards, so it has no effect on the run. \
-            You never output a decision route; the server resolves it from intents.
+            evidence from the classified issue type and intents afterwards, so it has no effect \
+            on the run. You never output a decision route; the server resolves it from intents.
 
             Only the six keys above are allowed at the top level, and entities may only contain \
             "deadline". Any unknown or extra key anywhere invalidates the whole output.
@@ -233,7 +268,8 @@ public class AfterSalesIntakeService {
             throw new IllegalStateException("LLM_INVALID_JSON");
         }
         validateModelJson(root); // 严格键校验：任何层级出现未知/禁止键 → LLM_INVALID_OUTPUT
-        if (!AfterSalesTypes.IntakeResult.SHIPMENT_DELAY.equals(root.path("issueType").asText(""))) {
+        String issueType = root.path("issueType").asText("").toUpperCase();
+        if (!ISSUE_TYPE_WHITELIST.contains(issueType)) {
             throw new IllegalStateException("LLM_INVALID_OUTPUT");
         }
         List<String> intents = strings(root.get("intents")).stream()
@@ -268,7 +304,7 @@ public class AfterSalesIntakeService {
             entities.put("deadline", deadline);
         }
         return new AfterSalesTypes.IntakeResult(
-                AfterSalesTypes.IntakeResult.SHIPMENT_DELAY,
+                issueType,
                 intents,
                 urgency,
                 entities,
@@ -280,6 +316,22 @@ public class AfterSalesIntakeService {
     }
 
     private AfterSalesTypes.IntakeResult classifyByRules(String message, long latencyMs, String reason) {
+        // 明确超范围诉求（取消订单/退换货/账号支付滥用）先于一切既有规则：分类为 UNSUPPORTED，
+        // 不计算期限/紧急度，不携带证据建议（路线解析为 HUMAN_ESCALATION，循环立即转人工，
+        // 绝不取证或建方案）。检测先于丢失/破损关键词：超范围诉求优先于物流话术。
+        String unsupportedIntent = unsupportedIntentFrom(message);
+        if (unsupportedIntent != null) {
+            return new AfterSalesTypes.IntakeResult(
+                    AfterSalesTypes.IntakeResult.UNSUPPORTED,
+                    List.of(unsupportedIntent),
+                    "LOW",
+                    Map.of(),
+                    List.of(),
+                    AfterSalesTypes.IntakeResult.UNSUPPORTED_EVIDENCE,
+                    "RULE_FALLBACK",
+                    reason,
+                    latencyMs);
+        }
         List<String> intents = new ArrayList<>();
         intents.add("TRACK_SHIPMENT"); // 工单类型固定为物流延迟，必然需要查物流。
         // 显式退款/补偿词：任一命中即表达补偿诉求 → REQUEST_REFUND（路线解析为补偿评估）。
@@ -311,16 +363,70 @@ public class AfterSalesIntakeService {
         if (deadlineDays != null) {
             entities.put("deadline", formatDeadline(deadlineDays)); // 规范成可解释字符串。
         }
+        String issueType = issueTypeFrom(message);
         return new AfterSalesTypes.IntakeResult(
-                AfterSalesTypes.IntakeResult.SHIPMENT_DELAY,
+                issueType,
                 intents,
                 urgencyFrom(delayDays),
                 entities,
                 List.of(),
-                AfterSalesTypes.IntakeResult.REQUIRED_EVIDENCE,
+                baselineEvidenceFor(issueType),
                 "RULE_FALLBACK",
                 reason,
                 latencyMs);
+    }
+
+    /**
+     * 有界规则识别问题类型（与既有 SHIPMENT_DELAY 关键词规则同构，绝不依赖 LLM）：
+     * 丢失关键词命中 → LOST_IN_TRANSIT；破损关键词命中 → DAMAGED_ITEM；否则保持
+     * SHIPMENT_DELAY（MVP 基线，既有行为不变）。检测顺序固定（丢失先于破损），结果确定。
+     */
+    private static String issueTypeFrom(String message) {
+        if (containsAny(message, LOST_KEYWORDS)) {
+            return AfterSalesTypes.IntakeResult.LOST_IN_TRANSIT;
+        }
+        if (containsAny(message, DAMAGE_KEYWORDS)) {
+            return AfterSalesTypes.IntakeResult.DAMAGED_ITEM;
+        }
+        return AfterSalesTypes.IntakeResult.SHIPMENT_DELAY;
+    }
+
+    /** 规则兜底的必需证据占位基线（按问题类型；只是不可信建议，路线证据由服务端重建）。 */
+    private static List<String> baselineEvidenceFor(String issueType) {
+        return switch (issueType) {
+            case AfterSalesTypes.IntakeResult.LOST_IN_TRANSIT ->
+                    AfterSalesTypes.IntakeResult.LOST_IN_TRANSIT_EVIDENCE;
+            case AfterSalesTypes.IntakeResult.DAMAGED_ITEM ->
+                    AfterSalesTypes.IntakeResult.DAMAGED_ITEM_EVIDENCE;
+            default -> AfterSalesTypes.IntakeResult.REQUIRED_EVIDENCE;
+        };
+    }
+
+    private static boolean containsAny(String message, List<String> keywords) {
+        for (String keyword : keywords) {
+            if (message.contains(keyword)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 超范围意图识别（检测顺序固定，结果确定）：取消订单 → CANCEL_ORDER；退换货 →
+     * EXCHANGE_RETURN；账号/支付滥用 → ACCOUNT_PAYMENT_ABUSE；无命中返回 null
+     * （保持既有分类路径）。
+     */
+    private static String unsupportedIntentFrom(String message) {
+        if (containsAny(message, CANCEL_ORDER_KEYWORDS)) {
+            return "CANCEL_ORDER";
+        }
+        if (containsAny(message, EXCHANGE_RETURN_KEYWORDS)) {
+            return "EXCHANGE_RETURN";
+        }
+        if (containsAny(message, ACCOUNT_ABUSE_KEYWORDS)) {
+            return "ACCOUNT_PAYMENT_ABUSE";
+        }
+        return null;
     }
 
     private static String urgencyFrom(List<Integer> delayDays) {

@@ -112,6 +112,125 @@ class AfterSalesIntakeServiceTest {
     }
 
     @Test
+    void rulesRecognizeLostInTransitWithCarrierCaseBaselineEvidence() {
+        AfterSalesIntakeService service = service("RULES", "your_api_key_here", 4000);
+        AfterSalesTypes.IntakeResult result = service.classify(
+                "包裹已经丢了十天了，到底找不找得到，我要赔偿！");
+
+        assertThat(result.source()).isEqualTo("RULE_FALLBACK");
+        assertThat(result.issueType()).isEqualTo("LOST_IN_TRANSIT");
+        assertThat(result.intents()).containsExactly("TRACK_SHIPMENT", "REQUEST_REFUND");
+        assertThat(result.requiredEvidence()).containsExactly("ORDER", "SHIPMENT", "CARRIER_CASE", "POLICY");
+    }
+
+    @Test
+    void rulesRecognizeDamagedItemWithDeliveryGraphBaselineEvidence() {
+        AfterSalesIntakeService service = service("RULES", "your_api_key_here", 4000);
+        AfterSalesTypes.IntakeResult result = service.classify(
+                "包裹收到了，但是东西破损了，能退款吗？");
+
+        assertThat(result.source()).isEqualTo("RULE_FALLBACK");
+        assertThat(result.issueType()).isEqualTo("DAMAGED_ITEM");
+        assertThat(result.intents()).containsExactly("TRACK_SHIPMENT", "REQUEST_REFUND");
+        assertThat(result.requiredEvidence()).containsExactly(
+                "ORDER", "DELIVERY", "DAMAGE_PHOTO", "PRODUCT", "POLICY");
+    }
+
+    @Test
+    void damagedItemWithoutRefundWordsStaysSingleTrackingIntent() {
+        // 破损报告但无退款/补偿词 → 只有 TRACK_SHIPMENT（→ ANSWER_ONLY 交付证明答复）。
+        AfterSalesIntakeService service = service("RULES", "your_api_key_here", 4000);
+        AfterSalesTypes.IntakeResult result = service.classify("收到的盒子碎了，能帮我看看吗？");
+
+        assertThat(result.issueType()).isEqualTo("DAMAGED_ITEM");
+        assertThat(result.intents()).containsExactly("TRACK_SHIPMENT");
+    }
+
+    @Test
+    void delayMessagesStayShipmentDelayWithoutLostOrDamageKeywords() {
+        // 既有 SHIPMENT_DELAY 行为兼容：无丢失/破损关键词的延迟消息保持原分类。
+        AfterSalesIntakeService service = service("RULES", "your_api_key_here", 4000);
+        AfterSalesTypes.IntakeResult result = service.classify("物流卡海关十天了，能不能退款？");
+
+        assertThat(result.issueType()).isEqualTo("SHIPMENT_DELAY");
+        assertThat(result.requiredEvidence()).containsExactly("ORDER", "SHIPMENT", "POLICY");
+    }
+
+    @Test
+    void cancelOrderIsClassifiedAsUnsupported() {
+        // 取消订单（超范围诉求）→ UNSUPPORTED + CANCEL_ORDER 意图，空证据建议。
+        AfterSalesIntakeService service = service("RULES", "your_api_key_here", 4000);
+
+        AfterSalesTypes.IntakeResult result = service.classify("我不想要了，帮我取消订单");
+
+        assertThat(result.source()).isEqualTo("RULE_FALLBACK");
+        assertThat(result.issueType()).isEqualTo(AfterSalesTypes.IntakeResult.UNSUPPORTED);
+        assertThat(result.intents()).containsExactly("CANCEL_ORDER");
+        assertThat(result.requiredEvidence()).isEmpty();
+    }
+
+    @Test
+    void exchangeReturnIsClassifiedAsUnsupported() {
+        AfterSalesIntakeService service = service("RULES", "your_api_key_here", 4000);
+
+        AfterSalesTypes.IntakeResult result = service.classify("收到的商品要退货换货");
+
+        assertThat(result.issueType()).isEqualTo(AfterSalesTypes.IntakeResult.UNSUPPORTED);
+        assertThat(result.intents()).containsExactly("EXCHANGE_RETURN");
+    }
+
+    @Test
+    void accountAbuseIsClassifiedAsUnsupported() {
+        AfterSalesIntakeService service = service("RULES", "your_api_key_here", 4000);
+
+        AfterSalesTypes.IntakeResult result = service.classify("我的账号被盗刷了，快帮我处理");
+
+        assertThat(result.issueType()).isEqualTo(AfterSalesTypes.IntakeResult.UNSUPPORTED);
+        assertThat(result.intents()).containsExactly("ACCOUNT_PAYMENT_ABUSE");
+    }
+
+    @Test
+    void unsupportedTakesPrecedenceOverRefundAndLostKeywords() {
+        // 超范围诉求优先于物流/退款话术：即使同时含丢失与退款词也分类为 UNSUPPORTED
+        // （取消订单不能被物流话术掩盖，由人工处理）。
+        AfterSalesIntakeService service = service("RULES", "your_api_key_here", 4000);
+
+        AfterSalesTypes.IntakeResult result = service.classify("包裹丢了，我要取消订单退款");
+
+        assertThat(result.issueType()).isEqualTo(AfterSalesTypes.IntakeResult.UNSUPPORTED);
+        assertThat(result.intents()).containsExactly("CANCEL_ORDER");
+    }
+
+    @Test
+    void ambiguousDeliveryTrackingMessagesStayShipmentDelay() {
+        // 既有/模糊的物流查询消息不受影响：无超范围关键词保持 SHIPMENT_DELAY 默认分类。
+        AfterSalesIntakeService service = service("RULES", "your_api_key_here", 4000);
+
+        AfterSalesTypes.IntakeResult result = service.classify("包裹怎么还没到，能帮我查一下物流吗");
+
+        assertThat(result.issueType()).isEqualTo(AfterSalesTypes.IntakeResult.SHIPMENT_DELAY);
+        assertThat(result.intents()).containsExactly("TRACK_SHIPMENT");
+    }
+
+    @Test
+    void llmAcceptsUnsupportedIssueTypeAsValidClassification() {
+        // UNSUPPORTED 是合法分类输出：模型输出超范围类型 + 匹配意图 → 原样接受（不回退规则）。
+        AfterSalesIntakeService service = llmService("""
+                {"issueType":"UNSUPPORTED",
+                 "intents":["CANCEL_ORDER"],
+                 "urgency":"LOW",
+                 "entities":{},
+                 "missingInfo":[],
+                 "requiredEvidence":[]}""", 4000);
+
+        AfterSalesTypes.IntakeResult result = service.classify("我要取消订单");
+
+        assertThat(result.source()).isEqualTo("LLM");
+        assertThat(result.issueType()).isEqualTo(AfterSalesTypes.IntakeResult.UNSUPPORTED);
+        assertThat(result.intents()).containsExactly("CANCEL_ORDER");
+    }
+
+    @Test
     void autoModeWithoutKeySkipsNetworkAndUsesRules() {
         ChatClient.Builder builder = mock(ChatClient.Builder.class);
         ChatClient chatClient = mock(ChatClient.class);
@@ -150,6 +269,47 @@ class AfterSalesIntakeServiceTest {
         // requiredEvidence 只是模型不可信建议：白名单过滤后原样保留（仅 SHIPMENT），
         // 路线证据由 DecisionRouteResolver 服务端重建，不在此处补全。
         assertThat(result.requiredEvidence()).containsExactly("SHIPMENT");
+    }
+
+    @Test
+    void llmAcceptsLostInTransitAndDamagedItemIssueTypes() {
+        AfterSalesIntakeService lost = llmService("""
+                {"issueType":"LOST_IN_TRANSIT",
+                 "intents":["TRACK_SHIPMENT","REQUEST_REFUND"],
+                 "urgency":"HIGH",
+                 "entities":{},
+                 "missingInfo":[],
+                 "requiredEvidence":["ORDER","SHIPMENT","CARRIER_CASE","POLICY"]}""", 4000);
+        AfterSalesTypes.IntakeResult lostResult = lost.classify("包裹丢了");
+        assertThat(lostResult.source()).isEqualTo("LLM");
+        assertThat(lostResult.issueType()).isEqualTo("LOST_IN_TRANSIT");
+        assertThat(lostResult.requiredEvidence()).containsExactly("ORDER", "SHIPMENT", "CARRIER_CASE", "POLICY");
+
+        AfterSalesIntakeService damaged = llmService("""
+                {"issueType":"DAMAGED_ITEM",
+                 "intents":["TRACK_SHIPMENT","REQUEST_REFUND"],
+                 "urgency":"MEDIUM",
+                 "entities":{},
+                 "missingInfo":[],
+                 "requiredEvidence":["ORDER","DELIVERY","DAMAGE_PHOTO","PRODUCT","POLICY"]}""", 4000);
+        AfterSalesTypes.IntakeResult damagedResult = damaged.classify("包裹破损");
+        assertThat(damagedResult.source()).isEqualTo("LLM");
+        assertThat(damagedResult.issueType()).isEqualTo("DAMAGED_ITEM");
+        assertThat(damagedResult.requiredEvidence()).containsExactly(
+                "ORDER", "DELIVERY", "DAMAGE_PHOTO", "PRODUCT", "POLICY");
+    }
+
+    @Test
+    void llmRejectsUnknownIssueTypeAndFallsBackToRules() {
+        // 白名单外的问题类型（如 REFUND / 模型编造值）→ 整条输出作废，回退规则分类。
+        AfterSalesIntakeService service = llmService(
+                "{\"issueType\":\"REFUND\",\"intents\":[\"REQUEST_REFUND\"],\"urgency\":\"LOW\"}", 4000);
+
+        AfterSalesTypes.IntakeResult result = service.classify("包裹没更新");
+
+        assertThat(result.source()).isEqualTo("RULE_FALLBACK");
+        assertThat(result.fallbackReason()).isEqualTo("LLM_INVALID_OUTPUT");
+        assertThat(result.issueType()).isEqualTo("SHIPMENT_DELAY");
     }
 
     @Test

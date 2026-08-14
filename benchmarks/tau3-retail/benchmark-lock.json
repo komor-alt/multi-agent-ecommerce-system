@@ -1,0 +1,40 @@
+{
+  "repository": "sierra-research/tau2-bench",
+  "commit": "79975ac5741e23fbb1d2ac44262d62398a6d87bd",
+  "domain": "retail",
+  "taskSplit": "base",
+  "note": "Snapshot taken from the pinned commit only. Do NOT edit by hand: regenerate from the pinned upstream when intentionally upgrading the benchmark. The retail tool inventory snapshot is enforced by tests (see src/ecommerce_tau3/tests/test_tool_guard.py) so that official tool changes fail loudly.",
+  "snapshot": {
+    "retailTools": {
+      "calculate": "generic",
+      "cancel_pending_order": "write",
+      "exchange_delivered_order_items": "write",
+      "find_user_id_by_email": "read",
+      "find_user_id_by_name_zip": "read",
+      "get_item_details": "read",
+      "get_order_details": "read",
+      "get_product_details": "read",
+      "get_user_details": "read",
+      "list_all_product_types": "read",
+      "modify_pending_order_address": "write",
+      "modify_pending_order_items": "write",
+      "modify_pending_order_payment": "write",
+      "modify_user_address": "write",
+      "return_delivered_order_items": "write",
+      "transfer_to_human_agents": "generic"
+    },
+    "baseSplitTaskCount": 114,
+    "smokeTaskIds": [
+      "0",
+      "10",
+      "17",
+      "22",
+      "40",
+      "48",
+      "56",
+      "67",
+      "89",
+      "113"
+    ]
+  }
+}

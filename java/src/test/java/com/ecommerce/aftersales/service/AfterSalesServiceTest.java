@@ -4,12 +4,16 @@ import com.ecommerce.aftersales.entity.ActionProposalEntity;
 import com.ecommerce.aftersales.entity.AfterSalesRunEntity;
 import com.ecommerce.aftersales.entity.AfterSalesTicketEntity;
 import com.ecommerce.aftersales.entity.ExecutionJobEntity;
+import com.ecommerce.aftersales.entity.TicketAttachmentEntity;
+import com.ecommerce.aftersales.entity.TicketMessageEntity;
 import com.ecommerce.aftersales.model.AfterSalesTypes;
 import com.ecommerce.aftersales.repository.ActionProposalRepository;
 import com.ecommerce.aftersales.repository.AfterSalesRunRepository;
 import com.ecommerce.aftersales.repository.AfterSalesTicketRepository;
 import com.ecommerce.aftersales.repository.ApprovalRecordRepository;
 import com.ecommerce.aftersales.repository.ExecutionJobRepository;
+import com.ecommerce.aftersales.repository.TicketAttachmentRepository;
+import com.ecommerce.aftersales.repository.TicketMessageRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -38,6 +42,8 @@ class AfterSalesServiceTest {
     private final ActionProposalRepository proposalRepository = mock(ActionProposalRepository.class);
     private final ApprovalRecordRepository approvalRecordRepository = mock(ApprovalRecordRepository.class);
     private final ExecutionJobRepository executionJobRepository = mock(ExecutionJobRepository.class);
+    private final TicketMessageRepository messageRepository = mock(TicketMessageRepository.class);
+    private final TicketAttachmentRepository attachmentRepository = mock(TicketAttachmentRepository.class);
     private final AfterSalesAgentLoopService agentLoopService = mock(AfterSalesAgentLoopService.class);
     private final AfterSalesRunEventService eventService = mock(AfterSalesRunEventService.class);
     private final ApprovalService approvalService = mock(ApprovalService.class);
@@ -48,8 +54,8 @@ class AfterSalesServiceTest {
     private AfterSalesService service() {
         return new AfterSalesService(
                 ticketRepository, runRepository, proposalRepository, approvalRecordRepository,
-                executionJobRepository, agentLoopService, eventService, approvalService,
-                executionService, objectMapper, agentExecutor);
+                executionJobRepository, messageRepository, attachmentRepository, agentLoopService,
+                eventService, approvalService, executionService, objectMapper, agentExecutor);
     }
 
     @Test
@@ -311,6 +317,260 @@ class AfterSalesServiceTest {
         assertThat(dataCaptor.getValue()).containsEntry("operatorId", "operator-vn-01");
         assertThat(dataCaptor.getValue()).containsEntry("decision", "REJECTED");
         verify(eventService).complete("run-1");
+    }
+
+    @Test
+    void createPersistsInitialCustomerMessageWithCustomerRole() {
+        when(ticketRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(messageRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        service().create("O-SG-1001", "  my parcel arrived damaged  ");
+
+        ArgumentCaptor<AfterSalesTicketEntity> ticketCaptor = ArgumentCaptor.forClass(AfterSalesTicketEntity.class);
+        verify(ticketRepository).save(ticketCaptor.capture());
+        AfterSalesTicketEntity saved = ticketCaptor.getValue();
+        assertThat(saved.getCustomerMessage()).isEqualTo("my parcel arrived damaged");
+
+        ArgumentCaptor<TicketMessageEntity> messageCaptor = ArgumentCaptor.forClass(TicketMessageEntity.class);
+        verify(messageRepository).save(messageCaptor.capture());
+        TicketMessageEntity message = messageCaptor.getValue();
+        assertThat(message.getRole()).isEqualTo(AfterSalesTypes.MessageRole.CUSTOMER);
+        assertThat(message.getContent()).isEqualTo("my parcel arrived damaged");
+        assertThat(message.getTicketId()).isEqualTo(saved.getId());
+        assertThat(message.getRunId()).isNull();
+    }
+
+    @Test
+    void detailReturnsOrderedMessagesWithTheirAttachments() {
+        AfterSalesTicketEntity ticket = ticket(AfterSalesTypes.TicketStatus.WAITING_CUSTOMER);
+        ticket.setCurrentRunId(null);
+        when(ticketRepository.findById("ticket-1")).thenReturn(Optional.of(ticket));
+        TicketMessageEntity initial = TicketMessageEntity.builder()
+                .id("msg-1")
+                .ticketId("ticket-1")
+                .role(AfterSalesTypes.MessageRole.CUSTOMER)
+                .content("my parcel arrived damaged")
+                .createdAt(Instant.parse("2026-08-01T01:00:00Z"))
+                .build();
+        TicketMessageEntity followUp = TicketMessageEntity.builder()
+                .id("msg-2")
+                .ticketId("ticket-1")
+                .runId("run-parent")
+                .role(AfterSalesTypes.MessageRole.CUSTOMER)
+                .content("photo attached")
+                .createdAt(Instant.parse("2026-08-11T01:00:00Z"))
+                .build();
+        when(messageRepository.findByTicketIdOrderByCreatedAtAsc("ticket-1")).thenReturn(List.of(initial, followUp));
+        TicketAttachmentEntity attachment = TicketAttachmentEntity.builder()
+                .id("att-1")
+                .ticketId("ticket-1")
+                .messageId("msg-2")
+                .fileName("damage.jpg")
+                .contentType("image/jpeg")
+                .storageKey("objects/att-1")
+                .metadataJson("{\"width\":1080}")
+                .createdAt(Instant.parse("2026-08-11T01:00:01Z"))
+                .build();
+        when(attachmentRepository.findByMessageIdOrderByCreatedAtAsc("msg-2")).thenReturn(List.of(attachment));
+
+        Map<String, Object> result = service().detail("ticket-1");
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> messages = (List<Map<String, Object>>) result.get("messages");
+        assertThat(messages).hasSize(2);
+        assertThat(messages.get(0)).containsEntry("id", "msg-1");
+        assertThat(messages.get(0)).containsEntry("role", "CUSTOMER");
+        assertThat(messages.get(0)).doesNotContainKey("attachments");
+        assertThat(messages.get(1)).containsEntry("runId", "run-parent");
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> attachments = (List<Map<String, Object>>) messages.get(1).get("attachments");
+        assertThat(attachments).hasSize(1);
+        assertThat(attachments.get(0)).containsEntry("fileName", "damage.jpg");
+        assertThat(attachments.get(0)).containsEntry("contentType", "image/jpeg");
+        assertThat(attachments.get(0).get("metadata")).isEqualTo(Map.of("width", 1080));
+    }
+
+    @Test
+    void appendMessageOnWaitingCustomerPersistsDataAndCreatesDeferredResumedRun() {
+        AfterSalesTicketEntity ticket = ticket(AfterSalesTypes.TicketStatus.WAITING_CUSTOMER);
+        ticket.setCurrentRunId("run-parent");
+        when(ticketRepository.findById("ticket-1")).thenReturn(Optional.of(ticket));
+        when(runRepository.findById("run-parent")).thenReturn(Optional.of(waitingParentRun()));
+        when(ticketRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(runRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(messageRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(attachmentRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        Map<String, Object> response = service().appendCustomerMessage("ticket-1", "photo attached",
+                List.of(attachmentInput()), true);
+
+        assertThat(response.get("status")).isEqualTo("ANALYZING");
+        assertThat(response.get("runStatus")).isEqualTo("READY");
+
+        // 客户消息 + 附件元数据落库（role CUSTOMER、runId 指向请求补充信息的父 run）。
+        ArgumentCaptor<TicketMessageEntity> messageCaptor = ArgumentCaptor.forClass(TicketMessageEntity.class);
+        verify(messageRepository).save(messageCaptor.capture());
+        TicketMessageEntity message = messageCaptor.getValue();
+        assertThat(message.getRole()).isEqualTo(AfterSalesTypes.MessageRole.CUSTOMER);
+        assertThat(message.getContent()).isEqualTo("photo attached");
+        assertThat(message.getRunId()).isEqualTo("run-parent");
+
+        ArgumentCaptor<TicketAttachmentEntity> attachmentCaptor = ArgumentCaptor.forClass(TicketAttachmentEntity.class);
+        verify(attachmentRepository).save(attachmentCaptor.capture());
+        TicketAttachmentEntity attachment = attachmentCaptor.getValue();
+        assertThat(attachment.getTicketId()).isEqualTo("ticket-1");
+        assertThat(attachment.getMessageId()).isEqualTo(message.getId());
+        assertThat(attachment.getFileName()).isEqualTo("damage.jpg");
+        assertThat(attachment.getContentType()).isEqualTo("image/jpeg");
+        assertThat(attachment.getStorageKey()).isEqualTo("objects/att-1");
+        assertThat(attachment.getUrl()).isNull();
+        assertThat(attachment.getMetadataJson()).contains("\"width\":1080");
+
+        // 新 run 链接父 run（parentRunId），ticket 进入 ANALYZING 并指向新 run。
+        ArgumentCaptor<AfterSalesRunEntity> runCaptor = ArgumentCaptor.forClass(AfterSalesRunEntity.class);
+        verify(runRepository).save(runCaptor.capture());
+        AfterSalesRunEntity newRun = runCaptor.getValue();
+        assertThat(newRun.getId()).isNotEqualTo("run-parent");
+        assertThat(newRun.getParentRunId()).isEqualTo("run-parent");
+        assertThat(newRun.getStatus()).isEqualTo("READY");
+        assertThat(newRun.getStartedAt()).isNull();
+        assertThat(newRun.getMaxSteps()).isEqualTo(8);
+        assertThat(ticket.getStatus()).isEqualTo(AfterSalesTypes.TicketStatus.ANALYZING);
+        assertThat(ticket.getCurrentRunId()).isEqualTo(newRun.getId());
+        assertThat(response.get("runId")).isEqualTo(newRun.getId());
+
+        // deferred=true：不启动 Agent。
+        verify(agentExecutor, never()).execute(any());
+    }
+
+    @Test
+    void appendMessageImmediateStartsResumedRun() {
+        AfterSalesTicketEntity ticket = ticket(AfterSalesTypes.TicketStatus.WAITING_CUSTOMER);
+        ticket.setCurrentRunId("run-parent");
+        when(ticketRepository.findById("ticket-1")).thenReturn(Optional.of(ticket));
+        when(runRepository.findById("run-parent")).thenReturn(Optional.of(waitingParentRun()));
+        when(ticketRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(runRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(messageRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(attachmentRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        Map<String, Object> response = service().appendCustomerMessage("ticket-1", "photo attached",
+                List.of(attachmentInput()), false);
+
+        assertThat(response.get("runStatus")).isEqualTo("RUNNING");
+        ArgumentCaptor<AfterSalesRunEntity> runCaptor = ArgumentCaptor.forClass(AfterSalesRunEntity.class);
+        verify(runRepository).save(runCaptor.capture());
+        assertThat(runCaptor.getValue().getStartedAt()).isNotNull();
+        // 立即模式照旧异步启动 Agent。
+        verify(agentExecutor).execute(any());
+    }
+
+    @Test
+    void appendMessageOnNonWaitingStatusesRejectsUnsafeResume() {
+        for (AfterSalesTypes.TicketStatus status : AfterSalesTypes.TicketStatus.values()) {
+            if (status == AfterSalesTypes.TicketStatus.WAITING_CUSTOMER) {
+                continue;
+            }
+            AfterSalesTicketEntity ticket = ticket(status);
+            ticket.setCurrentRunId("run-parent");
+            when(ticketRepository.findById("ticket-1")).thenReturn(Optional.of(ticket));
+
+            assertThatThrownBy(() -> service().appendCustomerMessage("ticket-1", "photo attached",
+                    List.of(attachmentInput()), true))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("TICKET_NOT_RESUMABLE");
+            // 非 WAITING_CUSTOMER：不落任何消息/附件、不创建 run。
+            verify(messageRepository, never()).save(any());
+            verify(attachmentRepository, never()).save(any());
+            verify(runRepository, never()).save(any());
+        }
+    }
+
+    @Test
+    void appendMessageValidatesInputFailClosed() {
+        AfterSalesTicketEntity ticket = ticket(AfterSalesTypes.TicketStatus.WAITING_CUSTOMER);
+        ticket.setCurrentRunId("run-parent");
+        when(ticketRepository.findById("ticket-1")).thenReturn(Optional.of(ticket));
+        when(runRepository.findById("run-parent")).thenReturn(Optional.of(waitingParentRun()));
+
+        // 内容与附件都为空 → 拒绝。
+        assertThatThrownBy(() -> service().appendCustomerMessage("ticket-1", "  ", List.of(), true))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("MESSAGE_OR_ATTACHMENT_REQUIRED");
+        assertThatThrownBy(() -> service().appendCustomerMessage("ticket-1", null, null, true))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("MESSAGE_OR_ATTACHMENT_REQUIRED");
+        // 附件缺文件名/类型/地址与存储键 → 拒绝。
+        assertThatThrownBy(() -> service().appendCustomerMessage("ticket-1", "photo",
+                List.of(new AfterSalesService.AttachmentInput(null, "image/jpeg", null, "objects/att-1",
+                        null, null)), true))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("ATTACHMENT_INVALID");
+        assertThatThrownBy(() -> service().appendCustomerMessage("ticket-1", "photo",
+                List.of(new AfterSalesService.AttachmentInput("damage.jpg", "image/jpeg", null, "  ",
+                        null, null)), true))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("ATTACHMENT_INVALID");
+        // 破损照片证据只接受图片附件：非 image/* 类型拒绝。
+        assertThatThrownBy(() -> service().appendCustomerMessage("ticket-1", "photo",
+                List.of(new AfterSalesService.AttachmentInput("receipt.pdf", "application/pdf", null, "objects/att-1",
+                        null, null)), true))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("ATTACHMENT_CONTENT_TYPE_NOT_IMAGE");
+        // 元数据只允许文件事实键；核验结论（reviewStatus）是服务端持有键，客户不能写入。
+        assertThatThrownBy(() -> service().appendCustomerMessage("ticket-1", "photo",
+                List.of(new AfterSalesService.AttachmentInput("damage.jpg", "image/jpeg", null, "objects/att-1",
+                        null, Map.of("reviewStatus", "VERIFIED"))), true))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("ATTACHMENT_METADATA_KEY_NOT_ALLOWED");
+        assertThatThrownBy(() -> service().appendCustomerMessage("ticket-1", "photo",
+                List.of(new AfterSalesService.AttachmentInput("damage.jpg", "image/jpeg", null, "objects/att-1",
+                        null, Map.of("width", List.of(1)))), true))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("ATTACHMENT_METADATA_VALUE_INVALID");
+        verify(messageRepository, never()).save(any());
+        verify(runRepository, never()).save(any());
+    }
+
+    @Test
+    void appendMessageRejectsParentWithoutResumableSnapshot() {
+        AfterSalesTicketEntity ticket = ticket(AfterSalesTypes.TicketStatus.WAITING_CUSTOMER);
+        ticket.setCurrentRunId("run-parent");
+        when(ticketRepository.findById("ticket-1")).thenReturn(Optional.of(ticket));
+        // 父 run 缺失可恢复快照（或 stopReason 不是 CUSTOMER_INFO_REQUIRED）：拒绝不安全恢复。
+        when(runRepository.findById("run-parent")).thenReturn(Optional.of(AfterSalesRunEntity.builder()
+                .id("run-parent")
+                .ticketId("ticket-1")
+                .status("COMPLETED")
+                .maxSteps(8)
+                .stepCount(2)
+                .stopReason("ANSWER_DELIVERED")
+                .build()));
+
+        assertThatThrownBy(() -> service().appendCustomerMessage("ticket-1", "photo attached",
+                List.of(attachmentInput()), true))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("PARENT_RUN_NOT_RESUMABLE");
+        verify(messageRepository, never()).save(any());
+        verify(runRepository, never()).save(any());
+    }
+
+    private AfterSalesRunEntity waitingParentRun() {
+        return AfterSalesRunEntity.builder()
+                .id("run-parent")
+                .ticketId("ticket-1")
+                .status("WAITING_CUSTOMER")
+                .maxSteps(8)
+                .stepCount(2)
+                .stopReason("CUSTOMER_INFO_REQUIRED")
+                .completedAt(Instant.now())
+                .resumeStateJson("{\"parentRunId\":\"run-parent\"}")
+                .build();
+    }
+
+    private AfterSalesService.AttachmentInput attachmentInput() {
+        return new AfterSalesService.AttachmentInput(
+                "damage.jpg", "image/jpeg", null, "objects/att-1", "sha256:abc", Map.of("width", 1080));
     }
 
     private AfterSalesTicketEntity ticket(AfterSalesTypes.TicketStatus status) {

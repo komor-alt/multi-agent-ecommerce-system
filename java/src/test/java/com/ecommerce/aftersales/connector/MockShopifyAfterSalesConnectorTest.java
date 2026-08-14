@@ -105,4 +105,69 @@ class MockShopifyAfterSalesConnectorTest {
         assertThat(last.occurredAt()).isEqualTo(shipment.lastUpdatedAt());
         assertThat(last.location()).isEqualTo("Hanoi VN");
     }
+
+    @Test
+    void carrierCaseIsDerivedFromTrustedOrderWithStableEvidenceId() {
+        AfterSalesTypes.OrderSnapshot order = connector.getOrder("O-VN-5002");
+        AfterSalesTypes.CarrierCaseSnapshot carrierCase = connector.getCarrierCase(order);
+
+        assertThat(carrierCase.caseId()).isEqualTo("CC-VN-5002");
+        assertThat(carrierCase.evidenceId()).isEqualTo("carrier-case:CC-VN-5002:v1");
+        assertThat(carrierCase.outcome()).isEqualTo("LOST_CONFIRMED");
+        assertThat(carrierCase.status()).isEqualTo("CLOSED");
+        assertThat(carrierCase.carrierName()).isNotBlank();
+        assertThat(carrierCase.summary()).contains("lost");
+
+        // 调查中的订单：确定性不同结论与证据 ID。
+        AfterSalesTypes.CarrierCaseSnapshot open = connector.getCarrierCase(connector.getOrder("O-ID-4001"));
+        assertThat(open.caseId()).isEqualTo("CC-ID-4001");
+        assertThat(open.evidenceId()).isEqualTo("carrier-case:CC-ID-4001:v1");
+        assertThat(open.outcome()).isEqualTo("UNDER_INVESTIGATION");
+        assertThat(open.status()).isEqualTo("OPEN");
+    }
+
+    @Test
+    void deliveryProofIsDerivedFromTrustedOrderWithStableEvidenceId() {
+        AfterSalesTypes.OrderSnapshot order = connector.getOrder("O-SG-1001");
+        AfterSalesTypes.DeliverySnapshot delivery = connector.getDelivery(order);
+
+        assertThat(delivery.deliveryId()).isEqualTo("DL-SG-1001");
+        assertThat(delivery.trackingNumber()).isEqualTo("SF-SG-1001");
+        assertThat(delivery.status()).isEqualTo("DELIVERED");
+        assertThat(delivery.proofType()).isEqualTo("SIGNATURE");
+        assertThat(delivery.deliveredLocation()).isEqualTo("Singapore SG");
+        // evidenceId 不可变：delivery:<orderId>:<交付日期>，与既有 shipment evidenceId 模式一致。
+        assertThat(delivery.evidenceId()).startsWith("delivery:O-SG-1001:");
+        assertThat(delivery.deliveredAt().toString()).startsWith(delivery.evidenceId().substring("delivery:O-SG-1001:".length()));
+    }
+
+    @Test
+    void damagePhotoIsDerivedWithVerifiedAndRejectedSeeds() {
+        AfterSalesTypes.DamagePhotoSnapshot verified = connector.getDamagePhoto(connector.getOrder("O-SG-1001"));
+        assertThat(verified.photoId()).isEqualTo("DP-SG-1001-01");
+        assertThat(verified.evidenceId()).isEqualTo("damage-photo:DP-SG-1001-01:v1");
+        assertThat(verified.status()).isEqualTo("VERIFIED");
+        assertThat(verified.reviewSummary()).contains("confirmed");
+
+        AfterSalesTypes.DamagePhotoSnapshot rejected = connector.getDamagePhoto(connector.getOrder("O-MY-2001"));
+        assertThat(rejected.status()).isEqualTo("REJECTED");
+        assertThat(rejected.evidenceId()).isEqualTo("damage-photo:DP-MY-2001-01:v1");
+
+        AfterSalesTypes.DamagePhotoSnapshot pending = connector.getDamagePhoto(connector.getOrder("O-TH-3001"));
+        assertThat(pending.status()).isEqualTo("PENDING_REVIEW");
+        assertThat(pending.capturedAt()).isEqualTo(connector.getDelivery(connector.getOrder("O-TH-3001")).deliveredAt());
+    }
+
+    @Test
+    void productSnapshotIsResolvedFromTrustedOrderLine() {
+        AfterSalesTypes.OrderSnapshot order = connector.getOrder("O-SG-1001");
+        AfterSalesTypes.ProductSnapshot product = connector.getProduct(order);
+
+        assertThat(product.productId()).isEqualTo("P001");
+        assertThat(product.evidenceId()).isEqualTo("product:P001:v1");
+        assertThat(product.name()).isEqualTo("Anker 140W GaN Charger");
+        assertThat(product.category()).isEqualTo("accessory");
+        assertThat(product.crossBorderEligible()).isTrue();
+        assertThat(product.listPrice()).isNotNull();
+    }
 }

@@ -1,0 +1,104 @@
+name: tau3-retail-benchmark
+
+# MANUAL-ONLY public benchmark workflow (requirement §27/§28):
+# - NEVER runs on push / pull_request (default CI is untouched).
+# - Requires real LLM API keys; if secrets are missing the job FAILS clearly
+#   — it never falls back to a fake model.
+# - Costs real money and runs long; trigger only when intended.
+#
+# Note: GitHub Actions does not allow using secrets directly in `if:`
+# conditions, so OPENAI_API_KEY is mapped to a job-level env var first and
+# the check tests `env.OPENAI_API_KEY`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      config:
+        description: "Benchmark config"
+        required: false
+        default: smoke.yaml
+        type: choice
+        options:
+          - smoke.yaml
+          - full.yaml
+      run_baseline:
+        description: "Run Experiment A (official llm_agent)"
+        required: false
+        default: true
+        type: boolean
+      run_guarded:
+        description: "Run Experiment B (guarded_retail_agent)"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fail clearly when API keys are missing
+        if: env.OPENAI_API_KEY == ''
+        run: |
+          echo "::error::tau3-retail-benchmark requires OPENAI_API_KEY (agent + user simulator use real LLMs)."
+          echo "No fake model fallback is allowed — the job fails instead of running."
+          exit 1
+
+      - name: Compute shared run id
+        # Persist via GITHUB_ENV: ONE TAU3_RUN_ID for both experiments, so the
+        # summarize step sees a single results/<TAU3_RUN_ID>/ with both outputs.
+        run: echo "TAU3_RUN_ID=$(date +%Y%m%d-%H%M%S)" >> "$GITHUB_ENV"
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Setup benchmark environment
+        working-directory: benchmarks/tau3-retail
+        run: bash scripts/setup_tau3.sh
+
+      - name: Offline guard tests
+        working-directory: benchmarks/tau3-retail
+        run: uv run pytest -q
+
+      - name: Run Experiment A (official llm_agent baseline)
+        if: ${{ inputs.run_baseline }}
+        working-directory: benchmarks/tau3-retail
+        env:
+          CONFIG: "configs/${{ inputs.config }}"
+        run: bash scripts/run_baseline.sh "$CONFIG"
+
+      - name: Run Experiment B (guarded_retail_agent)
+        if: ${{ inputs.run_guarded }}
+        working-directory: benchmarks/tau3-retail
+        env:
+          CONFIG: "configs/${{ inputs.config }}"
+        run: bash scripts/run_guarded.sh "$CONFIG"
+
+      - name: Summarize + failure analysis
+        # Comparison needs BOTH experiments in the shared run dir.
+        if: ${{ inputs.run_baseline && inputs.run_guarded }}
+        working-directory: benchmarks/tau3-retail
+        run: |
+          TS_DIR="results/${TAU3_RUN_ID}"
+          test -d "$TS_DIR" || { echo "::error::no run directory $TS_DIR"; exit 1; }
+          echo "run dir: $TS_DIR"
+          uv run python scripts/summarize.py "$TS_DIR"
+          for d in "$TS_DIR"/*/; do
+            [ -f "$d/results.json" ] && uv run python scripts/analyze_failures.py "$d"
+          done
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: tau3-retail-results
+          path: benchmarks/tau3-retail/results/

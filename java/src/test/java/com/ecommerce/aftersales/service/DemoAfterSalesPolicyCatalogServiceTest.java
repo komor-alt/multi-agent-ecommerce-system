@@ -86,6 +86,64 @@ class DemoAfterSalesPolicyCatalogServiceTest {
         assertThat(historical.effectiveFrom()).isBefore(BETWEEN_VERSIONS);
     }
 
+    @ParameterizedTest
+    @CsvSource({
+            "SG,SG_LOST_IN_TRANSIT,v2,25.00",
+            "MY,MY_LOST_IN_TRANSIT,v2,25.00",
+            "TH,TH_LOST_IN_TRANSIT,v2,250.00",
+            "ID,ID_LOST_IN_TRANSIT,v2,250000.00",
+            "VN,VN_LOST_IN_TRANSIT,v3,150000.00"
+    })
+    void coversEveryDemoCountryForLostInTransit(String country, String policyId, String version, String cap) {
+        AfterSalesTypes.PolicyEvidence policy = catalog.lookup(country, "LOST_IN_TRANSIT", AFTER_V2);
+
+        assertThat(policy.policyId()).isEqualTo(policyId);
+        assertThat(policy.issueType()).isEqualTo("LOST_IN_TRANSIT");
+        assertThat(policy.version()).isEqualTo(version);
+        assertThat(policy.evidenceId()).isEqualTo("policy:" + policyId + ":" + version + "#section-5.2");
+        assertThat(policy.maximumCompensation()).isEqualByComparingTo(new BigDecimal(cap));
+        assertThat(policy.compensationRate()).isEqualByComparingTo("1.00");
+        assertThat(policy.actionType()).isEqualTo("LOST_PARCEL_REFUND");
+        assertThat(policy.minimumInactiveDays()).isEqualTo(7);
+        assertThat(policy.summary()).doesNotContain(country);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "SG,SG_DAMAGED_ITEM,v2,25.00",
+            "MY,MY_DAMAGED_ITEM,v2,25.00",
+            "TH,TH_DAMAGED_ITEM,v2,250.00",
+            "ID,ID_DAMAGED_ITEM,v2,250000.00",
+            "VN,VN_DAMAGED_ITEM,v3,150000.00"
+    })
+    void coversEveryDemoCountryForDamagedItem(String country, String policyId, String version, String cap) {
+        AfterSalesTypes.PolicyEvidence policy = catalog.lookup(country, "DAMAGED_ITEM", AFTER_V2);
+
+        assertThat(policy.policyId()).isEqualTo(policyId);
+        assertThat(policy.issueType()).isEqualTo("DAMAGED_ITEM");
+        assertThat(policy.version()).isEqualTo(version);
+        assertThat(policy.evidenceId()).isEqualTo("policy:" + policyId + ":" + version + "#section-6.3");
+        assertThat(policy.maximumCompensation()).isEqualByComparingTo(new BigDecimal(cap));
+        assertThat(policy.compensationRate()).isEqualByComparingTo("0.30");
+        assertThat(policy.actionType()).isEqualTo("DAMAGE_COMPENSATION_COUPON");
+        // 破损政策无未更新天数阈值（核验破损照片是资格条件）。
+        assertThat(policy.minimumInactiveDays()).isEqualTo(0);
+        assertThat(policy.summary()).doesNotContain(country);
+    }
+
+    @Test
+    void lostAndDamagedPoliciesAreVersionedPerEffectiveDate() {
+        AfterSalesTypes.PolicyEvidence historical =
+                catalog.lookup("SG", "LOST_IN_TRANSIT", BETWEEN_VERSIONS);
+        assertThat(historical.version()).isEqualTo("v1");
+        assertThat(historical.evidenceId()).isEqualTo("policy:SG_LOST_IN_TRANSIT:v1#section-5.2");
+
+        AfterSalesTypes.PolicyEvidence current =
+                catalog.lookup("SG", "DAMAGED_ITEM", BETWEEN_VERSIONS);
+        assertThat(current.version()).isEqualTo("v1");
+        assertThat(current.evidenceId()).isEqualTo("policy:SG_DAMAGED_ITEM:v1#section-6.3");
+    }
+
     @Test
     void failsClosedWhenOccurredBeforeEveryVersion() {
         assertThatThrownBy(() -> catalog.lookup("SG", "SHIPMENT_DELAY", BEFORE_V1))

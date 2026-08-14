@@ -52,6 +52,8 @@ class AfterSalesRunEventServiceTest {
 
     private static final class DisconnectedSseEmitter extends SseEmitter {
         private boolean disconnected;
+        private int sendAttempts;
+        private int completionAttempts;
 
         DisconnectedSseEmitter() {
             super(0L);
@@ -59,13 +61,15 @@ class AfterSalesRunEventServiceTest {
 
         @Override
         public void send(SseEventBuilder builder) throws java.io.IOException {
+            sendAttempts++;
             if (disconnected) {
                 throw new java.io.IOException("client disconnected");
             }
         }
 
         @Override
-        public void completeWithError(Throwable ex) {
+        public void complete() {
+            completionAttempts++;
             throw new IllegalStateException("AsyncContext already closed");
         }
     }
@@ -208,6 +212,16 @@ class AfterSalesRunEventServiceTest {
         assertThatCode(() -> localService.append(
                 "run-1", "approval_recorded", "approved", "success", "approved",
                 Map.of("summary", "approved"))).doesNotThrowAnyException();
+        // 断线前已有 1 次握手发送，append 再尝试 1 次推送即达 2；
+        // 断线只移除订阅者、不触发 complete（连接收尾交给容器）。
+        assertThat(emitter.sendAttempts).isEqualTo(2);
+        assertThat(emitter.completionAttempts).isZero();
+
+        // 断线订阅者被移除后，后续 append 不再尝试发送，业务事务不受影响。
+        assertThatCode(() -> localService.append(
+                "run-1", "execution_started", "started", "running", "started",
+                Map.of("summary", "started"))).doesNotThrowAnyException();
+        assertThat(emitter.sendAttempts).isEqualTo(2);
     }
 
     @Test

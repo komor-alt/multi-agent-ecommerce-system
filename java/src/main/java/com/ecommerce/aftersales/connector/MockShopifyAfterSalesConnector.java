@@ -1,7 +1,9 @@
 package com.ecommerce.aftersales.connector;
 
 import com.ecommerce.aftersales.model.AfterSalesTypes;
+import com.ecommerce.data.DemoCatalogDataFactory;
 import com.ecommerce.data.DemoFulfillmentDataFactory;
+import com.ecommerce.model.Product;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
@@ -9,6 +11,7 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -34,6 +37,20 @@ public class MockShopifyAfterSalesConnector {
             "O-VN-5003", 2
     );
 
+    /** 承运商调查结论（演示种子）：LOST_CONFIRMED = 承运商确认丢失（补偿可达），其余默认调查中。 */
+    private static final String DEFAULT_CARRIER_OUTCOME = "UNDER_INVESTIGATION";
+    private static final Map<String, String> CARRIER_OUTCOME_BY_ORDER = Map.of(
+            "O-VN-5002", "LOST_CONFIRMED",
+            "O-SG-1003", "LOST_CONFIRMED",
+            "O-ID-4001", "UNDER_INVESTIGATION"
+    );
+
+    /** 破损照片核验结论（演示种子）：VERIFIED = 人工确认破损（补偿可达），
+     *  REJECTED = 照片无法证明破损（失败关闭），其余默认待核验。 */
+    private static final String DEFAULT_DAMAGE_PHOTO_STATUS = "PENDING_REVIEW";
+    private static final Set<String> VERIFIED_DAMAGE_ORDERS = Set.of("O-SG-1001");
+    private static final Set<String> REJECTED_DAMAGE_ORDERS = Set.of("O-MY-2001");
+
     /**
      * 运单号由可信订单号确定性派生：SF-<国家>-<数字>，不再硬编码越南运单。
      * 先整体校验订单号格式再提取数字段，避免按索引截取残留国家段导致重复（如 SF-ID-ID-4001）；
@@ -48,6 +65,15 @@ public class MockShopifyAfterSalesConnector {
             throw new IllegalArgumentException("ORDER_ID_COUNTRY_MISMATCH");
         }
         return "SF-" + country + "-" + matcher.group(2);
+    }
+
+    /** 订单号数字段（O-CC-1234 → 1234），用于派生案件/照片/交付 ID；格式由 deriveTrackingNumber 保证。 */
+    private static String orderNumber(String orderId) {
+        Matcher matcher = TRUSTED_ORDER_ID_PATTERN.matcher(orderId);
+        if (!matcher.matches()) {
+            throw new IllegalArgumentException("UNTRUSTED_ORDER_ID_FORMAT");
+        }
+        return matcher.group(2);
     }
 
     public AfterSalesTypes.OrderSnapshot getOrder(String orderId) {
@@ -94,6 +120,122 @@ public class MockShopifyAfterSalesConnector {
                 inactiveDays,
                 Math.max(0, inactiveDays - order.promisedDeliveryDays()),
                 timeline
+        );
+    }
+
+    /**
+     * 承运商理赔/调查案件快照（LOST_IN_TRANSIT 证据）：案件号、调查结论与时间点全部由
+     * 可信订单号确定性派生（见 CARRIER_OUTCOME_BY_ORDER），绝不来自客户消息。
+     * evidenceId 不可变：carrier-case:&lt;caseId&gt;:v1。
+     */
+    public AfterSalesTypes.CarrierCaseSnapshot getCarrierCase(AfterSalesTypes.OrderSnapshot order) {
+        String caseId = "CC-" + order.country() + "-" + orderNumber(order.orderId());
+        String outcome = CARRIER_OUTCOME_BY_ORDER.getOrDefault(order.orderId(), DEFAULT_CARRIER_OUTCOME);
+        Instant openedAt = Instant.now().minus(INACTIVE_DAYS_BY_ORDER.getOrDefault(
+                order.orderId(), DEFAULT_INACTIVE_DAYS), ChronoUnit.DAYS);
+        String summary = "LOST_CONFIRMED".equals(outcome)
+                ? "Carrier investigation closed: the parcel is confirmed lost in transit."
+                : "Carrier investigation open; no scan activity since the last checkpoint.";
+        return new AfterSalesTypes.CarrierCaseSnapshot(
+                "carrier-case:" + caseId + ":v1",
+                caseId,
+                "SF Express",
+                "LOST_CONFIRMED".equals(outcome) ? "CLOSED" : "OPEN",
+                openedAt,
+                openedAt,
+                outcome,
+                summary
+        );
+    }
+
+    /** 派送/签收证明快照的确定性交付时间：比承诺天数早一天送达（按时交付的演示种子）。 */
+    private static Instant deliveredAtFor(AfterSalesTypes.OrderSnapshot order) {
+        return Instant.now().minus(Math.max(1, order.promisedDeliveryDays() - 1), ChronoUnit.DAYS);
+    }
+
+    /**
+     * 派送证明快照（DAMAGED_ITEM 证据）：交付时间、地点与签收人全部由可信订单快照确定性
+     * 派生（目的地与订单国家一致），绝不来自客户消息。evidenceId 不可变：
+     * delivery:&lt;orderId&gt;:&lt;交付日期&gt;。
+     */
+    public AfterSalesTypes.DeliverySnapshot getDelivery(AfterSalesTypes.OrderSnapshot order) {
+        Instant deliveredAt = deliveredAtFor(order);
+        String deliveryId = "DL-" + order.country() + "-" + orderNumber(order.orderId());
+        String location = DESTINATION_CITIES.getOrDefault(order.country(), "SEA regional hub");
+        return new AfterSalesTypes.DeliverySnapshot(
+                "delivery:" + order.orderId() + ":" + deliveredAt.toString().substring(0, 10),
+                deliveryId,
+                order.trackingNumber(),
+                deliveredAt,
+                location,
+                "RECEIVED",
+                "DELIVERED",
+                "SIGNATURE"
+        );
+    }
+
+    /**
+     * 破损照片快照（DAMAGED_ITEM 证据）：照片 ID、拍摄时间与核验结论全部由可信订单快照
+     * 确定性派生（见 VERIFIED_DAMAGE_ORDERS / REJECTED_DAMAGE_ORDERS），绝不来自客户消息。
+     * evidenceId 不可变：damage-photo:&lt;photoId&gt;:v1。
+     */
+    public AfterSalesTypes.DamagePhotoSnapshot getDamagePhoto(AfterSalesTypes.OrderSnapshot order) {
+        String photoId = "DP-" + order.country() + "-" + orderNumber(order.orderId()) + "-01";
+        String status;
+        if (VERIFIED_DAMAGE_ORDERS.contains(order.orderId())) {
+            status = "VERIFIED";
+        } else if (REJECTED_DAMAGE_ORDERS.contains(order.orderId())) {
+            status = "REJECTED";
+        } else {
+            status = DEFAULT_DAMAGE_PHOTO_STATUS;
+        }
+        String reviewSummary = switch (status) {
+            case "VERIFIED" -> "Manual review confirmed visible damage matching the reported item.";
+            case "REJECTED" -> "Manual review found no visible damage in the photo; claim not verified.";
+            default -> "Photo uploaded; awaiting manual review.";
+        };
+        return new AfterSalesTypes.DamagePhotoSnapshot(
+                "damage-photo:" + photoId + ":v1",
+                photoId,
+                deliveredAtFor(order),
+                "image/jpeg",
+                1080,
+                1440,
+                1_240_000L,
+                status,
+                reviewSummary,
+                null // 种子快照无附件记录，不派生校验和
+        );
+    }
+
+    /**
+     * 受损商品快照（DAMAGED_ITEM 证据）：商品 ID 取自订单行（首个商品），商品资料取自
+     * 只读演示目录，全部由服务端解析，绝不来自客户消息。evidenceId 不可变：
+     * product:&lt;productId&gt;:v1。
+     */
+    public AfterSalesTypes.ProductSnapshot getProduct(AfterSalesTypes.OrderSnapshot order) {
+        Map<String, Object> orderRow = DemoFulfillmentDataFactory.createOrders().stream()
+                .filter(candidate -> order.orderId().equals(candidate.get("order_id")))
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("ORDER_NOT_FOUND"));
+        @SuppressWarnings("unchecked")
+        List<String> productIds = (List<String>) orderRow.get("product_ids");
+        if (productIds == null || productIds.isEmpty()) {
+            throw new IllegalArgumentException("ORDER_HAS_NO_PRODUCT");
+        }
+        Product product = DemoCatalogDataFactory.createCatalog().stream()
+                .filter(candidate -> productIds.get(0).equals(candidate.getProductId()))
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("PRODUCT_NOT_FOUND"));
+        return new AfterSalesTypes.ProductSnapshot(
+                "product:" + product.getProductId() + ":v1",
+                product.getProductId(),
+                product.getName(),
+                product.getCategory(),
+                BigDecimal.valueOf(product.getPrice()),
+                product.getCurrency(),
+                product.getBrand(),
+                product.isCrossBorderEligible()
         );
     }
 

@@ -16,6 +16,10 @@ public class AfterSalesAgentState {
     private final AfterSalesTicketEntity ticket;
     private AfterSalesTypes.OrderSnapshot order;
     private AfterSalesTypes.ShipmentSnapshot shipment;
+    private AfterSalesTypes.CarrierCaseSnapshot carrierCase;
+    private AfterSalesTypes.DeliverySnapshot delivery;
+    private AfterSalesTypes.DamagePhotoSnapshot damagePhoto;
+    private AfterSalesTypes.ProductSnapshot product;
     private AfterSalesTypes.PolicyEvidence policy;
     private AfterSalesTypes.CompensationResult compensation;
     private AfterSalesTypes.IntakeResult intake;

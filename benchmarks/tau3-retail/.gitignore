@@ -1,0 +1,15 @@
+# Benchmark run outputs (official trajectories + reports). Keep .gitkeep only.
+results/*
+!results/.gitkeep
+
+# Pinned official checkout (created by scripts/setup_tau3.sh)
+env/
+
+# Python / uv
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# Local env (API keys)
+.env
