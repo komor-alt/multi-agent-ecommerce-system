@@ -9,7 +9,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
-import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -23,16 +22,19 @@ public class AfterSalesToolExecutor {
     public static final String CREATE_ACTION_PROPOSAL = "create_action_proposal";
 
     private final MockShopifyAfterSalesConnector connector;
+    private final DemoAfterSalesPolicyCatalogService policyCatalog;
     private final CompensationRuleService compensationRuleService;
     private final ActionProposalRepository proposalRepository;
     private final ObjectMapper objectMapper;
 
     public AfterSalesToolExecutor(
             MockShopifyAfterSalesConnector connector,
+            DemoAfterSalesPolicyCatalogService policyCatalog,
             CompensationRuleService compensationRuleService,
             ActionProposalRepository proposalRepository,
             ObjectMapper objectMapper) {
         this.connector = connector;
+        this.policyCatalog = policyCatalog;
         this.compensationRuleService = compensationRuleService;
         this.proposalRepository = proposalRepository;
         this.objectMapper = objectMapper;
@@ -110,27 +112,18 @@ public class AfterSalesToolExecutor {
     private AfterSalesTypes.ToolResult searchPolicy(AfterSalesAgentState state) {
         require(state.getOrder(), "ORDER_REQUIRED");
         require(state.getShipment(), "SHIPMENT_REQUIRED");
-        if (!"VN".equals(state.getOrder().country())) {
-            throw new IllegalStateException("POLICY_NOT_FOUND_FOR_COUNTRY");
-        }
-        AfterSalesTypes.PolicyEvidence policy = new AfterSalesTypes.PolicyEvidence(
-                "policy:VN_SHIPMENT_DELAY:v3#section-4.2",
-                "VN_SHIPMENT_DELAY",
-                "v3",
-                "VN",
+        // 可信键来自订单快照与工单：country + issueType + occurredAt。
+        // 无匹配政策时目录失败关闭（PolicyNotFoundException / POLICY_NOT_FOUND），不提供通用政策兜底。
+        AfterSalesTypes.PolicyEvidence policy = policyCatalog.lookup(
+                state.getOrder().country(),
                 state.getTicket().getIssueType(),
-                Instant.parse("2026-01-01T00:00:00Z"),
-                7,
-                new BigDecimal("0.10"),
-                new BigDecimal("150000.00"),
-                "DELAY_COMPENSATION_COUPON",
-                "4.2",
-                "Paid orders with shipment inactivity of at least 7 days may receive a delay compensation coupon."
+                state.getTicket().getCreatedAt()
         );
         state.setPolicy(policy);
         state.getEvidenceIds().add(policy.evidenceId());
         return new AfterSalesTypes.ToolResult(
-                "Vietnam shipment delay policy v3 section 4.2 matched the ticket occurrence time.",
+                "Shipment delay policy " + policy.version() + " section " + policy.section()
+                        + " matched the ticket occurrence time.",
                 policy,
                 List.of(policy.evidenceId())
         );
@@ -167,7 +160,7 @@ public class AfterSalesToolExecutor {
                 .currency(state.getCompensation().currency())
                 .policyVersion(state.getPolicy().version())
                 .proposalVersion("v1")
-                .decisionSummary("The paid order is inactive beyond the Vietnam policy threshold. A delay coupon requires operator approval.")
+                .decisionSummary("The paid order is inactive beyond the applicable policy threshold. A delay coupon requires operator approval.")
                 .evidenceIdsJson(writeJson(state.getEvidenceIds()))
                 .status(AfterSalesTypes.ProposalStatus.PENDING)
                 .build());
