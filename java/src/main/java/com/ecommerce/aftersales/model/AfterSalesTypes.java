@@ -88,6 +88,9 @@ public final class AfterSalesTypes {
     /**
      * Intake Agent 的不可变结构化分类结果。字段不可变（record），
      * 只承载分类数据，不承载任何可执行内容；决策端从不读取模型生成的金额/工具参数/批准结果。
+     * requiredEvidence 在此只是「模型/规则的不可信建议」：Agent 循环在分类后用
+     * DecisionRouteResolver 的服务端路线证据重建它（withRequiredEvidence），建议既不能降低
+     * 也不能抬高服务端路线要求。
      */
     public record IntakeResult(
             String issueType,
@@ -102,13 +105,19 @@ public final class AfterSalesTypes {
     ) {
         /** MVP 固定问题类型：当前只受理物流延迟。 */
         public static final String SHIPMENT_DELAY = "SHIPMENT_DELAY";
-        /** 服务端重建的必需证据基线：模型输出不能减少。 */
+        /** 规则兜底的必需证据占位基线（COMPENSATION_EVALUATION 全量）；最终由路线解析器重建。 */
         public static final List<String> REQUIRED_EVIDENCE = List.of("ORDER", "SHIPMENT", "POLICY");
 
         /** 规则兜底构造（source=RULE_FALLBACK）。fallbackReason 只允许安全错误码，见 AfterSalesIntakeService。 */
         public static IntakeResult rulesFallback(String fallbackReason, long latencyMs) {
             return new IntakeResult(SHIPMENT_DELAY, List.of("TRACK_SHIPMENT"), "LOW", Map.of(),
                     List.of(), REQUIRED_EVIDENCE, "RULE_FALLBACK", fallbackReason, latencyMs);
+        }
+
+        /** 服务端重建必需证据：分类字段原样保留，只替换 requiredEvidence（不可信建议 → 路线要求）。 */
+        public IntakeResult withRequiredEvidence(List<String> trustedEvidence) {
+            return new IntakeResult(issueType, intents, urgency, entities, missingInfo,
+                    trustedEvidence, source, fallbackReason, latencyMs);
         }
     }
 

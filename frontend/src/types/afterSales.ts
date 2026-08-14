@@ -86,16 +86,46 @@ export type AfterSalesIntake = {
   fallbackReason?: string;
 };
 
+/** 决策路线（后端 DecisionRoute，由服务端确定性解析，模型不能输出）。 */
+export type DecisionRoute =
+  | "ANSWER_ONLY"
+  | "COMPENSATION_EVALUATION"
+  | "REQUEST_MORE_INFO"
+  | "HUMAN_ESCALATION";
+
+/**
+ * 终态答复。字段按路线可选：ANSWER_ONLY 只有 answerType/answer（物流状态答复），
+ * 没有 policy/compensation/proposalId；COMPENSATION_EVALUATION 有 compensation，
+ * eligible=true 时才有 proposalId。缺失字段不输出 null。
+ */
 export type AfterSalesFinalAnswer = {
   ticketId: string;
   order: OrderSnapshot;
   shipment: ShipmentSnapshot;
-  policy: PolicyEvidence;
-  compensation: CompensationResult;
-  proposalId: string;
+  policy?: PolicyEvidence;
+  compensation?: CompensationResult;
+  proposalId?: string;
   requiresApproval: boolean;
   evidenceIds: string[];
   intake?: AfterSalesIntake;
+  /** 服务端解析的决策路线：直接答复 / 补偿评估（预留升级路线 MVP 不产生）。 */
+  decisionRoute?: DecisionRoute;
+  /** ANSWER_ONLY 路线的答复类型（当前固定 SHIPMENT_STATUS）。 */
+  answerType?: string;
+  /** ANSWER_ONLY 路线的结构化物流答复（确定性 Java 模板，非 LLM 文本）。 */
+  answer?: {
+    trackingNumber: string;
+    status: string;
+    lastUpdatedAt: string;
+    inactiveDays: number;
+    delayDays: number;
+  };
+  /** COMPENSATION_EVALUATION 路线的补偿资格结论（不可补偿时 false）。 */
+  eligible?: boolean;
+  /** 决策动作：可补偿 = 政策动作类型；不可补偿 = NO_ACTION。 */
+  action?: string;
+  /** 决策依据：不可补偿时为政策未达阈值原因（如 POLICY_THRESHOLD_NOT_REACHED）。 */
+  reason?: string;
   decisionSummary: string;
 };
 

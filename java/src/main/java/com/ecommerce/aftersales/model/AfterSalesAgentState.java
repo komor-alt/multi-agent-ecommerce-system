@@ -19,6 +19,8 @@ public class AfterSalesAgentState {
     private AfterSalesTypes.PolicyEvidence policy;
     private AfterSalesTypes.CompensationResult compensation;
     private AfterSalesTypes.IntakeResult intake;
+    /** Intake 分类后由 DecisionRouteResolver 确定性解析的决策路线；模型不能输出。 */
+    private DecisionRoute route;
     private String proposalId;
     private final List<String> evidenceIds = new ArrayList<>();
 }

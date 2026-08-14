@@ -18,6 +18,9 @@ import java.util.UUID;
 
 @Service
 public class ApprovalService {
+    // TODO: move server-side approval policy checks into ApprovalPolicyGate.
+    // 当前审批的服务端策略检查（状态机/幂等/执行任务派生）内联在本服务中；后续应抽到独立的
+    // ApprovalPolicyGate 统一收敛「可审批性」判定，本服务只负责状态流转与记录落库。本轮不重构。
     private final ActionProposalRepository proposalRepository;
     private final ApprovalRecordRepository approvalRecordRepository;
     private final ExecutionJobRepository executionJobRepository;

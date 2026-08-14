@@ -33,10 +33,17 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type { ReactNode } from "react";
-import type { AfterSalesEvent, AfterSalesIntake, AfterSalesTicket } from "../../types/afterSales";
+import type {
+  ActionProposal,
+  AfterSalesEvent,
+  AfterSalesFinalAnswer,
+  AfterSalesIntake,
+  AfterSalesTicket,
+} from "../../types/afterSales";
 import { formatDuration } from "../../utils/format";
 import {
   countryLabel,
+  decisionRouteLabel,
   deriveEvidencePlan,
   EVIDENCE_CATEGORIES,
   eventTypeLabel,
@@ -45,6 +52,7 @@ import {
   executionStatusLabel,
   formatDateTime,
   formatMoney,
+  intakeRequiredEvidence,
   issueTypeLabel,
   plannerReasonLabel,
   plannerSourceLabel,
@@ -174,7 +182,7 @@ function ContextPanel({ ticket, loading }: { ticket?: AfterSalesTicket; loading:
           ]}
         />
       ) : (
-        <PanelEmpty text="订单信息待 Agent 核验" />
+        <PanelEmpty text="订单信息待 Agent 获取" />
       )}
 
       <PanelTitle>物流轨迹</PanelTitle>
@@ -201,7 +209,7 @@ function ContextPanel({ ticket, loading }: { ticket?: AfterSalesTicket; loading:
           />
         </>
       ) : (
-        <PanelEmpty text="物流轨迹待 Agent 核验" />
+        <PanelEmpty text="物流轨迹待 Agent 获取" />
       )}
 
       <PanelTitle>用户 / 工单基础信息</PanelTitle>
@@ -223,8 +231,10 @@ function ContextPanel({ ticket, loading }: { ticket?: AfterSalesTicket; loading:
 
 /**
  * 紧凑的「Intake 分析」：建议之前展示结构化分类。规则降级时只显示克制的 Tag，不展示技术堆栈。
+ * 客户紧急度（Intake urgency）单独标注为「客户紧急度」，与审批栏的动作风险（assessRiskLevel）
+ * 完全分离；决策路线由服务端解析（模型不能输出），在此一并展示。
  */
-function IntakeAnalysisPanel({ intake }: { intake: AfterSalesIntake }) {
+function IntakeAnalysisPanel({ intake, route }: { intake: AfterSalesIntake; route?: string }) {
   const fallback = intake.source === "RULE_FALLBACK";
   return (
     <div className="intake-panel">
@@ -239,8 +249,9 @@ function IntakeAnalysisPanel({ intake }: { intake: AfterSalesIntake }) {
       <Space size={4} wrap>
         <Tag>{issueTypeLabel(intake.issueType)}</Tag>
         {intake.intents.map((intent) => <Tag key={intent} color="blue">{intentLabel(intent)}</Tag>)}
-        <Tag color={riskLevelColor(intake.urgency)}>{riskLevelLabel(intake.urgency)}紧急度</Tag>
+        <Tag color={riskLevelColor(intake.urgency)}>客户紧急度：{riskLevelLabel(intake.urgency)}</Tag>
         {intake.entities?.deadline ? <Tag>预计 {intake.entities.deadline}</Tag> : null}
+        {route ? <Tag color="geekblue">决策路线：{decisionRouteLabel(route)}</Tag> : null}
       </Space>
     </div>
   );
@@ -252,8 +263,9 @@ function intentLabel(intent: string): string {
 }
 
 /**
- * 紧凑 Evidence Plan：Planner 驱动的取证进度。ORDER/SHIPMENT/POLICY 三份证据的
- * 请求与完成状态 + Ready for Decision。只依赖 Planner 事件与证据 ID，不展示任何模型输出。
+ * 紧凑 Evidence Plan：Planner 驱动的取证进度。证据类别来自服务端路线清单
+ * （requiredEvidence：ANSWER_ONLY 只有 ORDER/SHIPMENT，不显示缺失的 POLICY）。
+ * 状态只表达「已获取/待获取」——evidenceId 存在不代表人工核验，绝不使用「已核验」字样。
  */
 function EvidencePlanPanel({ plan }: { plan: EvidencePlanState }) {
   return (
@@ -272,9 +284,9 @@ function EvidencePlanPanel({ plan }: { plan: EvidencePlanState }) {
             key={item.type}
             title={
               item.verified
-                ? `${evidenceTypeLabel(item.type)}证据已核验`
+                ? `${evidenceTypeLabel(item.type)}证据已获取`
                 : item.requested
-                  ? `${evidenceTypeLabel(item.type)}证据已请求，待核验`
+                  ? `${evidenceTypeLabel(item.type)}证据已请求，待获取`
                   : `${evidenceTypeLabel(item.type)}证据未请求`
             }
           >
@@ -307,10 +319,14 @@ function DecisionCenterPanel({
   const finalAnswer = ticket?.run?.finalAnswer;
   const proposal = ticket?.proposal;
   const policy = finalAnswer?.policy;
-  const evidencePlan = deriveEvidencePlan(events);
-  if (!finalAnswer && !proposal) {
+  // 直播阶段（finalAnswer 尚未持久化）从最新的 decision_completed 事件渲染结构化决策结果。
+  const decisionEvent = [...events].reverse().find((event) => event.type === "decision_completed")?.data ?? {};
+  // 必需证据尊重服务端路线清单：直播流取 intake_completed，持久化 run 取 finalAnswer.intake。
+  const requiredEvidence = finalAnswer?.intake?.requiredEvidence ?? intakeRequiredEvidence(events);
+  const evidencePlan = deriveEvidencePlan(events, requiredEvidence);
+  if (!finalAnswer && !proposal && Object.keys(decisionEvent).length === 0) {
     if (ticket?.status === "ANALYZING" && events.length > 0) {
-      // 直播分析中：先展示实时的 Evidence Plan，再提示建议尚未生成。
+      // 直播分析中：先展示实时的 Evidence Plan，再提示分析尚未完成。
       return (
         <div className="panel-body">
           <EvidencePlanPanel plan={evidencePlan} />
@@ -332,18 +348,13 @@ function DecisionCenterPanel({
   }));
   return (
     <div className="panel-body">
-      {finalAnswer?.intake ? <IntakeAnalysisPanel intake={finalAnswer.intake} /> : null}
+      {finalAnswer?.intake ? <IntakeAnalysisPanel intake={finalAnswer.intake} route={finalAnswer.decisionRoute} /> : null}
       <EvidencePlanPanel plan={evidencePlan} />
-      <div className="suggestion-head">
-        <div>
-          <Typography.Text type="secondary">AI 建议金额</Typography.Text>
-          <div className="suggestion-amount">{proposal ? formatMoney(proposal.amount, proposal.currency) : "—"}</div>
-        </div>
-        {proposal ? <Tag color="blue">{proposal.actionType}</Tag> : null}
-      </div>
+      <DecisionResultBlock finalAnswer={finalAnswer} proposal={proposal} decisionEvent={decisionEvent} />
       <PanelTitle>判断理由</PanelTitle>
       <Typography.Paragraph className="decision-summary">
-        {proposal?.decisionSummary || finalAnswer?.decisionSummary || "—"}
+        {proposal?.decisionSummary || finalAnswer?.decisionSummary
+          || (typeof decisionEvent.summary === "string" ? decisionEvent.summary : "—")}
       </Typography.Paragraph>
       {finalAnswer?.compensation ? (
         <>
@@ -388,13 +399,13 @@ function DecisionCenterPanel({
             render: (value: string) => <Typography.Text code className="evidence-id">{value}</Typography.Text>,
           },
           {
-            title: "验证状态",
+            title: "获取状态",
             dataIndex: "verified",
             width: 100,
             render: (verified: boolean) => (
               verified
-                ? <Typography.Text type="success"><CheckCircleOutlined /> 已验证</Typography.Text>
-                : <Typography.Text type="secondary"><CloseCircleOutlined /> 未验证</Typography.Text>
+                ? <Typography.Text type="success"><CheckCircleOutlined /> 已获取</Typography.Text>
+                : <Typography.Text type="secondary"><CloseCircleOutlined /> 未获取</Typography.Text>
             ),
           },
           {
@@ -407,6 +418,81 @@ function DecisionCenterPanel({
       />
     </div>
   );
+}
+
+/**
+ * 决策结果块（按路线渲染，确定性后端数据）：
+ * - ANSWER_ONLY：物流状态答复（SHIPMENT_STATUS），不展示任何金额/方案 UI；
+ * - 补偿评估 eligible：建议补偿金额（方案金额，展示为「建议补偿金额」）；
+ * - 补偿评估非 eligible：规则计算金额结论为「无需补偿」，不展示虚假金额/方案。
+ * 直播阶段优先用 decision_completed 事件的结构化字段，持久化后以 finalAnswer 为准。
+ */
+function DecisionResultBlock({
+  finalAnswer,
+  proposal,
+  decisionEvent,
+}: {
+  finalAnswer?: AfterSalesFinalAnswer;
+  proposal?: ActionProposal;
+  decisionEvent: Record<string, unknown>;
+}) {
+  const route = finalAnswer?.decisionRoute ?? (typeof decisionEvent.route === "string" ? decisionEvent.route : undefined);
+  const answer = finalAnswer?.answer ?? (isShipmentAnswer(decisionEvent.answer) ? decisionEvent.answer : undefined);
+  const eligible = finalAnswer?.eligible
+    ?? (typeof decisionEvent.eligible === "boolean" ? decisionEvent.eligible : undefined);
+  const action = finalAnswer?.action ?? (typeof decisionEvent.action === "string" ? decisionEvent.action : undefined);
+  const shipment = finalAnswer?.shipment;
+
+  if (route === "ANSWER_ONLY" || finalAnswer?.answerType === "SHIPMENT_STATUS") {
+    return (
+      <div className="suggestion-head">
+        <div>
+          <Typography.Text type="secondary">物流状态答复</Typography.Text>
+          <div className="suggestion-amount">
+            {answer
+              ? `未更新 ${answer.inactiveDays} 天 · 状态 ${answer.status}`
+              : shipment
+                ? `未更新 ${shipment.inactiveDays} 天 · 状态 ${shipment.status}`
+                : "—"}
+          </div>
+        </div>
+        <Tag color="green">SHIPMENT_STATUS</Tag>
+      </div>
+    );
+  }
+  if (typeof eligible === "boolean" && eligible) {
+    const amount = proposal?.amount ?? finalAnswer?.compensation?.amount;
+    const currency = proposal?.currency ?? finalAnswer?.compensation?.currency ?? "";
+    return (
+      <div className="suggestion-head">
+        <div>
+          <Typography.Text type="secondary">建议补偿金额</Typography.Text>
+          <div className="suggestion-amount">{amount != null ? formatMoney(amount, currency) : "—"}</div>
+        </div>
+        <Tag color="blue">{action || proposal?.actionType || "—"}</Tag>
+      </div>
+    );
+  }
+  if (typeof eligible === "boolean" && !eligible) {
+    return (
+      <div className="suggestion-head">
+        <div>
+          <Typography.Text type="secondary">规则计算金额</Typography.Text>
+          <div className="suggestion-amount">无需补偿</div>
+        </div>
+        <Tag>NO_ACTION</Tag>
+      </div>
+    );
+  }
+  // 决策尚未完成：不展示空的金额/方案 UI。
+  return null;
+}
+
+/** 类型守卫：decision_completed 事件里的结构化物流答复。 */
+function isShipmentAnswer(value: unknown): value is NonNullable<AfterSalesFinalAnswer["answer"]> {
+  if (!value || typeof value !== "object") return false;
+  const item = value as Record<string, unknown>;
+  return typeof item.trackingNumber === "string" && typeof item.inactiveDays === "number";
 }
 
 function ApprovalPanel({
@@ -440,7 +526,14 @@ function ApprovalPanel({
   const proposal = ticket?.proposal;
   const finalAnswer = ticket?.run?.finalAnswer;
   if (!proposal) {
-    return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={ticket?.status === "ANALYZING" ? "Agent 分析中，尚未生成方案" : "暂无待审批方案"} />;
+    const route = finalAnswer?.decisionRoute;
+    const description =
+      ticket?.status === "ANALYZING"
+        ? "Agent 分析中，尚未生成方案"
+        : route === "ANSWER_ONLY" || (finalAnswer?.requiresApproval === false && ticket?.status === "RESOLVED")
+          ? `该工单决策路线为「${decisionRouteLabel(route)}」，无需人工审批`
+          : "暂无待审批方案";
+    return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={description} />;
   }
   const isPending = proposal.status === "PENDING";
   return (

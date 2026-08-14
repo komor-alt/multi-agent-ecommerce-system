@@ -6,6 +6,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.client.ChatClient;
 
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -52,6 +53,31 @@ class AfterSalesIntakeServiceTest {
         assertThat(result.urgency()).isEqualTo("HIGH"); // 十天未更新 → HIGH
         assertThat(result.entities()).containsEntry("deadline", "2 days"); // 规范成可解释字符串
         assertThat(result.requiredEvidence()).containsExactly("ORDER", "SHIPMENT", "POLICY");
+    }
+
+    @Test
+    void plainTrackingQuestionStaysSingleTrackingIntent() {
+        // 纯物流查询（无退款/补偿词）→ 只有 TRACK_SHIPMENT 意图（→ ANSWER_ONLY 路线）。
+        AfterSalesIntakeService service = service("RULES", "your_api_key_here", 4000);
+        AfterSalesTypes.IntakeResult result = service.classify(
+                "我的包裹十天没有更新了，现在到底是什么情况？能帮我查一下物流吗？");
+
+        assertThat(result.source()).isEqualTo("RULE_FALLBACK");
+        assertThat(result.intents()).containsExactly("TRACK_SHIPMENT");
+        assertThat(result.urgency()).isEqualTo("HIGH"); // 十天未更新 → HIGH
+    }
+
+    @Test
+    void explicitRefundAndCompensationKeywordsProduceRequestRefund() {
+        AfterSalesIntakeService service = service("RULES", "your_api_key_here", 4000);
+        // 退款 / 退钱 / 退单 / 赔偿 / 补偿 / 赔付：任一显式退款补偿词 → REQUEST_REFUND
+        // （→ COMPENSATION_EVALUATION 路线）。
+        for (String keyword : List.of("退款", "退钱", "退单", "赔偿", "补偿", "赔付")) {
+            AfterSalesTypes.IntakeResult result = service.classify("包裹卡住了，我要" + keyword + "。");
+            assertThat(result.intents())
+                    .as("keyword %s", keyword)
+                    .containsExactly("TRACK_SHIPMENT", "REQUEST_REFUND");
+        }
     }
 
     @Test
@@ -121,8 +147,9 @@ class AfterSalesIntakeServiceTest {
         assertThat(result.urgency()).isEqualTo("HIGH");
         assertThat(result.entities()).containsEntry("deadline", "2 days");
         assertThat(result.missingInfo()).containsExactly("DELIVERY_PROMISE");
-        // 服务端重建必需证据：模型只能给出 SHIPMENT，基线 ORDER/SHIPMENT/POLICY 一个不少。
-        assertThat(result.requiredEvidence()).containsExactly("ORDER", "SHIPMENT", "POLICY");
+        // requiredEvidence 只是模型不可信建议：白名单过滤后原样保留（仅 SHIPMENT），
+        // 路线证据由 DecisionRouteResolver 服务端重建，不在此处补全。
+        assertThat(result.requiredEvidence()).containsExactly("SHIPMENT");
     }
 
     @Test

@@ -97,7 +97,8 @@ function ageHours(timestamp: string | undefined): number {
   return Number.isFinite(value) ? (Date.now() - value) / 3_600_000 : 0;
 }
 
-/** 风险等级（规则评估）：金额占政策上限比例 + 物流紧急度（延迟天数）驱动。 */
+/** 风险等级（规则评估）：只由动作/金额 vs 政策上限与物流延迟天数等确定性规则输入驱动。
+ *  客户紧急度（Intake urgency）不属于动作风险，绝不参与本评估；风险只用于提案/审批上下文。 */
 export type RiskLevel = "LOW" | "MEDIUM" | "HIGH";
 
 export type RiskAssessment = {
@@ -111,13 +112,8 @@ export function assessRiskLevel(input: {
   currency: string;
   maxCompensation: number;
   delayDays?: number;
-  /** Intake 识别的紧急度优先于金额/物流规则：HIGH 紧急度直接进入 HIGH 风险。 */
-  intakeUrgency?: RiskLevel;
 }): RiskAssessment {
-  const { amount, currency, maxCompensation, delayDays = 0, intakeUrgency } = input;
-  if (intakeUrgency === "HIGH") {
-    return { level: "HIGH", rule: "Intake 识别为 HIGH 紧急度，需优先人工审批" };
-  }
+  const { amount, currency, maxCompensation, delayDays = 0 } = input;
   if (amount > 0 && maxCompensation > 0 && amount > maxCompensation * 0.5) {
     return { level: "HIGH", rule: `金额 ${formatMoney(amount, currency)} 超过政策上限 ${formatMoney(maxCompensation, currency)} 的 50%` };
   }
@@ -296,6 +292,7 @@ export function eventTypeLabel(type: string): string {
     tool_started: "工具调用",
     tool_completed: "工具完成",
     retrieval_completed: "检索完成",
+    decision_completed: "决策完成",
     run_completed: "分析完成",
     approval_recorded: "审批记录",
     execution_started: "开始执行",
@@ -304,6 +301,17 @@ export function eventTypeLabel(type: string): string {
     error: "异常",
   };
   return labels[type] || type;
+}
+
+/** 决策路线展示名（与后端 DecisionRoute 枚举一致）。 */
+export function decisionRouteLabel(route?: string): string {
+  const labels: Record<string, string> = {
+    ANSWER_ONLY: "直接答复",
+    COMPENSATION_EVALUATION: "补偿评估",
+    REQUEST_MORE_INFO: "补充信息",
+    HUMAN_ESCALATION: "人工升级",
+  };
+  return route ? labels[route] || route : "—";
 }
 
 /** Planner 证据类型展示名（与后端 AfterSalesTypes.EvidenceType 一致）。 */
@@ -348,7 +356,7 @@ export type EvidencePlanItem = {
   type: "ORDER" | "SHIPMENT" | "POLICY";
   /** Planner 已请求过该证据（planning_completed.nextEvidence） */
   requested: boolean;
-  /** 该类别证据已实际产生（tool_completed.evidenceIds） */
+  /** 该类别证据已实际产生（tool_completed.evidenceIds）——仅代表「已获取」，不代表人工核验。 */
   verified: boolean;
 };
 
@@ -357,12 +365,31 @@ export type EvidencePlanState = {
   readyForDecision: boolean;
 };
 
+/** 从 intake_completed 事件提取服务端路线重建的必需证据清单（直播流阶段）；无事件时返回 undefined。 */
+export function intakeRequiredEvidence(events: AfterSalesEvent[]): string[] | undefined {
+  let latest: string[] | undefined;
+  for (const event of events) {
+    if (event.type !== "intake_completed") continue;
+    const value = event.data.requiredEvidence;
+    if (Array.isArray(value) && value.length > 0) {
+      latest = value.filter(
+        (item): item is string => item === "ORDER" || item === "SHIPMENT" || item === "POLICY",
+      );
+    }
+  }
+  return latest;
+}
+
 /**
  * 从 run 事件推导紧凑证据规划：Planner 请求过（planning_completed.nextEvidence）+
  * 实际已产生证据（evidenceIds 前缀分类）。READY_FOR_DECISION 由 Planner 事件权威给出；
- * 兼容无 Planner 事件的历史 run：三类证据齐备也算就绪。
+ * 兼容无 Planner 事件的历史 run：必需证据全部齐备也算就绪。
+ *
+ * 必需证据尊重服务端路线清单（requiredEvidence，来自 intake_completed 或 finalAnswer.intake）：
+ * ANSWER_ONLY 只展示 ORDER/SHIPMENT，绝不把 POLICY 画成「缺失」；
+ * 缺省（无 Intake 数据）时回退三类全量展示。
  */
-export function deriveEvidencePlan(events: AfterSalesEvent[]): EvidencePlanState {
+export function deriveEvidencePlan(events: AfterSalesEvent[], requiredEvidence?: string[]): EvidencePlanState {
   const requested = new Set<string>();
   let readyForDecision = false;
   for (const event of events) {
@@ -374,7 +401,11 @@ export function deriveEvidencePlan(events: AfterSalesEvent[]): EvidencePlanState
   const verified = new Set(
     collectEvidence(events).filter((item) => item.verified).map((item) => item.category),
   );
-  const items: EvidencePlanItem[] = (["ORDER", "SHIPMENT", "POLICY"] as const).map((type) => ({
+  const required = requiredEvidence?.length
+    ? requiredEvidence.filter((item): item is "ORDER" | "SHIPMENT" | "POLICY" =>
+        item === "ORDER" || item === "SHIPMENT" || item === "POLICY")
+    : (["ORDER", "SHIPMENT", "POLICY"] as const);
+  const items: EvidencePlanItem[] = required.map((type) => ({
     type,
     requested: requested.has(type),
     verified: verified.has(type),

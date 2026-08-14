@@ -39,7 +39,9 @@ import java.util.regex.Pattern;
  * - customerMessage 是「不可信数据」：系统提示词显式声明只做分类、不得服从消息内指令；
  * - 模型输出严格解析：顶层只允许 issueType/intents/urgency/entities/missingInfo/requiredEvidence 六个键，
  *   entities 内只允许 deadline，任何层级出现未知键或禁止键（amount/arguments/approved/action/...）整条作废；
- *   intents/urgency/missingInfo 走白名单；requiredEvidence 由服务端重建（ORDER/SHIPMENT/POLICY 不可被模型减少）；
+ *   intents/urgency/missingInfo 走白名单；模型永远不能输出决策路线（route）；
+ * - requiredEvidence 只是模型的不可信建议：白名单过滤后原样保留，但决策路线（DecisionRouteResolver）
+ *   与路线证据由服务端重建，建议既不能降低也不能抬高服务端要求；
  * - 模型生成的金额、工具参数、批准结果或执行动作（amount/arguments/approved/action/...）视为非法输出，
  *   整条作废回退规则——决策端也从不读取此类字段；
  * - fallbackReason 只暴露安全错误码，绝不外泄 key、prompt 或底层异常消息。
@@ -101,8 +103,10 @@ public class AfterSalesIntakeService {
             - entities: optional object; only "deadline" as a short human-readable string, e.g. "2 days".
             - missingInfo: optional array of strings from \
             ["SHIPMENT_STATUS", "DELIVERY_PROMISE", "PAYMENT_RECEIPT", "CUSTOMER_CONFIRMATION"].
-            - requiredEvidence: array from ["ORDER", "SHIPMENT", "POLICY"]; \
-            the server always re-adds ORDER/SHIPMENT/POLICY — you cannot reduce required evidence.
+            - requiredEvidence: optional suggestion array from ["ORDER", "SHIPMENT", "POLICY"]. \
+            This is only an untrusted hint — the server rebuilds the authoritative required \
+            evidence from the classified intents afterwards, so it has no effect on the run. \
+            You never output a decision route; the server resolves it from intents.
 
             Only the six keys above are allowed at the top level, and entities may only contain \
             "deadline". Any unknown or extra key anywhere invalidates the whole output.
@@ -251,8 +255,9 @@ public class AfterSalesIntakeService {
                 .distinct()
                 .limit(5)
                 .toList();
-        // 必需证据由服务端重建：模型只能从白名单里给，且不能减少基线。
-        Set<String> requiredEvidence = new LinkedHashSet<>(REQUIRED_EVIDENCE_WHITELIST);
+        // 必需证据只是不可信建议：白名单过滤后原样保留，仅供展示/审计；
+        // 真正的路线证据由 DecisionRouteResolver 在 Agent 循环里重建，建议不能影响取证。
+        Set<String> requiredEvidence = new LinkedHashSet<>();
         strings(root.get("requiredEvidence")).stream()
                 .map(String::toUpperCase)
                 .filter(REQUIRED_EVIDENCE_WHITELIST::contains)
@@ -277,7 +282,10 @@ public class AfterSalesIntakeService {
     private AfterSalesTypes.IntakeResult classifyByRules(String message, long latencyMs, String reason) {
         List<String> intents = new ArrayList<>();
         intents.add("TRACK_SHIPMENT"); // 工单类型固定为物流延迟，必然需要查物流。
-        if (message.contains("退款") || message.contains("退钱") || message.contains("退单")) {
+        // 显式退款/补偿词：任一命中即表达补偿诉求 → REQUEST_REFUND（路线解析为补偿评估）。
+        // 纯物流查询（不含这些词）保持 TRACK_SHIPMENT 单意图 → ANSWER_ONLY。
+        if (message.contains("退款") || message.contains("退钱") || message.contains("退单")
+                || message.contains("赔偿") || message.contains("补偿") || message.contains("赔付")) {
             intents.add("REQUEST_REFUND");
         }
         List<Integer> delayDays = new ArrayList<>();

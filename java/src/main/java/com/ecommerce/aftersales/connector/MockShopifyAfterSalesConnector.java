@@ -27,6 +27,13 @@ public class MockShopifyAfterSalesConnector {
             "VN", "Hanoi VN"
     );
 
+    /** 物流未更新天数（演示种子）：仅 O-VN-5002 / O-VN-5003 有专属天数，其余订单保持既有 10 天。 */
+    private static final int DEFAULT_INACTIVE_DAYS = 10;
+    private static final Map<String, Integer> INACTIVE_DAYS_BY_ORDER = Map.of(
+            "O-VN-5002", 10,
+            "O-VN-5003", 2
+    );
+
     /**
      * 运单号由可信订单号确定性派生：SF-<国家>-<数字>，不再硬编码越南运单。
      * 先整体校验订单号格式再提取数字段，避免按索引截取残留国家段导致重复（如 SF-ID-ID-4001）；
@@ -65,9 +72,15 @@ public class MockShopifyAfterSalesConnector {
         );
     }
 
+    /**
+     * 物流未更新天数按可信订单号确定性派生（见 INACTIVE_DAYS_BY_ORDER）：
+     * O-VN-5002 = 10 天（补偿评估可达政策阈值）、O-VN-5003 = 2 天（未达阈值）、其余保持 10 天。
+     * 未更新天数绝不来自客户消息（消息不可信）；轨迹时间点相对 lastUpdated 固定偏移、
+     * 目的地随国家变化，最后节点 = lastUpdated（CUSTOMS_DOCUMENT_REQUIRED），与状态自洽。
+     */
     public AfterSalesTypes.ShipmentSnapshot getShipment(AfterSalesTypes.OrderSnapshot order) {
-        // 演示行为保留：物流已 10 天未更新；轨迹时间点相对 lastUpdated 固定偏移，目的地随国家变化。
-        Instant lastUpdated = Instant.now().minus(10, ChronoUnit.DAYS);
+        int inactiveDays = INACTIVE_DAYS_BY_ORDER.getOrDefault(order.orderId(), DEFAULT_INACTIVE_DAYS);
+        Instant lastUpdated = Instant.now().minus(inactiveDays, ChronoUnit.DAYS);
         String destination = DESTINATION_CITIES.getOrDefault(order.country(), "SEA regional hub");
         List<AfterSalesTypes.ShipmentCheckpoint> timeline = List.of(
                 new AfterSalesTypes.ShipmentCheckpoint(lastUpdated.minus(2, ChronoUnit.DAYS), "PICKED_UP", "Shenzhen CN", "Parcel collected by carrier"),
@@ -78,8 +91,8 @@ public class MockShopifyAfterSalesConnector {
                 order.trackingNumber(),
                 order.fulfillmentStatus(),
                 lastUpdated,
-                10,
-                Math.max(0, 10 - order.promisedDeliveryDays()),
+                inactiveDays,
+                Math.max(0, inactiveDays - order.promisedDeliveryDays()),
                 timeline
         );
     }

@@ -5,6 +5,7 @@ import com.ecommerce.aftersales.entity.AfterSalesTicketEntity;
 import com.ecommerce.aftersales.model.AfterSalesAgentState;
 import com.ecommerce.aftersales.model.AfterSalesTypes;
 import com.ecommerce.aftersales.model.AfterSalesTypes.EvidenceType;
+import com.ecommerce.aftersales.model.DecisionRoute;
 import com.ecommerce.aftersales.repository.AfterSalesRunRepository;
 import com.ecommerce.aftersales.repository.AfterSalesTicketRepository;
 import com.ecommerce.aftersales.service.AfterSalesEvidencePlannerService.PlanningInput;
@@ -21,7 +22,17 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * 受限 Hybrid Agent Loop：Intake 分类后，进入由 Evidence Planner 驱动的取证循环。
+ * 受限 Hybrid Agent Loop：Intake 分类 → 决策路线解析 → 由 Evidence Planner 驱动的取证循环。
+ *
+ * 决策路线（DecisionRouteResolver，模型不能输出）：
+ * - Intake 分类完成后立即解析路线，并用路线证据重建 IntakeResult.requiredEvidence
+ *   （模型/规则的 requiredEvidence 只是不可信建议，不能降低也不能抬高服务端要求）；
+ * - ANSWER_ONLY（仅 TRACK_SHIPMENT）：只取证 ORDER+SHIPMENT，READY 后直接以确定性 Java 模板
+ *   答复物流状态（decision_completed / ANSWER_DELIVERED），绝不调用 POLICY、CALCULATE_COMPENSATION
+ *   或 CREATE_ACTION_PROPOSAL，也不需要额外的 LLM 调用；
+ * - COMPENSATION_EVALUATION（含 REQUEST_REFUND）：取证 ORDER+SHIPMENT+POLICY，READY 后执行
+ *   calculate_compensation：eligible=false → decision_completed + NO_ACTION_REQUIRED（不建方案）；
+ *   eligible=true → decision_completed 后 create_action_proposal → ACTION_PROPOSAL_CREATED。
  *
  * 取证循环：
  * - 每一步由 AfterSalesEvidencePlannerService 决定下一份证据（EvidenceType），
@@ -32,12 +43,11 @@ import java.util.Set;
  *   兜底仍无法推进（如规划结果指向已存在证据）→ 整条工单失败 PLANNER_NO_PROGRESS；
  * - 指纹去重与 maxSteps 上限保留：重复工具调用与超步数都按失败处理。
  *
- * 决策阶段：READY_FOR_DECISION 后离开取证循环，先做服务端决策前置校验 —— 当前补偿管线
- * （calculate_compensation → create_action_proposal）要求 ORDER/SHIPMENT/POLICY 三份证据齐备；
- * 取证的 requiredEvidence 子集可以不含 POLICY（规划层面合法），但决策管线无法在缺少政策证据时
- * 计算金额/上限/资格，此时以 DECISION_EVIDENCE_INCOMPLETE 干净失败，绝不带着缺失证据进入决策工具。
- * 默认 ORDER+SHIPMENT+POLICY 场景下工具 stepCount 总数保持 5（3 份取证 + 2 步决策）。
- * maxSteps 是跨越取证与决策两阶段的最终预算：每次工具执行前都校验剩余步数。
+ * 决策阶段：READY_FOR_DECISION 后离开取证循环，先按路线做服务端决策前置校验
+ * （validateDecisionPrerequisites，路线感知：ANSWER_ONLY 只需 ORDER+SHIPMENT，
+ * COMPENSATION_EVALUATION 必须 ORDER+SHIPMENT+POLICY）；缺证据以 DECISION_EVIDENCE_INCOMPLETE
+ * 干净失败，绝不带着缺失证据进入决策工具。maxSteps 是跨越取证与决策两阶段的最终预算：
+ * 每次工具执行前都校验剩余步数。系统故障（工具异常/超步/非法规划）仍整条工单失败。
  *
  * 不记录思维链、prompt、key 或模型原始输出；所有事件只携带结构化安全字段。
  */
@@ -58,6 +68,7 @@ public class AfterSalesAgentLoopService {
     private final AfterSalesTicketContextService ticketContextService;
     private final AfterSalesIntakeService intakeService;
     private final AfterSalesEvidencePlannerService plannerService;
+    private final DecisionRouteResolver routeResolver;
     private final ObjectMapper objectMapper;
     private final long stepDelayMs;
 
@@ -69,6 +80,7 @@ public class AfterSalesAgentLoopService {
             AfterSalesTicketContextService ticketContextService,
             AfterSalesIntakeService intakeService,
             AfterSalesEvidencePlannerService plannerService,
+            DecisionRouteResolver routeResolver,
             ObjectMapper objectMapper,
             @Value("${agent.aftersales.demo-step-delay-ms:0}") long stepDelayMs) {
         this.toolExecutor = toolExecutor;
@@ -78,6 +90,7 @@ public class AfterSalesAgentLoopService {
         this.ticketContextService = ticketContextService;
         this.intakeService = intakeService;
         this.plannerService = plannerService;
+        this.routeResolver = routeResolver;
         this.objectMapper = objectMapper;
         this.stepDelayMs = Math.max(0, stepDelayMs);
     }
@@ -95,7 +108,7 @@ public class AfterSalesAgentLoopService {
         try {
             eventService.append(runId, "run_started", "售后分析开始", "running",
                 "工单进入受限 Agent Loop。", Map.of(
-                        "summary", "正在核验订单、物流和适用政策。",
+                        "summary", "正在识别客户诉求并收集当前路线所需证据。",
                         "ticketId", ticketId,
                         "orderId", ticket.getOrderId(),
                         "maxSteps", run.getMaxSteps()
@@ -110,9 +123,15 @@ public class AfterSalesAgentLoopService {
                         "ticketId", ticketId
                 ));
         AfterSalesTypes.IntakeResult intake = intakeService.classify(ticketContext.customerMessage());
+        // 决策路线解析（确定性、模型不可输出）：用服务端路线证据重建 requiredEvidence，
+        // 模型的 requiredEvidence 建议既不能降低也不能抬高本路线的要求。
+        DecisionRouteResolver.RouteDecision routeDecision = routeResolver.resolve(intake);
+        intake = intake.withRequiredEvidence(routeDecision.requiredEvidence());
         state.setIntake(intake);
+        state.setRoute(routeDecision.route());
         eventService.append(runId, "intake_completed", "Intake 分析完成", "success",
-                intakeSummary(intake), intakeEventData(intake, elapsedMs(intakeStartedNanos)));
+                intakeSummary(intake, routeDecision.route()),
+                intakeEventData(intake, routeDecision.route(), elapsedMs(intakeStartedNanos)));
 
             // 取证循环：Planner 决定下一份证据；READY_FOR_DECISION 即离开循环进入决策阶段。
             int step = 0;
@@ -122,15 +141,14 @@ public class AfterSalesAgentLoopService {
                 }
                 AfterSalesTypes.PlanningResult plan = planNextStep(run, state, step + 1);
                 if (plan.nextEvidence() == EvidenceType.READY_FOR_DECISION) {
-                    validateDecisionPrerequisites(state); // 决策前置校验：缺证据 → DECISION_EVIDENCE_INCOMPLETE
+                    validateDecisionPrerequisites(state); // 路线感知前置校验：缺证据 → DECISION_EVIDENCE_INCOMPLETE
                     break;
                 }
                 step = executeToolStep(run, state, step, fingerprints, evidenceToolName(plan.nextEvidence()));
             }
-            // 决策阶段（确定性）：Planner 绝不选择这两个工具，证据齐备后由 Java 直接执行。
+            // 决策阶段（确定性，按路线分派）：Planner 绝不选择决策工具，证据齐备后由 Java 直接执行。
             // executeToolStep 内部同样校验 maxSteps 预算（跨越取证与决策两阶段的最终预算）。
-            step = executeToolStep(run, state, step, fingerprints, AfterSalesToolExecutor.CALCULATE_COMPENSATION);
-            step = executeToolStep(run, state, step, fingerprints, AfterSalesToolExecutor.CREATE_ACTION_PROPOSAL);
+            step = decide(run, state, step, fingerprints);
             complete(run, ticket, state, step, startedNanos);
         } catch (Exception error) {
             long durationMs = elapsedMs(startedNanos);
@@ -163,8 +181,8 @@ public class AfterSalesAgentLoopService {
             int step) {
         Map<String, Boolean> presence = evidencePresence(state);
         eventService.append(run.getId(), "planning_started", "规划下一步取证", "running",
-                "基于已核验证据规划下一个取证步骤。", Map.of(
-                        "summary", "基于已核验证据规划下一个取证步骤。",
+                "基于已获取证据规划下一个取证步骤。", Map.of(
+                        "summary", "基于已获取证据规划下一个取证步骤。",
                         "step", step,
                         "evidencePresence", presence,
                         "requiredEvidence", state.getIntake().requiredEvidence()
@@ -240,11 +258,13 @@ public class AfterSalesAgentLoopService {
     }
 
     /**
-     * 决策前置校验：当前补偿管线要求 ORDER/SHIPMENT/POLICY 三份证据齐备。取证的 requiredEvidence
-     * 子集可以不含 POLICY（规划层面合法），但决策管线无法在缺少政策证据时计算金额/上限/资格；
-     * 缺失任何一份都在进入决策工具前以 DECISION_EVIDENCE_INCOMPLETE 干净失败。
+     * 决策前置校验（路线感知）：ANSWER_ONLY 只需 ORDER+SHIPMENT（纯物流答复不需要政策/金额）；
+     * COMPENSATION_EVALUATION 必须 ORDER+SHIPMENT+POLICY 三份齐备，否则无法计算金额/上限/资格。
+     * 正常流程中 Planner 的 READY 已隐含路线证据齐备（在场快照与状态同源），本校验是
+     * 进入决策阶段前的纵深防御：任何不一致都以 DECISION_EVIDENCE_INCOMPLETE 干净失败。
+     * package-private：同包测试直接覆盖路线感知逻辑。
      */
-    private static void validateDecisionPrerequisites(AfterSalesAgentState state) {
+    static void validateDecisionPrerequisites(AfterSalesAgentState state) {
         List<String> missing = new ArrayList<>();
         if (state.getOrder() == null) {
             missing.add(EvidenceType.ORDER.name());
@@ -252,11 +272,65 @@ public class AfterSalesAgentLoopService {
         if (state.getShipment() == null) {
             missing.add(EvidenceType.SHIPMENT.name());
         }
-        if (state.getPolicy() == null) {
+        if (state.getRoute() == DecisionRoute.COMPENSATION_EVALUATION && state.getPolicy() == null) {
             missing.add(EvidenceType.POLICY.name());
         }
         if (!missing.isEmpty()) {
             throw new IllegalStateException("DECISION_EVIDENCE_INCOMPLETE:" + String.join(",", missing));
+        }
+    }
+
+    /**
+     * 决策阶段（确定性，按路线分派；无额外 LLM 调用）：
+     * - ANSWER_ONLY：只发 decision_completed（物流状态答复），立即完成 —— 绝不调用 POLICY、
+     *   CALCULATE_COMPENSATION 或 CREATE_ACTION_PROPOSAL；
+     * - COMPENSATION_EVALUATION：执行 calculate_compensation；eligible=true → decision_completed
+     *   后 create_action_proposal；eligible=false → decision_completed（NO_ACTION）后完成，
+     *   不调用 create_action_proposal。
+     */
+    private int decide(
+            AfterSalesRunEntity run,
+            AfterSalesAgentState state,
+            int step,
+            Set<String> fingerprints) {
+        switch (state.getRoute()) {
+            case ANSWER_ONLY -> {
+                eventService.append(run.getId(), "decision_completed", "决策完成", "success",
+                        "直接答复物流状态。", Map.of(
+                                "summary", "仅查询物流，已按可信物流状态直接答复，无需人工审批。",
+                                "route", state.getRoute().name(),
+                                "requiresApproval", false,
+                                "answerType", "SHIPMENT_STATUS",
+                                "answer", shipmentAnswer(state.getShipment()),
+                                "evidenceIds", List.copyOf(state.getEvidenceIds()),
+                                "stepCount", step
+                        ));
+                return step;
+            }
+            case COMPENSATION_EVALUATION -> {
+                step = executeToolStep(run, state, step, fingerprints, AfterSalesToolExecutor.CALCULATE_COMPENSATION);
+                AfterSalesTypes.CompensationResult compensation = state.getCompensation();
+                eventService.append(run.getId(), "decision_completed", "决策完成", "success",
+                        compensation.eligible() ? "生成待审批补偿方案。" : "未达到政策补偿阈值，无需动作。", Map.of(
+                                "summary", compensation.eligible()
+                                        ? "规则计算可补偿，生成待审批方案。"
+                                        : "未达到政策补偿阈值，无需任何动作。",
+                                "route", state.getRoute().name(),
+                                "eligible", compensation.eligible(),
+                                "requiresApproval", compensation.eligible(),
+                                "action", compensation.actionType(),
+                                "amount", compensation.amount(),
+                                "currency", compensation.currency(),
+                                "reason", compensation.reason(),
+                                "evidenceIds", List.copyOf(state.getEvidenceIds()),
+                                "stepCount", step
+                        ));
+                if (!compensation.eligible()) {
+                    return step; // 不可补偿：绝不调用 create_action_proposal。
+                }
+                return executeToolStep(run, state, step, fingerprints, AfterSalesToolExecutor.CREATE_ACTION_PROPOSAL);
+            }
+            default -> throw new IllegalStateException("ROUTE_NOT_IMPLEMENTED");
         }
     }
 
@@ -327,58 +401,161 @@ public class AfterSalesAgentLoopService {
         return nextStep;
     }
 
+    /** 完成入口：按决策路线分发到各自的终态（run/ticket/finalAnswer/stopReason 均按路线确定）。 */
     private void complete(
             AfterSalesRunEntity run,
             AfterSalesTicketEntity ticket,
             AfterSalesAgentState state,
             int stepCount,
             long startedNanos) {
+        switch (state.getRoute()) {
+            case ANSWER_ONLY -> completeAnswerOnly(run, ticket, state, stepCount, startedNanos);
+            case COMPENSATION_EVALUATION -> completeCompensation(run, ticket, state, stepCount, startedNanos);
+            default -> throw new IllegalStateException("ROUTE_NOT_IMPLEMENTED");
+        }
+    }
+
+    /**
+     * ANSWER_ONLY 终态：直接以可信物流状态答复客户。run COMPLETED / ticket RESOLVED /
+     * stopReason ANSWER_DELIVERED / requiresApproval false / answerType SHIPMENT_STATUS，
+     * 只带结构化物流答复与证据 ID，无金额/方案字段。
+     */
+    private void completeAnswerOnly(
+            AfterSalesRunEntity run,
+            AfterSalesTicketEntity ticket,
+            AfterSalesAgentState state,
+            int stepCount,
+            long startedNanos) {
         long durationMs = elapsedMs(startedNanos);
+        Map<String, Object> finalAnswer = baseFinalAnswer(state, ticket);
+        finalAnswer.put("requiresApproval", false);
+        finalAnswer.put("answerType", "SHIPMENT_STATUS");
+        finalAnswer.put("answer", shipmentAnswer(state.getShipment()));
+        finalAnswer.put("decisionSummary",
+                "No refund request was classified; the ticket is answered with the trusted shipment status "
+                        + "(inactive for " + state.getShipment().inactiveDays() + " days).");
+        finish(run, ticket, stepCount, durationMs, finalAnswer, "ANSWER_DELIVERED",
+                AfterSalesTypes.TicketStatus.RESOLVED, "直接答复物流状态",
+                "分析完成，已按可信物流状态直接答复，无需人工审批。");
+    }
+
+    /**
+     * COMPENSATION_EVALUATION 终态：eligible=true → 方案待审批（PENDING_APPROVAL /
+     * ACTION_PROPOSAL_CREATED / requiresApproval true）；eligible=false → 无动作完成
+     * （RESOLVED / NO_ACTION_REQUIRED / requiresApproval false / action NO_ACTION /
+     * reason POLICY_THRESHOLD_NOT_REACHED），不生成任何方案。
+     */
+    private void completeCompensation(
+            AfterSalesRunEntity run,
+            AfterSalesTicketEntity ticket,
+            AfterSalesAgentState state,
+            int stepCount,
+            long startedNanos) {
+        long durationMs = elapsedMs(startedNanos);
+        AfterSalesTypes.CompensationResult compensation = state.getCompensation();
+        Map<String, Object> finalAnswer = baseFinalAnswer(state, ticket);
+        boolean eligible = compensation != null && compensation.eligible();
+        finalAnswer.put("eligible", eligible);
+        finalAnswer.put("requiresApproval", eligible);
+        if (eligible) {
+            finalAnswer.put("action", compensation.actionType());
+            finalAnswer.put("reason", compensation.reason());
+            finalAnswer.put("decisionSummary",
+                    "The shipment is inactive beyond policy threshold. A deterministic delay coupon proposal is pending operator approval.");
+            finish(run, ticket, stepCount, durationMs, finalAnswer, "ACTION_PROPOSAL_CREATED",
+                    AfterSalesTypes.TicketStatus.PENDING_APPROVAL, "生成待审批方案",
+                    "补偿方案已生成，等待人工审批。");
+        } else {
+            finalAnswer.put("action", "NO_ACTION");
+            finalAnswer.put("reason", compensation == null ? "COMPENSATION_NOT_CALCULATED" : compensation.reason());
+            finalAnswer.put("decisionSummary",
+                    "The shipment does not reach the policy compensation threshold; no action is required.");
+            finish(run, ticket, stepCount, durationMs, finalAnswer, "NO_ACTION_REQUIRED",
+                    AfterSalesTypes.TicketStatus.RESOLVED, "无需动作",
+                    "分析完成，未达到政策补偿阈值，无需任何动作。");
+        }
+    }
+
+    /** 各路线 finalAnswer 的公共字段：route 与证据始终输出；缺失的证据/方案字段不输出 null。 */
+    private Map<String, Object> baseFinalAnswer(AfterSalesAgentState state, AfterSalesTicketEntity ticket) {
         Map<String, Object> finalAnswer = new LinkedHashMap<>();
         finalAnswer.put("ticketId", ticket.getId());
         finalAnswer.put("order", state.getOrder());
         finalAnswer.put("shipment", state.getShipment());
-        finalAnswer.put("policy", state.getPolicy());
-        finalAnswer.put("compensation", state.getCompensation());
-        finalAnswer.put("proposalId", state.getProposalId());
-        finalAnswer.put("requiresApproval", true);
         finalAnswer.put("evidenceIds", state.getEvidenceIds());
         finalAnswer.put("intake", state.getIntake());
-        finalAnswer.put("decisionSummary", "The shipment is inactive beyond policy threshold. A deterministic delay coupon proposal is pending operator approval.");
+        finalAnswer.put("decisionRoute", state.getRoute().name());
+        if (state.getPolicy() != null) {
+            finalAnswer.put("policy", state.getPolicy());
+        }
+        if (state.getCompensation() != null) {
+            finalAnswer.put("compensation", state.getCompensation());
+        }
+        if (state.getProposalId() != null) {
+            finalAnswer.put("proposalId", state.getProposalId());
+        }
+        return finalAnswer;
+    }
 
+    /** 结构化物流答复（确定性 Java 模板，无额外 LLM）：状态 + 未更新/延迟天数 + 最后更新时间。 */
+    private static Map<String, Object> shipmentAnswer(AfterSalesTypes.ShipmentSnapshot shipment) {
+        Map<String, Object> answer = new LinkedHashMap<>();
+        answer.put("trackingNumber", shipment.trackingNumber());
+        answer.put("status", shipment.status());
+        answer.put("lastUpdatedAt", shipment.lastUpdatedAt().toString());
+        answer.put("inactiveDays", shipment.inactiveDays());
+        answer.put("delayDays", shipment.delayDays());
+        return answer;
+    }
+
+    /** 各路线共用的落库与 run_completed 事件收尾。 */
+    private void finish(
+            AfterSalesRunEntity run,
+            AfterSalesTicketEntity ticket,
+            int stepCount,
+            long durationMs,
+            Map<String, Object> finalAnswer,
+            String stopReason,
+            AfterSalesTypes.TicketStatus ticketStatus,
+            String eventName,
+            String eventSummary) {
         run.setStatus("COMPLETED");
         run.setStepCount(stepCount);
-        run.setStopReason("ACTION_PROPOSAL_CREATED");
+        run.setStopReason(stopReason);
         run.setCompletedAt(Instant.now());
         run.setDurationMs(durationMs);
         run.setFinalAnswerJson(writeJson(finalAnswer));
         runRepository.save(run);
 
-        ticket.setStatus(AfterSalesTypes.TicketStatus.PENDING_APPROVAL);
+        ticket.setStatus(ticketStatus);
         ticketRepository.save(ticket);
 
-        eventService.append(run.getId(), "run_completed", "生成待审批方案", "success",
+        eventService.append(run.getId(), "run_completed", eventName, "success",
                 "分析完成，Agent 未执行任何副作用操作。", Map.of(
-                        "summary", "补偿方案已生成，等待人工审批。",
+                        "summary", eventSummary,
                         "durationMs", durationMs,
                         "finalAnswer", finalAnswer
                 ));
-   }
+    }
 
     private long elapsedMs(long startedNanos) {
         return (System.nanoTime() - startedNanos) / 1_000_000;
     }
 
-    /** intake_completed 只携带结构化分类字段、source、latencyMs 和安全 summary。 */
-    private Map<String, Object> intakeEventData(AfterSalesTypes.IntakeResult intake, long latencyMs) {
+    /** intake_completed 只携带结构化分类字段、服务端决策路线、source、latencyMs 和安全 summary。 */
+    private Map<String, Object> intakeEventData(
+            AfterSalesTypes.IntakeResult intake,
+            DecisionRoute route,
+            long latencyMs) {
         Map<String, Object> data = new LinkedHashMap<>();
-        data.put("summary", intakeSummary(intake));
+        data.put("summary", intakeSummary(intake, route));
         data.put("issueType", intake.issueType());
         data.put("intents", intake.intents());
         data.put("urgency", intake.urgency());
         data.put("entities", intake.entities());
         data.put("missingInfo", intake.missingInfo());
-        data.put("requiredEvidence", intake.requiredEvidence());
+        data.put("requiredEvidence", intake.requiredEvidence()); // 路线解析后的服务端可信清单。
+        data.put("route", route.name());
         data.put("source", intake.source());
         data.put("latencyMs", latencyMs);
         if (intake.fallbackReason() != null) {
@@ -387,9 +564,19 @@ public class AfterSalesAgentLoopService {
         return data;
     }
 
-    private String intakeSummary(AfterSalesTypes.IntakeResult intake) {
+    private String intakeSummary(AfterSalesTypes.IntakeResult intake, DecisionRoute route) {
         String source = "LLM".equals(intake.source()) ? "模型识别" : "规则降级";
-        return "识别为物流延迟，紧急度" + urgencyLabel(intake.urgency()) + "，来源：" + source + "。";
+        return "识别为物流延迟，紧急度" + urgencyLabel(intake.urgency())
+                + "，决策路线：" + routeLabel(route) + "，来源：" + source + "。";
+    }
+
+    private String routeLabel(DecisionRoute route) {
+        return switch (route) {
+            case ANSWER_ONLY -> "直接答复";
+            case COMPENSATION_EVALUATION -> "补偿评估";
+            case REQUEST_MORE_INFO -> "补充信息";
+            case HUMAN_ESCALATION -> "人工升级";
+        };
     }
 
     private String urgencyLabel(String urgency) {
@@ -410,8 +597,8 @@ public class AfterSalesAgentLoopService {
             case AfterSalesToolExecutor.GET_ORDER_DETAIL -> "先核验工单绑定订单、付款状态、金额和币种。";
             case AfterSalesToolExecutor.GET_SHIPMENT_TRACE -> "订单已验证，查询可信物流轨迹和最后更新时间。";
             case AfterSalesToolExecutor.SEARCH_POLICY -> "物流已长期未更新，检索订单国家和发生时间对应的政策版本。";
-            case AfterSalesToolExecutor.CALCULATE_COMPENSATION -> "政策证据有效，由 Java 规则计算补偿金额。";
-            case AfterSalesToolExecutor.CREATE_ACTION_PROPOSAL -> "证据和金额均已验证，生成待人工审批方案。";
+            case AfterSalesToolExecutor.CALCULATE_COMPENSATION -> "已获取适用政策，由 Java 规则计算补偿金额。";
+            case AfterSalesToolExecutor.CREATE_ACTION_PROPOSAL -> "所需证据已获取且金额计算完成，生成待人工审批方案。";
             default -> "执行受限售后工具。";
         };
     }

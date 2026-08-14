@@ -61,7 +61,7 @@ class AfterSalesOId4001LoopRegressionTest {
                 objectMapper);
         AfterSalesAgentLoopService service = new AfterSalesAgentLoopService(
                 toolExecutor, eventService, runRepository, ticketRepository, ticketContextService,
-                intakeService(), plannerService(), objectMapper, 0L);
+                intakeService(), plannerService(), new DecisionRouteResolver(), objectMapper, 0L);
 
         when(runRepository.findById("run-id-4001")).thenReturn(Optional.of(run()));
         AfterSalesTicketEntity ticket = ticket();
@@ -75,6 +75,9 @@ class AfterSalesOId4001LoopRegressionTest {
 
         // 回归核心：run 以提案创建完成，没有 POLICY_NOT_FOUND 错误事件。
         assertThat(appended).noneMatch(event -> "error".equals(event.type()));
+        // 决策路线（补偿评估）进入 decision_completed 事件。
+        assertThat(appended).anyMatch(event -> "decision_completed".equals(event.type())
+                && "COMPENSATION_EVALUATION".equals(event.data().get("route")));
         ArgumentCaptor<AfterSalesRunEntity> runCaptor = ArgumentCaptor.forClass(AfterSalesRunEntity.class);
         verify(runRepository, atLeastOnce()).save(runCaptor.capture());
         AfterSalesRunEntity completedRun = runCaptor.getAllValues().stream()
@@ -141,7 +144,8 @@ class AfterSalesOId4001LoopRegressionTest {
                 .ticketNo("AS-4001")
                 .orderId("O-ID-4001")
                 .issueType("SHIPMENT_DELAY")
-                .customerMessage("my parcel from Indonesia has not moved in days")
+                // 显式退款/赔偿词 → REQUEST_REFUND → COMPENSATION_EVALUATION 路线（走完整补偿管线）。
+                .customerMessage("my parcel from Indonesia has not moved in days, 请退款赔偿")
                 .status(AfterSalesTypes.TicketStatus.ANALYZING)
                 .currentRunId("run-id-4001")
                 .createdAt(Instant.parse("2026-08-01T00:00:00Z"))

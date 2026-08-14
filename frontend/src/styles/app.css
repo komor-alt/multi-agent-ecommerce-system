@@ -270,6 +270,16 @@
   font-size: 12px;
 }
 
+.after-sales-page .preset-picker {
+  margin-bottom: 6px;
+}
+
+.after-sales-page .preset-hint {
+  display: block;
+  margin-bottom: 14px;
+  font-size: 12px;
+}
+
 .after-sales-page .evidence-plan {
   border: 1px solid #f2f4f7;
   border-radius: 8px;

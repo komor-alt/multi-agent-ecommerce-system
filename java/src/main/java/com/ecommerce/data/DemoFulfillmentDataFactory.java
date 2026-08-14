@@ -24,6 +24,7 @@ public final class DemoFulfillmentDataFactory {
         orders.add(order("O-ID-4001", "sea_id_001", "shopee", "ID", "IDR", "ID", List.of("P009", "P034"), 2410000.0, "paid", "cross_border_shipping", 8, "medium"));
         orders.add(order("O-VN-5001", "sea_vn_001", "shopify", "VN", "VND", "VN", List.of("P010"), 28.0, "paid", "delivered", 2, "low"));
         orders.add(order("O-VN-5002", "sea_vn_002", "shopify", "VN", "VND", "CN", List.of("P007"), 1899000.0, "paid", "customs_document_required", 10, "high"));
+        orders.add(order("O-VN-5003", "sea_vn_003", "shopify", "VN", "VND", "VN", List.of("P010"), 459000.0, "paid", "customs_document_required", 7, "medium"));
         orders.add(order("O-SG-1003", "sea_sg_003", "shopify", "SG", "SGD", "CN", List.of("P008"), 59.0, "paid", "blocked_restricted_item", 10, "high"));
         return List.copyOf(orders);
     }

@@ -70,4 +70,39 @@ class MockShopifyAfterSalesConnectorTest {
                 java.time.Instant.now().minus(11, ChronoUnit.DAYS),
                 java.time.Instant.now());
     }
+
+    @Test
+    void vn5003IsDeterministicallyInactiveForTwoDays() {
+        AfterSalesTypes.OrderSnapshot order = connector.getOrder("O-VN-5003");
+        AfterSalesTypes.ShipmentSnapshot shipment = connector.getShipment(order);
+
+        // 未更新天数来自可信种子（2 天，低于政策阈值 7 天 → 不可补偿），不依赖客户消息。
+        assertThat(shipment.inactiveDays()).isEqualTo(2);
+        assertThat(shipment.lastUpdatedAt()).isBetween(
+                java.time.Instant.now().minus(3, ChronoUnit.DAYS),
+                java.time.Instant.now().minus(1, ChronoUnit.DAYS));
+        // 内部自洽：轨迹最后节点时间 = lastUpdated（此后无更新），状态与订单履约状态一致。
+        assertThat(shipment.timeline()).isNotEmpty();
+        AfterSalesTypes.ShipmentCheckpoint last = shipment.timeline().get(shipment.timeline().size() - 1);
+        assertThat(last.occurredAt()).isEqualTo(shipment.lastUpdatedAt());
+        assertThat(last.status()).isEqualTo("CUSTOMS_DOCUMENT_REQUIRED");
+        assertThat(last.location()).isEqualTo("Hanoi VN");
+        assertThat(shipment.status()).isEqualTo("customs_document_required");
+        assertThat(shipment.delayDays()).isEqualTo(0); // 2 天未更新 ≤ 承诺 7 天
+    }
+
+    @Test
+    void vn5002IsDeterministicallyInactiveForTenDays() {
+        AfterSalesTypes.OrderSnapshot order = connector.getOrder("O-VN-5002");
+        AfterSalesTypes.ShipmentSnapshot shipment = connector.getShipment(order);
+
+        // 10 天 ≥ 政策阈值 7 天 → 补偿评估可达资格；轨迹时间点与未更新天数自洽。
+        assertThat(shipment.inactiveDays()).isEqualTo(10);
+        assertThat(shipment.lastUpdatedAt()).isBetween(
+                java.time.Instant.now().minus(11, ChronoUnit.DAYS),
+                java.time.Instant.now().minus(9, ChronoUnit.DAYS));
+        AfterSalesTypes.ShipmentCheckpoint last = shipment.timeline().get(shipment.timeline().size() - 1);
+        assertThat(last.occurredAt()).isEqualTo(shipment.lastUpdatedAt());
+        assertThat(last.location()).isEqualTo("Hanoi VN");
+    }
 }

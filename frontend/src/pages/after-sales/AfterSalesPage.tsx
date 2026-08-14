@@ -17,6 +17,7 @@ import {
   Form,
   Input,
   Modal,
+  Radio,
   Select,
   Space,
   Typography,
@@ -61,6 +62,7 @@ const streamEventTypes = [
   "tool_started",
   "tool_completed",
   "retrieval_completed",
+  "decision_completed",
   "run_completed",
   "error",
   "approval_recorded",
@@ -69,27 +71,49 @@ const streamEventTypes = [
   "execution_failed",
 ];
 
-const demoMessage = "我的包裹十天没有更新了，现在到底是什么情况？能不能退款？";
+/** 越南演示场景预设：自动填充订单与用户诉求。未更新天数来自后端可信种子（O-VN-5002=10 天、O-VN-5003=2 天），与消息内容无关。 */
+const demoPresets = [
+  {
+    key: "track",
+    label: "A · 仅查询物流",
+    orderId: "O-VN-5002",
+    message: "包裹已经十天没有更新了，能帮我查一下现在物流到哪里了吗？",
+    hint: "O-VN-5002（未更新 10 天）→ 直接答复（ANSWER_ONLY）",
+  },
+  {
+    key: "not-eligible",
+    label: "B · 申请补偿（未达阈值）",
+    orderId: "O-VN-5003",
+    message: "包裹两天没有更新了，一直收不到，我要退款并申请赔偿。",
+    hint: "O-VN-5003（未更新 2 天 < 政策阈值 7 天）→ 无需动作（NO_ACTION）",
+  },
+  {
+    key: "eligible",
+    label: "C · 申请补偿（可达阈值）",
+    orderId: "O-VN-5002",
+    message: "包裹卡在海关十天没有更新了，请退款并赔偿。",
+    hint: "O-VN-5002（未更新 10 天 ≥ 政策阈值 7 天）→ 生成待审批方案",
+  },
+];
 
-/** 与 Java DemoFulfillmentDataFactory 同一批已知演示订单，仅作为「新建工单」的输入选项，不参与任何统计。 */
+/** 三个演示场景复用这两个越南订单（O-VN-5002 未更新 10 天 / O-VN-5003 未更新 2 天，inactiveDays 来自后端可信种子）。
+ *  仅作为「新建工单」的输入选项，不参与任何统计。O-VN-5001 无专属 inactiveDays 且未被预设使用，不在此列；SG/MY/TH/ID 亦不在此列。 */
 const knownDemoOrders = [
   { value: "O-VN-5002", label: "O-VN-5002 · 越南 VND" },
-  { value: "O-VN-5001", label: "O-VN-5001 · 越南 VND" },
-  { value: "O-SG-1001", label: "O-SG-1001 · 新加坡 SGD" },
-  { value: "O-SG-1002", label: "O-SG-1002 · 新加坡 SGD" },
-  { value: "O-SG-1003", label: "O-SG-1003 · 新加坡 SGD" },
-  { value: "O-MY-2001", label: "O-MY-2001 · 马来西亚 MYR" },
-  { value: "O-TH-3001", label: "O-TH-3001 · 泰国 THB" },
-  { value: "O-ID-4001", label: "O-ID-4001 · 印尼 IDR" },
+  { value: "O-VN-5003", label: "O-VN-5003 · 越南 VND" },
 ];
 
 export function AfterSalesPage() {
   const queryClient = useQueryClient();
   const [ticketId, setTicketId] = useState<string>("");
   const [operatorId, setOperatorId] = useState("operator-vn-01");
-  const [reviewComment, setReviewComment] = useState("订单与政策证据已核验，同意发放延迟补偿券。");
+  const [reviewComment, setReviewComment] = useState("订单、物流与政策证据已获取，同意发放延迟补偿券。");
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [filters, setFilters] = useState<TicketFilters>({ search: "" });
+  const [createForm] = Form.useForm();
+  // useWatch 保证 preset 变更时响应式刷新 hint（getFieldValue 只在渲染时机快照取值，不触发重渲染）。
+  const activePreset =
+    demoPresets.find((preset) => preset.key === Form.useWatch("preset", createForm)) ?? demoPresets[0];
 
   // 直播链路：只对「当前页面新建并分析」的 run 建立 SSE；历史工单只读取持久化事件。
   const [runId, setRunId] = useState("");
@@ -277,6 +301,13 @@ export function AfterSalesPage() {
         }
         if (event.type === "run_completed") {
           refreshTicket(liveTicketId, queryClient);
+          // 无需审批的路线（ANSWER_ONLY / NO_ACTION）在 run_completed 即终态：
+          // 直接关闭 SSE，避免「运行中」假象与永久空转（待审批路线继续等待审批事件）。
+          if (event.data.finalAnswer?.requiresApproval === false) {
+            closedRef.current = true;
+            setStreamStatus("closed");
+            source.close();
+          }
         }
         const rejected = event.type === "approval_recorded" && event.data.decision === "REJECTED";
         if (event.type === "execution_completed" || event.type === "error" || rejected) {
@@ -338,16 +369,16 @@ export function AfterSalesPage() {
     [finalAnswer, verifiedEvidenceIds, proposal?.amount],
   );
   // 币种链路：proposal.currency -> compensation.currency -> order.currency -> 空字符串，永远不用 country。
-  // 风险规则优先使用 Intake 紧急度：HIGH 直接进入 HIGH 风险，其次才看金额/物流规则。
+  // 动作风险只由金额/政策上限与物流延迟天数等确定性规则输入驱动，绝不使用 Intake 客户紧急度
+  // （客户紧急度单独展示在 Intake 面板）；风险只用于提案/审批上下文。
   const risk = useMemo(
     () => assessRiskLevel({
       amount: proposal?.amount ?? 0,
       currency: proposal?.currency ?? finalAnswer?.compensation?.currency ?? finalAnswer?.order?.currency ?? "",
       maxCompensation: finalAnswer?.policy?.maximumCompensation ?? 0,
       delayDays: finalAnswer?.shipment?.delayDays,
-      intakeUrgency: finalAnswer?.intake?.urgency,
     }),
-    [proposal?.amount, proposal?.currency, finalAnswer?.compensation?.currency, finalAnswer?.order?.currency, finalAnswer?.policy?.maximumCompensation, finalAnswer?.shipment?.delayDays, finalAnswer?.intake?.urgency],
+    [proposal?.amount, proposal?.currency, finalAnswer?.compensation?.currency, finalAnswer?.order?.currency, finalAnswer?.policy?.maximumCompensation, finalAnswer?.shipment?.delayDays],
   );
 
   const clearFilters = () => setFilters({ search: "" });
@@ -439,10 +470,26 @@ export function AfterSalesPage() {
         destroyOnClose
       >
         <Form
+          form={createForm}
           layout="vertical"
-          initialValues={{ orderId: "O-VN-5002", customerMessage: demoMessage }}
+          initialValues={{ orderId: demoPresets[0].orderId, customerMessage: demoPresets[0].message }}
           onFinish={(values) => createMutation.mutate(values as { orderId: string; customerMessage: string })}
         >
+          <Typography.Text type="secondary">演示场景（自动填充订单与用户诉求）</Typography.Text>
+          <Form.Item name="preset" initialValue={demoPresets[0].key} className="preset-picker">
+            <Radio.Group
+              optionType="button"
+              buttonStyle="solid"
+              onChange={(event) => {
+                const preset = demoPresets.find((item) => item.key === event.target.value);
+                if (preset) createForm.setFieldsValue({ orderId: preset.orderId, customerMessage: preset.message });
+              }}
+              options={demoPresets.map((preset) => ({ value: preset.key, label: preset.label }))}
+            />
+          </Form.Item>
+          <Typography.Text type="secondary" className="preset-hint">
+            {activePreset.hint}
+          </Typography.Text>
           <Form.Item label="订单" name="orderId" rules={[{ required: true, message: "请选择订单" }]}>
             <Select options={knownDemoOrders} />
           </Form.Item>
