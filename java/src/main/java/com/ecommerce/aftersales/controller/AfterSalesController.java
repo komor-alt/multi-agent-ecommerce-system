@@ -2,6 +2,7 @@ package com.ecommerce.aftersales.controller;
 
 import com.ecommerce.aftersales.service.AfterSalesRunEventService;
 import com.ecommerce.aftersales.service.AfterSalesService;
+import com.ecommerce.aftersales.service.OperatorContext;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -56,18 +57,24 @@ public class AfterSalesController {
         return eventService.stream(runId, lastEventId != null ? lastEventId : queryLastEventId);
     }
 
+    // 审批人身份只来自可信 Gateway Header（X-Authenticated-Operator），绝不接受 body 中的 operatorId：
+    // ReviewRequest 只有 comment，缺失/非法 Header 由 OperatorContext 抛结构化安全异常（401/400）。
     @PostMapping("/proposals/{proposalId}/approve")
     public Map<String, Object> approve(
             @PathVariable String proposalId,
+            @RequestHeader(value = OperatorContext.HEADER_NAME, required = false) String authenticatedOperator,
             @RequestBody ReviewRequest request) {
-        return afterSalesService.approve(proposalId, request.operatorId(), request.comment());
+        return afterSalesService.approve(proposalId,
+                OperatorContext.fromTrustedGatewayHeader(authenticatedOperator), request.comment());
     }
 
     @PostMapping("/proposals/{proposalId}/reject")
     public Map<String, Object> reject(
             @PathVariable String proposalId,
+            @RequestHeader(value = OperatorContext.HEADER_NAME, required = false) String authenticatedOperator,
             @RequestBody ReviewRequest request) {
-        return afterSalesService.reject(proposalId, request.operatorId(), request.comment());
+        return afterSalesService.reject(proposalId,
+                OperatorContext.fromTrustedGatewayHeader(authenticatedOperator), request.comment());
     }
 
     @PostMapping("/execution-jobs/{jobId}/retry")
@@ -78,6 +85,7 @@ public class AfterSalesController {
     public record CreateTicketRequest(String orderId, String customerMessage) {
     }
 
-    public record ReviewRequest(String operatorId, String comment) {
+    /** 审批请求 body：只保留审批意见 comment，绝不携带 operatorId（身份只来自可信 Header）。 */
+    public record ReviewRequest(String comment) {
     }
 }

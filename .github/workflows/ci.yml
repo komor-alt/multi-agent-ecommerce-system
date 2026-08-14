@@ -1,0 +1,103 @@
+# CI for Agentic Commerce Platform
+#
+# Three independent jobs: Java (after-sales trust boundary + offline agent
+# evaluation), Gateway (NestJS), and Frontend (React). All tests are offline:
+# no external API is called, no LLM key is configured or required. The Java
+# suite runs the after-sales agent loop in RULES mode / with injected model
+# stand-ins and fails if any safety gate (unauthorized action, model-supplied
+# amount, model-supplied tool arguments) is breached.
+#
+# There is deliberately no Python job: the Python recommendation-agent module
+# has a long history of broken/missing dependency pins and its test setup is
+# not currently stable. See the "Limitations" section of the root README.
+# Adding Python CI back should be done as a separate, dedicated effort once
+# its dependency and test setup is reproducible.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  java:
+    name: Java (after-sales + eval)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Run Java tests (includes offline after-sales eval)
+        working-directory: java
+        run: mvn -B test
+
+      - name: Upload after-sales eval reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: after-sales-eval-reports
+          path: java/target/after-sales-eval/
+          if-no-files-found: error
+
+  gateway:
+    name: Gateway (NestJS)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Generate Prisma client
+        working-directory: backend
+        run: npx prisma generate
+
+      - name: Typecheck
+        working-directory: backend
+        run: npm run typecheck
+
+      - name: Build
+        working-directory: backend
+        run: npm run build
+
+  frontend:
+    name: Frontend (React)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: frontend
+        run: npm run typecheck
+
+      - name: Build
+        working-directory: frontend
+        run: npm run build

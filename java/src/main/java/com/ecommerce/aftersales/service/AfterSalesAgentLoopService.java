@@ -38,9 +38,10 @@ import java.util.Set;
  * - 每一步由 AfterSalesEvidencePlannerService 决定下一份证据（EvidenceType），
  *   Java 侧把证据映射到既有的只读工具（get_order_detail / get_shipment_trace / search_after_sales_policy）；
  * - 工具参数只来自 AfterSalesToolExecutor.trustedArguments，模型从不产生参数；
- * - Planner 事件：planning_started / planning_completed / planning_fallback；
- *   LLM 规划请求了已存在或非必需的证据 → 以 LLM_INVALID_PLAN 拒绝并直接规则兜底（不重复调用模型）；
- *   兜底仍无法推进（如规划结果指向已存在证据）→ 整条工单失败 PLANNER_NO_PROGRESS；
+ * - EvidencePreconditionGate 对所有规划结果做业务前置校验（非必需证据 / 已存在证据 /
+ *   SHIPMENT 依赖 ORDER、POLICY 依赖 ORDER+SHIPMENT / READY 证据不齐）：
+ *   LLM 规划形式合法但前置不满足 → 以 LLM_INVALID_PLAN 拒绝并直接规则兜底（不重复调用模型）；
+ *   兜底（或 RULES 模式）规划也必须过同一 Gate，仍不可推进 → 整条工单失败 PLANNER_NO_PROGRESS；
  * - 指纹去重与 maxSteps 上限保留：重复工具调用与超步数都按失败处理。
  *
  * 决策阶段：READY_FOR_DECISION 后离开取证循环，先按路线做服务端决策前置校验
@@ -71,6 +72,8 @@ public class AfterSalesAgentLoopService {
     private final DecisionRouteResolver routeResolver;
     private final ObjectMapper objectMapper;
     private final long stepDelayMs;
+    /** 证据业务前置校验（纯 Java 组件）：所有规划来源（LLM 与规则兜底）必须通过同一 Gate。 */
+    private final EvidencePreconditionGate preconditionGate = new EvidencePreconditionGate();
 
     public AfterSalesAgentLoopService(
             AfterSalesToolExecutor toolExecutor,
@@ -170,9 +173,10 @@ public class AfterSalesAgentLoopService {
 
     /**
      * 单次规划周期：planning_started →（planning_fallback 可选）→ planning_completed。
-     * LLM 规划请求已存在/非必需的证据时以 LLM_INVALID_PLAN 拒绝并规则兜底（不重复调用模型）；
+     * LLM 规划经 EvidencePreconditionGate 校验：形式合法但业务前置不满足（非必需/已存在/
+     * 依赖缺失/READY 证据不齐）→ 以 LLM_INVALID_PLAN 拒绝并规则兜底（不重复调用模型）；
      * 规划结果标记 invalidInput（requiredEvidence 含未知证据）→ PLANNER_INVALID_REQUIRED_EVIDENCE；
-     * 兜底后仍无法推进 → PLANNER_NO_PROGRESS。
+     * 兜底（或 RULES 模式）规划也必须过同一 Gate，仍不可推进 → PLANNER_NO_PROGRESS。
      * planning_completed / planning_fallback 携带显式字段 nextEvidence（不再是 evidence）。
      */
     private AfterSalesTypes.PlanningResult planNextStep(
@@ -191,8 +195,9 @@ public class AfterSalesAgentLoopService {
         PlanningInput input = new PlanningInput(state.getIntake(), presence);
         AfterSalesTypes.PlanningResult plan = plannerService.plan(input);
         String rejectReason = null;
-        if ("LLM".equals(plan.source()) && !advances(plan, state.getIntake(), presence)) {
-            // LLM 请求了已存在或非必需的证据：拒绝（LLM_INVALID_PLAN）并规则兜底，不重复调用模型。
+        if ("LLM".equals(plan.source()) && !passesGate(plan, state, presence)) {
+            // LLM 规划形式合法但业务前置不满足（非必需/已存在/依赖缺失/READY 证据不齐）：
+            // 拒绝（LLM_INVALID_PLAN）并规则兜底，不重复调用模型。
             rejectReason = "LLM_INVALID_PLAN";
             plan = plannerService.deterministicPlan(input, rejectReason);
         }
@@ -200,8 +205,8 @@ public class AfterSalesAgentLoopService {
             // 服务端输入非法（requiredEvidence 含未知证据）：规划器已明确标记不可用，绝不执行。
             throw new IllegalStateException("PLANNER_INVALID_REQUIRED_EVIDENCE");
         }
-        if (!advances(plan, state.getIntake(), presence)) {
-            // 兜底仍无法推进：执行该规划不会让工单前进（重复取证 / 证据缺失就绪决策）。
+        if (!passesGate(plan, state, presence)) {
+            // 兜底（或 RULES 模式）规划仍不过同一 Gate：执行该规划不会让工单前进。
             throw new IllegalStateException("PLANNER_NO_PROGRESS");
         }
         if (rejectReason != null || isDegradedPlan(plan)) {
@@ -220,22 +225,13 @@ public class AfterSalesAgentLoopService {
         return plan;
     }
 
-    /** 判断规划结果能否让工单前进：证据必须「必需且缺失」；READY_FOR_DECISION 必须证据齐备。 */
-    private static boolean advances(
+    /** 业务前置校验（EvidencePreconditionGate）：所有规划来源必须能通过才能推进。 */
+    private boolean passesGate(
             AfterSalesTypes.PlanningResult plan,
-            AfterSalesTypes.IntakeResult intake,
+            AfterSalesAgentState state,
             Map<String, Boolean> presence) {
-        EvidenceType next = plan.nextEvidence();
-        if (next == EvidenceType.READY_FOR_DECISION) {
-            for (String required : intake.requiredEvidence()) {
-                if (!Boolean.TRUE.equals(presence.get(required))) {
-                    return false;
-                }
-            }
-            return true;
-        }
-        return !Boolean.TRUE.equals(presence.get(next.name()))
-                && intake.requiredEvidence().contains(next.name());
+        return preconditionGate.validate(
+                plan.nextEvidence(), state.getIntake().requiredEvidence(), presence).passed();
     }
 
     /** 降级判定：RULES 模式是主动配置，不算降级；其余 fallbackReason 都代表 LLM 路径降级。 */

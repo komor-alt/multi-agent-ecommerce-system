@@ -1,5 +1,6 @@
 package com.ecommerce.aftersales.service;
 
+import com.ecommerce.aftersales.entity.ActionProposalEntity;
 import com.ecommerce.aftersales.entity.AfterSalesRunEntity;
 import com.ecommerce.aftersales.entity.AfterSalesTicketEntity;
 import com.ecommerce.aftersales.entity.ExecutionJobEntity;
@@ -259,6 +260,57 @@ class AfterSalesServiceTest {
         assertThatThrownBy(() -> service().start("nope"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("AGENT_RUN_NOT_FOUND");
+    }
+
+    @Test
+    void approveWritesTrustedOperatorIntoEventAndForwardsToApprovalService() {
+        AfterSalesTicketEntity ticket = ticket(AfterSalesTypes.TicketStatus.PENDING_APPROVAL);
+        ticket.setCurrentRunId("run-1");
+        ExecutionJobEntity job = executionJob("job-1", "ticket-1", AfterSalesTypes.ExecutionStatus.PENDING);
+        when(ticketRepository.findById("ticket-1")).thenReturn(Optional.of(ticket));
+        when(approvalService.approve("proposal-1", "operator-vn-01", "approved"))
+                .thenReturn(new ApprovalService.ApprovalOutcome(job, true));
+
+        Map<String, Object> response = service().approve("proposal-1",
+                OperatorContext.fromTrustedGatewayHeader("operator-vn-01"), "approved");
+
+        assertThat(response.get("id")).isEqualTo("job-1");
+        verify(approvalService).approve("proposal-1", "operator-vn-01", "approved");
+        verify(executionService).executeAsync("job-1");
+        ArgumentCaptor<Map<String, Object>> dataCaptor = ArgumentCaptor.forClass(Map.class);
+        verify(eventService).append(eq("run-1"), eq("approval_recorded"), eq("人工审批通过"), eq("success"),
+                anyString(), dataCaptor.capture());
+        // 事件里的审批人只能是可信 Gateway 身份，不可能是 body/其他来源。
+        assertThat(dataCaptor.getValue()).containsEntry("operatorId", "operator-vn-01");
+        assertThat(dataCaptor.getValue()).containsEntry("decision", "APPROVED");
+    }
+
+    @Test
+    void rejectWritesTrustedOperatorIntoEventAndCompletesRun() {
+        AfterSalesTicketEntity ticket = ticket(AfterSalesTypes.TicketStatus.PENDING_APPROVAL);
+        ticket.setCurrentRunId("run-1");
+        ActionProposalEntity proposal = ActionProposalEntity.builder()
+                .id("proposal-1")
+                .ticketId("ticket-1")
+                .status(AfterSalesTypes.ProposalStatus.REJECTED)
+                .build();
+        when(ticketRepository.findById("ticket-1")).thenReturn(Optional.of(ticket));
+        when(ticketRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(approvalService.reject("proposal-1", "operator-vn-01", "rejected")).thenReturn(proposal);
+
+        Map<String, Object> response = service().reject("proposal-1",
+                OperatorContext.fromTrustedGatewayHeader("operator-vn-01"), "rejected");
+
+        assertThat(response.get("status")).isEqualTo("REJECTED");
+        assertThat(ticket.getStatus()).isEqualTo(AfterSalesTypes.TicketStatus.RESOLVED);
+        verify(ticketRepository).save(ticket);
+        verify(approvalService).reject("proposal-1", "operator-vn-01", "rejected");
+        ArgumentCaptor<Map<String, Object>> dataCaptor = ArgumentCaptor.forClass(Map.class);
+        verify(eventService).append(eq("run-1"), eq("approval_recorded"), eq("人工驳回方案"), eq("success"),
+                anyString(), dataCaptor.capture());
+        assertThat(dataCaptor.getValue()).containsEntry("operatorId", "operator-vn-01");
+        assertThat(dataCaptor.getValue()).containsEntry("decision", "REJECTED");
+        verify(eventService).complete("run-1");
     }
 
     private AfterSalesTicketEntity ticket(AfterSalesTypes.TicketStatus status) {

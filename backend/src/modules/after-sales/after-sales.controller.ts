@@ -15,6 +15,12 @@ export class AfterSalesController {
     return this.success(await this.service.listTickets(), "after-sales-list");
   }
 
+  /** 当前 Gateway 可信审批人（只读，Demo 配置；生产由认证中间件生成，不构成生产认证）。 */
+  @Get("operator-context")
+  async getOperatorContext() {
+    return this.success(await this.service.getOperatorContext(), "after-sales-operator-context");
+  }
+
   @Post("tickets")
   async createTicket(@Body() dto: CreateAfterSalesTicketDto) {
     const data = await this.service.createTicket(dto);

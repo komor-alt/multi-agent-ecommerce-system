@@ -18,20 +18,22 @@ import java.util.UUID;
 
 @Service
 public class ApprovalService {
-    // TODO: move server-side approval policy checks into ApprovalPolicyGate.
-    // 当前审批的服务端策略检查（状态机/幂等/执行任务派生）内联在本服务中；后续应抽到独立的
-    // ApprovalPolicyGate 统一收敛「可审批性」判定，本服务只负责状态流转与记录落库。本轮不重构。
+    // 审批的服务端「可审批性」判定收敛在 ApprovalPolicyGate（状态机/运行终态/证据/政策/金额重算）；
+    // 本服务只负责状态流转与记录落库：Gate 通过后才写 APPROVED / ApprovalRecord / ExecutionJob。
     private final ActionProposalRepository proposalRepository;
     private final ApprovalRecordRepository approvalRecordRepository;
     private final ExecutionJobRepository executionJobRepository;
+    private final ApprovalPolicyGate approvalPolicyGate;
 
     public ApprovalService(
             ActionProposalRepository proposalRepository,
             ApprovalRecordRepository approvalRecordRepository,
-            ExecutionJobRepository executionJobRepository) {
+            ExecutionJobRepository executionJobRepository,
+            ApprovalPolicyGate approvalPolicyGate) {
         this.proposalRepository = proposalRepository;
         this.approvalRecordRepository = approvalRecordRepository;
         this.executionJobRepository = executionJobRepository;
+        this.approvalPolicyGate = approvalPolicyGate;
     }
 
     @Transactional
@@ -47,6 +49,10 @@ public class ApprovalService {
         if (proposal.getStatus() != AfterSalesTypes.ProposalStatus.PENDING) {
             throw new IllegalStateException("PROPOSAL_ALREADY_PROCESSED");
         }
+
+        // 服务端可审批性复核（Gate 不重新锁 Proposal）：失败抛 ApprovalPolicyViolationException，
+        // 事务整体回滚 —— 绝不创建 ApprovalRecord 或 ExecutionJob，proposal 保持 PENDING。
+        approvalPolicyGate.validate(proposal);
 
         proposal.setStatus(AfterSalesTypes.ProposalStatus.APPROVED);
         proposal.setReviewedBy(operatorId);

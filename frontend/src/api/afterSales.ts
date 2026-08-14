@@ -28,16 +28,22 @@ export function startAfterSalesRun(runId: string) {
   return apiPost<StartRunResponse>(`/after-sales/runs/${encodeURIComponent(runId)}/start`, {});
 }
 
+/** 当前 Gateway 可信审批人（只读展示；身份由 Gateway 强制注入，客户端从不发送）。 */
+export function getAfterSalesOperatorContext() {
+  return apiGet<{ operatorId: string }>("/after-sales/operator-context");
+}
+
+/** 审批请求只携带审批意见 comment；审批人身份由 Gateway 可信 Header 注入，绝不从客户端发送。 */
 export function approveAfterSalesProposal(
   proposalId: string,
-  input: { operatorId: string; comment?: string },
+  input: { comment?: string },
 ) {
   return apiPost<ExecutionJob>(`/after-sales/proposals/${encodeURIComponent(proposalId)}/approve`, input);
 }
 
 export function rejectAfterSalesProposal(
   proposalId: string,
-  input: { operatorId: string; comment?: string },
+  input: { comment?: string },
 ) {
   return apiPost<ActionProposal>(`/after-sales/proposals/${encodeURIComponent(proposalId)}/reject`, input);
 }

@@ -28,6 +28,7 @@ import {
   approveAfterSalesProposal,
   createAfterSalesEventSource,
   createAfterSalesTicket,
+  getAfterSalesOperatorContext,
   getAfterSalesTicket,
   listAfterSalesTickets,
   parseAfterSalesEvent,
@@ -106,7 +107,6 @@ const knownDemoOrders = [
 export function AfterSalesPage() {
   const queryClient = useQueryClient();
   const [ticketId, setTicketId] = useState<string>("");
-  const [operatorId, setOperatorId] = useState("operator-vn-01");
   const [reviewComment, setReviewComment] = useState("订单、物流与政策证据已获取，同意发放延迟补偿券。");
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [filters, setFilters] = useState<TicketFilters>({ search: "" });
@@ -139,6 +139,13 @@ export function AfterSalesPage() {
       return items;
     },
   });
+
+  // 当前审批人只读：来自 Gateway 可信身份（AFTER_SALES_OPERATOR_ID），客户端不可编辑、不发送。
+  const operatorContextQuery = useQuery({
+    queryKey: ["after-sales-operator-context"],
+    queryFn: () => getAfterSalesOperatorContext(),
+  });
+  const operatorId = operatorContextQuery.data?.operatorId ?? "";
 
   const ticketQuery = useQuery({
     queryKey: ["after-sales-ticket", ticketId],
@@ -257,10 +264,11 @@ export function AfterSalesPage() {
     mutationFn: async (decision: "approve" | "reject") => {
       const proposalId = ticketQuery.data?.proposal?.id;
       if (!proposalId) throw new Error("当前没有可审批的方案");
+      // 只发送审批意见：审批人身份由 Gateway 可信 Header 注入，客户端不发送也不可影响。
       if (decision === "approve") {
-        return approveAfterSalesProposal(proposalId, { operatorId, comment: reviewComment });
+        return approveAfterSalesProposal(proposalId, { comment: reviewComment });
       }
-      return rejectAfterSalesProposal(proposalId, { operatorId, comment: reviewComment });
+      return rejectAfterSalesProposal(proposalId, { comment: reviewComment });
     },
     onSuccess: () => refreshTicket(ticketId, queryClient),
   });
@@ -451,7 +459,6 @@ export function AfterSalesPage() {
           risk={risk}
           operatorId={operatorId}
           reviewComment={reviewComment}
-          onOperatorIdChange={setOperatorId}
           onReviewCommentChange={setReviewComment}
           onApprove={() => reviewMutation.mutate("approve")}
           onReject={() => reviewMutation.mutate("reject")}

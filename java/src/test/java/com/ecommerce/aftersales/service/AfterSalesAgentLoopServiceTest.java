@@ -11,6 +11,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.springframework.ai.chat.client.ChatClient;
 
 import java.math.BigDecimal;
@@ -28,6 +29,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -481,6 +483,131 @@ class AfterSalesAgentLoopServiceTest {
                 .toList().get(0)).isEqualTo("LLM");
         // 路线生效：POLICY 从未被规划，工单以物流答复完成。
         verify(toolExecutor, never()).execute(eq(AfterSalesToolExecutor.SEARCH_POLICY), any());
+    }
+
+    @Test
+    void llmPlanRequestingShipmentBeforeOrderFallsBackToOrderFirst() {
+        // 场景：无 ORDER 时 LLM 规划 SHIPMENT —— 形式合法但业务前置不满足（SHIPMENT 依赖 ORDER），
+        // 以 LLM_INVALID_PLAN 拒绝并规则兜底到 ORDER；ORDER 齐备后 LLM SHIPMENT 规划被接受。
+        AfterSalesRunRepository runRepository = mock(AfterSalesRunRepository.class);
+        AfterSalesTicketRepository ticketRepository = mock(AfterSalesTicketRepository.class);
+        AfterSalesTicketContextService ticketContextService = mock(AfterSalesTicketContextService.class);
+        AfterSalesToolExecutor toolExecutor = mock(AfterSalesToolExecutor.class);
+        AfterSalesRunEventService eventService = mock(AfterSalesRunEventService.class);
+        List<CapturedEvent> appended = new ArrayList<>();
+        doAnswer(invocation -> {
+            appended.add(new CapturedEvent(invocation.getArgument(1), invocation.getArgument(5)));
+            return null;
+        }).when(eventService).append(anyString(), anyString(), anyString(), anyString(), anyString(), any());
+        AfterSalesAgentLoopService service = new AfterSalesAgentLoopService(
+                toolExecutor, eventService, runRepository, ticketRepository, ticketContextService,
+                intakeService(), llmPlannerService("{\"nextEvidence\":\"SHIPMENT\",\"reasonCode\":\"SHIPMENT_STATUS_REQUIRED\"}"),
+                routeResolver(), objectMapper, 0L);
+
+        when(runRepository.findById("run-1")).thenReturn(Optional.of(run()));
+        AfterSalesTicketEntity ticket = ticket();
+        when(ticketContextService.load("ticket-1"))
+                .thenReturn(new AfterSalesTicketContextService.TicketContext(ticket, ticket.getCustomerMessage()));
+        when(runRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(ticketRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(toolExecutor.trustedArguments(anyString(), any())).thenReturn(Map.of());
+        stubToolExecutor(toolExecutor);
+
+        service.run("run-1", "ticket-1");
+
+        // 首次执行的是规则兜底的 get_order_detail，随后才是被接受的 LLM SHIPMENT 规划。
+        InOrder inOrder = inOrder(toolExecutor);
+        inOrder.verify(toolExecutor).execute(eq(AfterSalesToolExecutor.GET_ORDER_DETAIL), any());
+        inOrder.verify(toolExecutor).execute(eq(AfterSalesToolExecutor.GET_SHIPMENT_TRACE), any());
+        List<String> plannedEvidence = appended.stream()
+                .filter(event -> "planning_completed".equals(event.type()))
+                .map(event -> (String) event.data().get("nextEvidence"))
+                .toList();
+        assertThat(plannedEvidence).containsExactly("ORDER", "SHIPMENT", "READY_FOR_DECISION");
+        // 周期 1（前置不满足）与周期 3（证据已存在）降级；周期 2 的 LLM SHIPMENT 规划被接受。
+        List<CapturedEvent> fallbacks = appended.stream()
+                .filter(event -> "planning_fallback".equals(event.type()))
+                .toList();
+        assertThat(fallbacks).hasSize(2);
+        fallbacks.forEach(event -> {
+            assertThat(event.data()).containsEntry("fallbackReason", "LLM_INVALID_PLAN");
+            assertThat(event.data()).containsEntry("source", "RULE_FALLBACK");
+        });
+        assertThat(appended.stream()
+                .filter(event -> "planning_completed".equals(event.type()))
+                .map(event -> event.data().get("source"))
+                .toList()).containsExactly("RULE_FALLBACK", "LLM", "RULE_FALLBACK");
+        assertThat(appended).noneMatch(event -> "error".equals(event.type()));
+        ArgumentCaptor<AfterSalesRunEntity> runCaptor = ArgumentCaptor.forClass(AfterSalesRunEntity.class);
+        verify(runRepository, atLeastOnce()).save(runCaptor.capture());
+        assertThat(runCaptor.getAllValues().stream()
+                .filter(item -> "COMPLETED".equals(item.getStatus()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("COMPLETED run not saved"))
+                .getStopReason()).isEqualTo("ANSWER_DELIVERED");
+    }
+
+    @Test
+    void llmPlanRequestingPolicyFallsBackUntilOrderAndShipmentArePresent() {
+        // 场景 2+3：补偿评估路线下 LLM 始终规划 POLICY —— 有 ORDER 无 SHIPMENT 时兜底 SHIPMENT；
+        // ORDER+SHIPMENT 齐备后 LLM→POLICY 被接受；POLICY 已存在后再兜底 READY。
+        AfterSalesRunRepository runRepository = mock(AfterSalesRunRepository.class);
+        AfterSalesTicketRepository ticketRepository = mock(AfterSalesTicketRepository.class);
+        AfterSalesTicketContextService ticketContextService = mock(AfterSalesTicketContextService.class);
+        AfterSalesToolExecutor toolExecutor = mock(AfterSalesToolExecutor.class);
+        AfterSalesIntakeService intakeService = mock(AfterSalesIntakeService.class);
+        when(intakeService.classify(anyString())).thenReturn(refundIntake());
+        AfterSalesRunEventService eventService = mock(AfterSalesRunEventService.class);
+        List<CapturedEvent> appended = new ArrayList<>();
+        doAnswer(invocation -> {
+            appended.add(new CapturedEvent(invocation.getArgument(1), invocation.getArgument(5)));
+            return null;
+        }).when(eventService).append(anyString(), anyString(), anyString(), anyString(), anyString(), any());
+        AfterSalesAgentLoopService service = new AfterSalesAgentLoopService(
+                toolExecutor, eventService, runRepository, ticketRepository, ticketContextService,
+                intakeService, llmPlannerService("{\"nextEvidence\":\"POLICY\",\"reasonCode\":\"POLICY_REQUIRED\"}"),
+                routeResolver(), objectMapper, 0L);
+
+        when(runRepository.findById("run-1")).thenReturn(Optional.of(run()));
+        AfterSalesTicketEntity ticket = ticket();
+        when(ticketContextService.load("ticket-1"))
+                .thenReturn(new AfterSalesTicketContextService.TicketContext(ticket, ticket.getCustomerMessage()));
+        when(runRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(ticketRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(toolExecutor.trustedArguments(anyString(), any())).thenReturn(Map.of());
+        stubToolExecutor(toolExecutor);
+
+        service.run("run-1", "ticket-1");
+
+        // 取证顺序：兜底 ORDER → 兜底 SHIPMENT → 被接受的 POLICY → 兜底 READY。
+        InOrder inOrder = inOrder(toolExecutor);
+        inOrder.verify(toolExecutor).execute(eq(AfterSalesToolExecutor.GET_ORDER_DETAIL), any());
+        inOrder.verify(toolExecutor).execute(eq(AfterSalesToolExecutor.GET_SHIPMENT_TRACE), any());
+        inOrder.verify(toolExecutor).execute(eq(AfterSalesToolExecutor.SEARCH_POLICY), any());
+        List<String> plannedEvidence = appended.stream()
+                .filter(event -> "planning_completed".equals(event.type()))
+                .map(event -> (String) event.data().get("nextEvidence"))
+                .toList();
+        assertThat(plannedEvidence).containsExactly("ORDER", "SHIPMENT", "POLICY", "READY_FOR_DECISION");
+        // 周期 1（缺 ORDER）、2（缺 SHIPMENT）、4（POLICY 已存在）降级；周期 3 的 LLM POLICY 被接受。
+        List<CapturedEvent> fallbacks = appended.stream()
+                .filter(event -> "planning_fallback".equals(event.type()))
+                .toList();
+        assertThat(fallbacks).hasSize(3);
+        fallbacks.forEach(event -> assertThat(event.data()).containsEntry("fallbackReason", "LLM_INVALID_PLAN"));
+        assertThat(appended.stream()
+                .filter(event -> "planning_completed".equals(event.type()))
+                .map(event -> event.data().get("source"))
+                .toList()).containsExactly("RULE_FALLBACK", "RULE_FALLBACK", "LLM", "RULE_FALLBACK");
+        assertThat(appended).noneMatch(event -> "error".equals(event.type()));
+        ArgumentCaptor<AfterSalesRunEntity> runCaptor = ArgumentCaptor.forClass(AfterSalesRunEntity.class);
+        verify(runRepository, atLeastOnce()).save(runCaptor.capture());
+        AfterSalesRunEntity savedRun = runCaptor.getAllValues().stream()
+                .filter(item -> "COMPLETED".equals(item.getStatus()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("COMPLETED run not saved"));
+        assertThat(savedRun.getStopReason()).isEqualTo("ACTION_PROPOSAL_CREATED");
+        assertThat(savedRun.getStepCount()).isEqualTo(5);
     }
 
     @Test

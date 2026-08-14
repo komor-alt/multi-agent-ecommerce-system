@@ -194,9 +194,11 @@ public class AfterSalesService {
         return result;
     }
 
-    public Map<String, Object> approve(String proposalId, String operatorId, String comment) {
-        String safeOperator = operatorId == null || operatorId.isBlank() ? "operator-demo" : operatorId.trim();
-        ApprovalService.ApprovalOutcome outcome = approvalService.approve(proposalId, safeOperator, comment);
+    // 审批人身份由控制器从可信 Gateway Header 构建的 OperatorContext 传入（普通 body 无法影响）：
+    // 本服务只读取 operator.id() 写入事件，ApprovalService 继续接收已可信的 String。
+    public Map<String, Object> approve(String proposalId, OperatorContext operator, String comment) {
+        String operatorId = operator.id();
+        ApprovalService.ApprovalOutcome outcome = approvalService.approve(proposalId, operatorId, comment);
         ExecutionJobEntity job = outcome.job();
         if (outcome.newlyApproved()) {
             AfterSalesTicketEntity ticket = ticketRepository.findById(job.getTicketId()).orElseThrow();
@@ -205,7 +207,7 @@ public class AfterSalesService {
                             "summary", "人工审批通过，已创建唯一执行任务。",
                             "proposalId", proposalId,
                             "jobId", job.getId(),
-                            "operatorId", safeOperator,
+                            "operatorId", operatorId,
                             "decision", "APPROVED"
                     ));
             executionService.executeAsync(job.getId());
@@ -213,9 +215,9 @@ public class AfterSalesService {
         return executionMap(job);
     }
 
-    public Map<String, Object> reject(String proposalId, String operatorId, String comment) {
-        String safeOperator = operatorId == null || operatorId.isBlank() ? "operator-demo" : operatorId.trim();
-        ActionProposalEntity proposal = approvalService.reject(proposalId, safeOperator, comment);
+    public Map<String, Object> reject(String proposalId, OperatorContext operator, String comment) {
+        String operatorId = operator.id();
+        ActionProposalEntity proposal = approvalService.reject(proposalId, operatorId, comment);
         AfterSalesTicketEntity ticket = ticketRepository.findById(proposal.getTicketId()).orElseThrow();
         ticket.setStatus(AfterSalesTypes.TicketStatus.RESOLVED);
         ticketRepository.save(ticket);
@@ -223,7 +225,7 @@ public class AfterSalesService {
                 "运营人员驳回延迟补偿方案。", Map.of(
                         "summary", "方案已驳回，不会产生任何副作用。",
                         "proposalId", proposalId,
-                        "operatorId", safeOperator,
+                        "operatorId", operatorId,
                         "decision", "REJECTED"
                 ));
         eventService.complete(ticket.getCurrentRunId());

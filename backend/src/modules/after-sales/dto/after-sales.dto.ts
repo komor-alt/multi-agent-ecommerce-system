@@ -16,11 +16,12 @@ export class AnalyzeAfterSalesTicketDto {
   deferred?: boolean;
 }
 
+/**
+ * 审批请求 DTO：只保留审批意见 comment。
+ * 审批人身份绝不来自客户端 body —— 由 Gateway 从 AFTER_SALES_OPERATOR_ID 配置读取，
+ * 清洗验证后强制写入 X-Authenticated-Operator 头转发给 Java（客户端同名字段一律不采用）。
+ */
 export class ReviewAfterSalesProposalDto {
-  @IsString()
-  @MinLength(2)
-  operatorId!: string;
-
   @IsOptional()
   @IsString()
   comment?: string;

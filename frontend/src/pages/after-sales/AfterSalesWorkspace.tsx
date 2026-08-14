@@ -81,7 +81,6 @@ export function AfterSalesWorkspace({
   risk,
   operatorId,
   reviewComment,
-  onOperatorIdChange,
   onReviewCommentChange,
   onApprove,
   onReject,
@@ -96,9 +95,9 @@ export function AfterSalesWorkspace({
   evidenceItems: EvidenceItem[];
   checks: ApprovalChecks;
   risk: RiskAssessment;
+  /** 当前审批人（Gateway 可信身份，只读展示，不可编辑、不随审批请求发送）。 */
   operatorId: string;
   reviewComment: string;
-  onOperatorIdChange: (value: string) => void;
   onReviewCommentChange: (value: string) => void;
   onApprove: () => void;
   onReject: () => void;
@@ -124,7 +123,6 @@ export function AfterSalesWorkspace({
             risk={risk}
             operatorId={operatorId}
             reviewComment={reviewComment}
-            onOperatorIdChange={onOperatorIdChange}
             onReviewCommentChange={onReviewCommentChange}
             onApprove={onApprove}
             onReject={onReject}
@@ -502,7 +500,6 @@ function ApprovalPanel({
   risk,
   operatorId,
   reviewComment,
-  onOperatorIdChange,
   onReviewCommentChange,
   onApprove,
   onReject,
@@ -515,7 +512,6 @@ function ApprovalPanel({
   risk: RiskAssessment;
   operatorId: string;
   reviewComment: string;
-  onOperatorIdChange: (value: string) => void;
   onReviewCommentChange: (value: string) => void;
   onApprove: () => void;
   onReject: () => void;
@@ -607,11 +603,13 @@ function ApprovalPanel({
 
       <PanelTitle>审批信息</PanelTitle>
       <Space direction="vertical" size={8} style={{ width: "100%" }}>
-        <Input
-          value={operatorId}
-          onChange={(event) => onOperatorIdChange(event.target.value)}
-          addonBefore="审批人"
-          disabled={!isPending}
+        {/* 当前审批人只读展示：身份由 Gateway 可信 Header 注入（AFTER_SALES_OPERATOR_ID），不可编辑、不随请求发送。 */}
+        <Descriptions
+          column={1}
+          size="small"
+          items={[
+            { key: "operator", label: "当前审批人", children: <Typography.Text code>{operatorId || "—"}</Typography.Text> },
+          ]}
         />
         <Input.TextArea
           value={reviewComment}

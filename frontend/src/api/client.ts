@@ -24,6 +24,58 @@ export class ApiClientError extends Error {
   }
 }
 
+type ApiErrorPayload = {
+  code?: string;
+  message?: string;
+  details?: Record<string, unknown>;
+};
+
+/**
+ * 从错误响应体中提取 code 与可读 message。兼容两种形态：
+ * 1. 既有信封 { success: false, error: { code, message, details } }；
+ * 2. Nest 透传 Java 结构化错误 { code, message, messageZh }（message 优先取中文 messageZh）。
+ * 其余形态返回 null，调用方回退到 HTTP 状态文本。
+ */
+function extractApiError(payload: unknown): ApiErrorPayload | null {
+  if (!payload || typeof payload !== "object") return null;
+  const body = payload as Record<string, unknown>;
+  if (body.error && typeof body.error === "object") {
+    const envelope = body.error as Record<string, unknown>;
+    if (typeof envelope.code === "string" || typeof envelope.message === "string") {
+      return {
+        code: typeof envelope.code === "string" ? envelope.code : undefined,
+        message: typeof envelope.message === "string" ? envelope.message : undefined,
+        details:
+          envelope.details && typeof envelope.details === "object"
+            ? (envelope.details as Record<string, unknown>)
+            : undefined,
+      };
+    }
+  }
+  if (typeof body.code === "string") {
+    return {
+      code: body.code,
+      message:
+        typeof body.messageZh === "string"
+          ? body.messageZh
+          : typeof body.message === "string"
+            ? body.message
+            : undefined,
+    };
+  }
+  return null;
+}
+
+function throwApiError(payload: unknown, status: number): never {
+  const error = extractApiError(payload);
+  throw new ApiClientError(
+    error?.message || `HTTP ${status}`,
+    error?.code || "REQUEST_FAILED",
+    status,
+    error?.details,
+  );
+}
+
 export async function apiGet<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
@@ -34,12 +86,7 @@ export async function apiGet<T>(path: string, init?: RequestInit): Promise<T> {
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok || payload?.success === false) {
-    throw new ApiClientError(
-      payload?.error?.message || `HTTP ${response.status}`,
-      payload?.error?.code || "REQUEST_FAILED",
-      response.status,
-      payload?.error?.details,
-    );
+    throwApiError(payload, response.status);
   }
   return payload?.data ?? payload;
 }
@@ -57,12 +104,7 @@ export async function apiPost<T>(path: string, body: unknown, init?: RequestInit
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok || payload?.success === false) {
-    throw new ApiClientError(
-      payload?.error?.message || `HTTP ${response.status}`,
-      payload?.error?.code || "REQUEST_FAILED",
-      response.status,
-      payload?.error?.details,
-    );
+    throwApiError(payload, response.status);
   }
   return payload?.data ?? payload;
 }
