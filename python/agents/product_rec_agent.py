@@ -15,6 +15,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from config import get_settings
+from services.llm_budget import allow_llm_call
 from models.schemas import AgentResult, Product, ProductRecResult, UserProfile
 
 from .base_agent import BaseAgent
@@ -63,7 +64,9 @@ class ProductRecAgent(BaseAgent):
         super().__init__(
             name="product_rec",
             timeout=settings.agent_timeout_product_rec,
+            max_retries=1,
         )
+        self.settings = settings
         self.llm = ChatOpenAI(
             api_key=settings.llm_api_key,
             base_url=settings.llm_base_url,
@@ -78,7 +81,7 @@ class ProductRecAgent(BaseAgent):
         num_items: int = kwargs.get("num_items", 10)
 
         candidates = await self._recall(user_profile, num_items * 3)
-        ranked_ids = await self._rerank(user_profile, candidates, num_items)
+        ranked_ids = await self._rerank(user_profile, candidates, num_items, kwargs.get("run_id", "product_rec"))
 
         id_to_product = {p.product_id: p for p in candidates}
         final_products = []
@@ -116,9 +119,12 @@ class ProductRecAgent(BaseAgent):
         return candidates[:limit]
 
     async def _rerank(
-        self, profile: UserProfile | None, candidates: list[Product], num_items: int
+        self, profile: UserProfile | None, candidates: list[Product], num_items: int, run_id: Any
     ) -> list[str]:
         if not profile:
+            return [p.product_id for p in candidates[:num_items]]
+
+        if not self.settings.llm_enabled() or not allow_llm_call("product_rerank", str(run_id)):
             return [p.product_id for p in candidates[:num_items]]
 
         profile_summary = {

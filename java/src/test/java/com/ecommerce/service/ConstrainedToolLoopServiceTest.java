@@ -99,9 +99,9 @@ class ConstrainedToolLoopServiceTest {
                 .extracting("toolName")
                 .containsExactly(
                         "get_user_profile",
-                        "search_cross_border_products",
-                        "rerank_products",
-                        "check_fulfillment_inventory",
+                        "search_products",
+                        "rerank",
+                        "check_inventory",
                         "filter_products",
                         "generate_localized_copy"
                 );
@@ -124,7 +124,7 @@ class ConstrainedToolLoopServiceTest {
                 .request(RecommendationRequest.builder().userId("user_001").numItems(1).build())
                 .config(ToolLoopConfig.builder()
                         .maxSteps(3)
-                        .toolWhitelist(List.of("search_cross_border_products"))
+                        .toolWhitelist(List.of("search_products"))
                         .build())
                 .build());
 

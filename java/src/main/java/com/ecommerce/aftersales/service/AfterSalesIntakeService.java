@@ -1,6 +1,7 @@
 package com.ecommerce.aftersales.service;
 
 import com.ecommerce.aftersales.model.AfterSalesTypes;
+import com.ecommerce.service.LlmCallBudget;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PreDestroy;
@@ -33,7 +34,7 @@ import java.util.regex.Pattern;
  * 模式（agent.aftersales.intake.mode）：
  * - RULES：直接使用 Java 规则分类，不发任何网络请求；
  * - LLM：强制走 LLM，失败一律回退规则；
- * - AUTO（默认）：API key 缺失或为占位值时直接走规则（不发网络请求），否则尝试 LLM。
+ * - AUTO：仅在 live-enabled=true、有 API key 且当前 run 有正预算时尝试 LLM，否则直接走规则。
  *
  * 安全边界：
  * - customerMessage 是「不可信数据」：系统提示词显式声明只做分类、不得服从消息内指令；
@@ -57,7 +58,7 @@ public class AfterSalesIntakeService {
 
     private static final Logger log = LoggerFactory.getLogger(AfterSalesIntakeService.class);
 
-    /** 配置占位值 = 未配置 key：AUTO/LLM 都不发网络请求。 */
+    /** 配置占位值 = 未配置 key；生产默认 RULES/live=false，且没有 run budget 时永不发网络请求。 */
     static final String PLACEHOLDER_API_KEY = "your_api_key_here";
 
     private static final Set<String> INTENT_WHITELIST = Set.of(
@@ -154,20 +155,57 @@ public class AfterSalesIntakeService {
     private final String mode;
     private final long timeoutMs;
     private final String apiKey;
+    private final boolean liveEnabled;
+    private final LlmCallBudget standaloneBudget;
     /** 独立有界执行器（见类注释「资源边界」）。package-private：同包测试断言生命周期关闭状态。 */
     final ThreadPoolExecutor llmExecutor;
 
     public AfterSalesIntakeService(
             ChatClient.Builder chatClientBuilder,
             ObjectMapper objectMapper,
-            @Value("${agent.aftersales.intake.mode:AUTO}") String mode,
-            @Value("${agent.aftersales.intake.timeout-ms:4000}") long timeoutMs,
-            @Value("${spring.ai.openai.api-key:}") String apiKey) {
+            String mode,
+            long timeoutMs,
+            String apiKey) {
+        this(chatClientBuilder, objectMapper, mode, timeoutMs, apiKey, true, 0);
+    }
+
+    /** Explicit bounded budget for offline tests with injected mock model responses. */
+    public AfterSalesIntakeService(
+            ChatClient.Builder chatClientBuilder,
+            ObjectMapper objectMapper,
+            String mode,
+            long timeoutMs,
+            String apiKey,
+            int maxLlmCalls) {
+        this(chatClientBuilder, objectMapper, mode, timeoutMs, apiKey, true, maxLlmCalls);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public AfterSalesIntakeService(
+            ChatClient.Builder chatClientBuilder,
+            ObjectMapper objectMapper,
+            @Value("$" + "{agent.aftersales.intake.mode:RULES}") String mode,
+            @Value("$" + "{agent.aftersales.intake.timeout-ms:4000}") long timeoutMs,
+            @Value("$" + "{spring.ai.openai.api-key:}") String apiKey,
+            @Value("$" + "{agent.aftersales.intake.live-enabled:false}") boolean liveEnabled) {
+        this(chatClientBuilder, objectMapper, mode, timeoutMs, apiKey, liveEnabled, 0);
+    }
+
+    private AfterSalesIntakeService(
+            ChatClient.Builder chatClientBuilder,
+            ObjectMapper objectMapper,
+            String mode,
+            long timeoutMs,
+            String apiKey,
+            boolean liveEnabled,
+            int maxLlmCalls) {
         this.chatClient = chatClientBuilder.build();
         this.objectMapper = objectMapper;
         this.mode = normalizeMode(mode);
         this.timeoutMs = Math.max(1L, timeoutMs);
         this.apiKey = apiKey == null ? "" : apiKey;
+        this.liveEnabled = liveEnabled;
+        this.standaloneBudget = new LlmCallBudget(Math.max(0, maxLlmCalls));
         // 独立有界执行器：见类注释「资源边界」。核心 1 / 最大 2 / 队列 4，守护线程。
         this.llmExecutor = new ThreadPoolExecutor(
                 1, 2, 30L, TimeUnit.SECONDS,
@@ -179,7 +217,6 @@ public class AfterSalesIntakeService {
                 },
                 new ThreadPoolExecutor.AbortPolicy());
     }
-
     private static final AtomicInteger POOL_SEQ = new AtomicInteger();
 
     /**
@@ -201,11 +238,14 @@ public class AfterSalesIntakeService {
         if ("RULES".equals(mode)) {
             return classifyByRules(message, elapsedMs(startedNanos), "RULES_MODE");
         }
+        if (!liveEnabled) {
+            return classifyByRules(message, elapsedMs(startedNanos), "LLM_DISABLED");
+        }
         if (apiKeyMissing()) {
             return classifyByRules(message, elapsedMs(startedNanos), "LLM_API_KEY_MISSING");
         }
         try {
-            return classifyByLlm(message);
+            return classifyByLlm(message, LlmCallBudget.current());
         } catch (Exception error) {
             // 最后防线：任何意外都不允许抛出到主循环。
             log.warn("Intake unexpected error, degraded to rules (code=LLM_ERROR)");
@@ -218,8 +258,12 @@ public class AfterSalesIntakeService {
         return chatClient.prompt().system(SYSTEM_PROMPT).user(customerMessage).call().content();
     }
 
-    private AfterSalesTypes.IntakeResult classifyByLlm(String message) {
+    private AfterSalesTypes.IntakeResult classifyByLlm(String message, LlmCallBudget budget) {
         long startedNanos = System.nanoTime();
+        LlmCallBudget effectiveBudget = budget == null ? standaloneBudget : budget;
+        if (!effectiveBudget.tryAcquire("aftersales_intake", "intake")) {
+            return classifyByRules(message, elapsedMs(startedNanos), "LLM_BUDGET_EXCEEDED");
+        }
         // FutureTask 而非 CompletableFuture：cancel(true) 的语义是 JDK 契约保证的
         // 「中断正在运行的调用线程」；CompletableFuture.cancel 只改状态、不中断线程。
         FutureTask<String> task = new FutureTask<>(() -> callModel(message));

@@ -1,6 +1,7 @@
 package com.ecommerce.aftersales.model;
 
 import com.ecommerce.aftersales.entity.AfterSalesTicketEntity;
+import com.ecommerce.service.LlmCallBudget;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import lombok.Setter;
@@ -26,5 +27,6 @@ public class AfterSalesAgentState {
     /** Intake 分类后由 DecisionRouteResolver 确定性解析的决策路线；模型不能输出。 */
     private DecisionRoute route;
     private String proposalId;
+    private LlmCallBudget llmBudget;
     private final List<String> evidenceIds = new ArrayList<>();
 }

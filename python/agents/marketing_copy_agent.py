@@ -15,6 +15,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from config import get_settings
+from services.llm_budget import allow_llm_call
 from models.schemas import (
     MarketingCopyResult,
     Product,
@@ -63,7 +64,9 @@ class MarketingCopyAgent(BaseAgent):
         super().__init__(
             name="marketing_copy",
             timeout=settings.agent_timeout_marketing_copy,
+            max_retries=1,
         )
+        self.settings = settings
         self.llm = ChatOpenAI(
             api_key=settings.llm_api_key,
             base_url=settings.llm_base_url,
@@ -81,6 +84,19 @@ class MarketingCopyAgent(BaseAgent):
 
         template_key = self._select_template(user_profile)
         system_prompt = PROMPT_TEMPLATES[template_key]
+
+        if not self.settings.llm_enabled() or not allow_llm_call("marketing_copy", str(kwargs.get("run_id", "marketing_copy"))):
+            copies = [
+                {"product_id": product.product_id, "copy": f"{product.name} is available with transparent cross-border delivery."}
+                for product in products
+            ]
+            return MarketingCopyResult(
+                success=True,
+                copies=copies,
+                prompt_template_used=template_key.value,
+                data={"source": "rules_offline"},
+                confidence=0.7,
+            )
 
         product_info = "\n".join(
             f"- ID:{p.product_id} 名称:{p.name} 类目:{p.category} 价格:¥{p.price} 标签:{','.join(p.tags)}"

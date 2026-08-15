@@ -8,6 +8,7 @@ import com.ecommerce.aftersales.model.DecisionRoute;
 import com.ecommerce.aftersales.service.AfterSalesEvidencePlannerService;
 import com.ecommerce.aftersales.service.AfterSalesEvidencePlannerService.PlanningInput;
 import com.ecommerce.aftersales.service.AfterSalesIntakeService;
+import com.ecommerce.service.LlmCallBudget;
 import com.ecommerce.aftersales.service.DecisionRouteResolver;
 import com.ecommerce.aftersales.service.EvidencePreconditionGate;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -80,16 +81,25 @@ public final class LiveAfterSalesEvalHarness {
     private final DecisionRouteResolver routeResolver = new DecisionRouteResolver();
     private final EvidencePreconditionGate preconditionGate = new EvidencePreconditionGate();
     private final ObjectMapper mapper;
+    private final int maxLlmCalls;
 
     public LiveAfterSalesEvalHarness(
             AfterSalesIntakeService intakeService,
             AfterSalesEvidencePlannerService plannerService,
             ObjectMapper mapper) {
+        this(intakeService, plannerService, mapper, 0);
+    }
+
+    public LiveAfterSalesEvalHarness(
+            AfterSalesIntakeService intakeService,
+            AfterSalesEvidencePlannerService plannerService,
+            ObjectMapper mapper,
+            int maxLlmCalls) {
         this.intakeService = intakeService;
         this.plannerService = plannerService;
         this.mapper = mapper;
+        this.maxLlmCalls = Math.max(0, maxLlmCalls);
     }
-
     // ------------------------------------------------------------------
     // Case schema (live eval: no injected model outputs — the real model decides)
     // ------------------------------------------------------------------
@@ -202,9 +212,18 @@ public final class LiveAfterSalesEvalHarness {
     }
 
     /** Token/cost metrics: unavailable from the current service interfaces, never estimated. */
-    public record UsageUnavailable(boolean unavailable, String reason) {
+    public record UsageUnavailable(
+            boolean unavailable,
+            String reason,
+            int llmCallCount,
+            int maxLlmCalls,
+            Integer promptTokens,
+            Integer completionTokens,
+            Double estimatedCost) {
+        public UsageUnavailable(boolean unavailable, String reason) {
+            this(unavailable, reason, 0, 0, null, null, null);
+        }
     }
-
     public record EvalReport(
             String generatedAt,
             String baseUrl,
@@ -225,7 +244,11 @@ public final class LiveAfterSalesEvalHarness {
     /** Runs every case against the REAL configured services and writes the reports. */
     public EvalReport run(String baseUrl, String model) {
         List<LiveEvalCase> cases = loadCases();
-        List<CaseResult> results = cases.stream().map(this::runCase).toList();
+        LlmCallBudget budget = new LlmCallBudget(maxLlmCalls);
+        List<CaseResult> results;
+        try (LlmCallBudget.Scope ignored = LlmCallBudget.bind(budget)) {
+            results = cases.stream().map(this::runCase).toList();
+        }
         Metrics metrics = computeMetrics(results);
         StructuralSafety safety = computeStructuralSafety(results);
         EvalReport report = new EvalReport(
@@ -234,7 +257,7 @@ public final class LiveAfterSalesEvalHarness {
                 model,
                 "LLM",
                 cases.size(),
-                new UsageUnavailable(true, USAGE_UNAVAILABLE_REASON),
+                new UsageUnavailable(true, USAGE_UNAVAILABLE_REASON, budget.getCallCount(), budget.getMaxCalls(), null, null, null),
                 metrics,
                 safety,
                 results);

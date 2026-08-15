@@ -38,7 +38,9 @@ from models.schemas import (
     RecommendationResponse,
     UserProfile,
 )
+from config import get_settings
 from services.ab_test import ABTestEngine
+from services.llm_budget import bind_budget
 
 logger = structlog.get_logger()
 
@@ -54,6 +56,11 @@ class SupervisorOrchestrator:
         self.ab_engine = ab_engine or ABTestEngine()
 
     async def recommend(self, request: RecommendationRequest) -> RecommendationResponse:
+        with bind_budget(get_settings().llm_max_calls) as budget:
+            response = await self._recommend(request)
+            response.llm_metrics = budget.snapshot()
+            return response
+    async def _recommend(self, request: RecommendationRequest) -> RecommendationResponse:
         request_id = str(uuid.uuid4())
         start = time.perf_counter()
 
@@ -71,10 +78,12 @@ class SupervisorOrchestrator:
             self.user_profile_agent.run(
                 user_id=request.user_id,
                 context=request.context,
+                run_id=request_id,
             ),
             self.product_rec_agent.run(
                 user_profile=None,
                 num_items=request.num_items * 2,
+                run_id=request_id,
             ),
         )
 
@@ -85,6 +94,7 @@ class SupervisorOrchestrator:
         rerank_task = self.product_rec_agent.run(
             user_profile=user_profile,
             num_items=request.num_items,
+            run_id=request_id,
         )
         inventory_task = self.inventory_agent.run(products=raw_products)
 
@@ -104,6 +114,7 @@ class SupervisorOrchestrator:
         copy_result = await self.marketing_copy_agent.run(
             user_profile=user_profile,
             products=final_products,
+            run_id=request_id,
         )
         copies = getattr(copy_result, "copies", [])
 

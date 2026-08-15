@@ -25,14 +25,14 @@ class AfterSalesIntakeServiceTest {
     private AfterSalesIntakeService service(String mode, String apiKey, long timeoutMs) {
         ChatClient.Builder builder = mock(ChatClient.Builder.class);
         when(builder.build()).thenReturn(mock(ChatClient.class));
-        return new AfterSalesIntakeService(builder, objectMapper, mode, timeoutMs, apiKey);
+        return new AfterSalesIntakeService(builder, objectMapper, mode, timeoutMs, apiKey, 32);
     }
 
     /** 覆写 callModel 注入模型输出的测试替身：测试中不发真实网络请求。 */
     private AfterSalesIntakeService llmService(String response, long timeoutMs) {
         ChatClient.Builder builder = mock(ChatClient.Builder.class);
         when(builder.build()).thenReturn(mock(ChatClient.class));
-        return new AfterSalesIntakeService(builder, objectMapper, "LLM", timeoutMs, "test-key-123") {
+        return new AfterSalesIntakeService(builder, objectMapper, "LLM", timeoutMs, "test-key-123", 32) {
             @Override
             protected String callModel(String customerMessage) {
                 return response;
@@ -381,7 +381,7 @@ class AfterSalesIntakeServiceTest {
         ChatClient.Builder builder = mock(ChatClient.Builder.class);
         when(builder.build()).thenReturn(mock(ChatClient.class));
         AfterSalesIntakeService service = new AfterSalesIntakeService(
-                builder, objectMapper, "LLM", 4000, "test-key-123") {
+                builder, objectMapper, "LLM", 4000, "test-key-123", 32) {
             @Override
             protected String callModel(String customerMessage) {
                 throw new RuntimeException("upstream exploded with sensitive detail");
@@ -403,7 +403,7 @@ class AfterSalesIntakeServiceTest {
         CountDownLatch workerStarted = new CountDownLatch(1);
         CountDownLatch workerFinished = new CountDownLatch(1);
         AfterSalesIntakeService service = new AfterSalesIntakeService(
-                builder, objectMapper, "LLM", 100, "test-key-123") {
+                builder, objectMapper, "LLM", 100, "test-key-123", 32) {
             @Override
             protected String callModel(String customerMessage) {
                 workerStarted.countDown();
@@ -438,7 +438,7 @@ class AfterSalesIntakeServiceTest {
         ChatClient.Builder builder = mock(ChatClient.Builder.class);
         when(builder.build()).thenReturn(mock(ChatClient.class));
         AfterSalesIntakeService service =
-                new AfterSalesIntakeService(builder, objectMapper, "LLM", 4000, "test-key-123");
+                new AfterSalesIntakeService(builder, objectMapper, "LLM", 4000, "test-key-123", 32);
 
         service.shutdown(); // @PreDestroy 生命周期清理
 

@@ -2,9 +2,9 @@ import { AgentEventStatus, AgentEventType } from "../enums/agent.enums";
 
 export type AgentRunSseMetrics = {
   latencyMs?: number;
-  inputTokens?: number;
-  outputTokens?: number;
-  totalTokens?: number;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  totalTokens?: number | null;
 };
 
 export type AgentRunSseEvent = {

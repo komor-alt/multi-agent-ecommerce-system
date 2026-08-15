@@ -47,6 +47,26 @@ export class CreateRecommendationTaskDto {
   context!: Record<string, unknown>;
 
   @IsOptional()
+  @IsString()
+  platform?: string;
+
+  @IsOptional()
+  @IsString()
+  region?: string;
+
+  @IsOptional()
+  @IsString()
+  country?: string;
+
+  @IsOptional()
+  @IsString()
+  locale?: string;
+
+  @IsOptional()
+  @IsString()
+  currency?: string;
+
+  @IsOptional()
   @IsObject()
   agentConfig?: RecommendationAgentConfigDto;
 }

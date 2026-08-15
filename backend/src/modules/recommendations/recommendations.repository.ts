@@ -6,6 +6,36 @@ import { PrismaService } from "../../infrastructure/database/prisma.service";
 export class RecommendationsRepository {
   constructor(private readonly prisma: PrismaService) {}
 
+  list() {
+    return this.prisma.recommendationTask.findMany({
+      orderBy: { createdAt: "desc" },
+      take: 20,
+      include: {
+        agentRun: {
+          select: {
+            id: true,
+            status: true,
+            completedAt: true,
+            latencyMs: true,
+            toolCallCount: true,
+          },
+        },
+      },
+    });
+  }
+
+  findDetail(taskId: string) {
+    return this.prisma.recommendationTask.findUnique({
+      where: { id: taskId },
+      include: {
+        agentRun: {
+          include: {
+            events: { orderBy: { sequence: "asc" } },
+          },
+        },
+      },
+    });
+  }
   async ensureUser(userId: string) {
     return this.prisma.user.upsert({
       where: { id: userId },
@@ -59,6 +89,7 @@ export class RecommendationsRepository {
       where: { id: taskId },
       data: {
         status: RecommendationTaskStatus.COMPLETED,
+        completedAt: new Date(),
         finalAnswer,
       },
     });
@@ -67,7 +98,7 @@ export class RecommendationsRepository {
   async failTask(taskId: string) {
     return this.prisma.recommendationTask.update({
       where: { id: taskId },
-      data: { status: RecommendationTaskStatus.FAILED },
+      data: { status: RecommendationTaskStatus.FAILED, completedAt: new Date() },
     });
   }
 }

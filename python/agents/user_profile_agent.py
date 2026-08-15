@@ -14,6 +14,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from config import get_settings
+from services.llm_budget import allow_llm_call
 from models.schemas import (
     AgentResult,
     UserProfile,
@@ -43,7 +44,9 @@ class UserProfileAgent(BaseAgent):
         super().__init__(
             name="user_profile",
             timeout=settings.agent_timeout_user_profile,
+            max_retries=1,
         )
+        self.settings = settings
         self.llm = ChatOpenAI(
             api_key=settings.llm_api_key,
             base_url=settings.llm_base_url,
@@ -58,6 +61,15 @@ class UserProfileAgent(BaseAgent):
         context: dict = kwargs.get("context", {})
 
         behavior_data = await self._collect_behavior(user_id, context)
+
+        if not self.settings.llm_enabled() or not allow_llm_call("user_profile", str(kwargs.get("run_id", user_id))):
+            profile = self._parse_profile(user_id, "{}")
+            return UserProfileResult(
+                success=True,
+                profile=profile,
+                data={"source": "rules_offline", "feature_source": behavior_data.get("source")},
+                confidence=0.7,
+            )
 
         messages = [
             SystemMessage(content=SYSTEM_PROMPT),

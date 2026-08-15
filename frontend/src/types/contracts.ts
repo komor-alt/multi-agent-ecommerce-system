@@ -27,9 +27,9 @@ export type AgentRunSseEvent = {
   data: Record<string, unknown>;
   metrics?: {
     latencyMs?: number;
-    inputTokens?: number;
-    outputTokens?: number;
-    totalTokens?: number;
+    inputTokens?: number | null;
+    outputTokens?: number | null;
+    totalTokens?: number | null;
   };
 };
 
@@ -37,16 +37,19 @@ export type AgentRunSummary = {
   id: string;
   taskType: AgentTaskType;
   userId?: string;
+  scene?: string;
+  recommendationTaskId?: string;
   status: AgentRunStatus;
   modelName: string;
   promptVersion: string;
   stepCount: number;
   toolCallCount: number;
   latencyMs?: number;
-  inputTokens: number;
-  outputTokens: number;
-  totalTokens: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  totalTokens: number | null;
   createdAt: string;
+  completedAt?: string | null;
 };
 
 export type AgentRunDetail = AgentRunSummary & {
@@ -94,7 +97,7 @@ export type DashboardOverview = {
     todayRuns: number;
     successRate: number;
     avgLatencyMs: number;
-    totalTokens: number;
+    totalTokens: number | null;
     runningRuns: number;
     productCount: number;
     readyProductCount: number;

@@ -14,6 +14,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.stream.Collectors;
 
@@ -32,6 +33,8 @@ public class AfterSalesService {
     private final ExecutionService executionService;
     private final ObjectMapper objectMapper;
     private final Executor agentExecutor;
+    /** Same-process idempotency guard for concurrent analyze POSTs on one ticket. */
+    private final ConcurrentHashMap<String, Object> analyzeLocks = new ConcurrentHashMap<>();
 
     /** 已知演示订单 → 国家。与 MockShopifyAfterSalesConnector 共用同一份订单数据，未知订单返回 null（前端展示「未知」）。 */
     private static final Map<String, String> KNOWN_ORDER_COUNTRIES = DemoFulfillmentDataFactory.createOrders().stream()
@@ -124,7 +127,15 @@ public class AfterSalesService {
         return ticketSummary(ticket);
     }
 
+    @Transactional
     public Map<String, Object> analyze(String ticketId, boolean deferred) {
+        Object lock = analyzeLocks.computeIfAbsent(ticketId, ignored -> new Object());
+        synchronized (lock) {
+            return analyzeLocked(ticketId, deferred);
+        }
+    }
+
+    private Map<String, Object> analyzeLocked(String ticketId, boolean deferred) {
         AfterSalesTicketEntity ticket = ticketRepository.findById(ticketId)
                 .orElseThrow(() -> new IllegalArgumentException("TICKET_NOT_FOUND"));
         if (ticket.getStatus() == AfterSalesTypes.TicketStatus.ANALYZING) {

@@ -6,6 +6,7 @@ import com.ecommerce.agent.ProductRecAgent;
 import com.ecommerce.agent.UserProfileAgent;
 import com.ecommerce.model.AgentLoopResponse;
 import com.ecommerce.model.AgentResult;
+import com.ecommerce.model.AgentRunEvent;
 import com.ecommerce.model.Product;
 import com.ecommerce.model.RecommendationRequest;
 import com.ecommerce.model.ToolLoopConfig;
@@ -14,6 +15,7 @@ import com.ecommerce.model.UserProfile;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.client.ChatClient;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -39,23 +41,55 @@ class AutonomousAgentLoopServiceTest {
         assertThat(response.getStatus()).as(response.toString()).isEqualTo("completed");
         assertThat(response.getStopReason()).isEqualTo("final_answer");
         assertThat(response.getThoughts()).isNotEmpty();
-        assertThat(response.getObservations()).hasSize(6);
-        assertThat(response.getEvidences())
-                .extracting("evidenceId")
-                .contains("profile:user_001", "product:P001", "inventory:P001", "copy:P001");
-        assertThat(response.getToolCalls())
-                .extracting("toolName")
-                .containsExactly(
-                        "get_user_profile",
-                        "search_cross_border_products",
-                        "rerank_products",
-                        "check_fulfillment_inventory",
-                        "filter_products",
-                        "generate_localized_copy",
-                        "final_answer"
-                );
+        assertThat(response.getObservations()).hasSize(4);
+        assertThat(response.getPlan()).isNotNull();
+        assertThat(response.getPlan().getScene()).isEqualTo("homepage");
+        assertThat(response.getPlan().getMarketingCopies()).isEmpty();
+        assertThat(response.getEvidences()).extracting("evidenceId")
+                .contains("profile:user_001", "product:P001", "inventory:SG:P001");
+        assertThat(response.getToolCalls()).extracting("toolName").containsExactly(
+                "get_user_profile", "search_products", "check_inventory",
+                "rerank", "final_answer");
     }
 
+    @Test
+    void campaignAndRetentionUseDifferentRequiredTools() {
+        AgentLoopResponse campaign = new TestFixture().service().run(ToolLoopRequest.builder()
+                .request(RecommendationRequest.builder().userId("user_208").scene("campaign").numItems(1)
+                        .context(Map.of("campaign_id", "sea-88")).build()).build());
+        assertThat(campaign.getStatus()).isEqualTo("completed");
+        assertThat(campaign.getToolCalls()).extracting("toolName").containsExactly(
+                "load_campaign_constraints", "search_products", "check_fulfillment",
+                "check_inventory", "rerank", "generate_localized_copy", "final_answer");
+        assertThat(campaign.getPlan().getScene()).isEqualTo("campaign");
+        assertThat(campaign.getPlan().getMarketingCopies()).hasSize(1);
+
+        AgentLoopResponse retention = new TestFixture().service().run(ToolLoopRequest.builder()
+                .request(RecommendationRequest.builder().userId("user_889").scene("retention").numItems(1)
+                        .context(Map.of("recent_orders", List.of(Map.of("order_id", "O-1")))).build()).build());
+        assertThat(retention.getStatus()).isEqualTo("completed");
+        assertThat(retention.getToolCalls()).extracting("toolName").containsExactly(
+                "get_user_profile", "get_recent_orders", "search_products",
+                "check_inventory", "rerank", "generate_retention_copy", "final_answer");
+        assertThat(retention.getPlan().getScene()).isEqualTo("retention");
+    }
+
+    @Test
+    void streamingLoopPropagatesGatewayRunIdAndEmitsIncrementalEvents() {
+        TestFixture fixture = new TestFixture();
+        List<AgentRunEvent> events = new ArrayList<>();
+        AgentLoopResponse response = fixture.service().run(ToolLoopRequest.builder()
+                .runId("gateway-run-123")
+                .request(RecommendationRequest.builder().userId("user_001").numItems(1).build())
+                .build(), events::add);
+
+        assertThat(response.getRunId()).isEqualTo("gateway-run-123");
+        assertThat(events).extracting(AgentRunEvent::getName)
+                .contains("run.started", "planner.decision", "tool.started", "tool.completed", "observation", "run.completed");
+        assertThat(events).allMatch(event -> "gateway-run-123".equals(event.getRequestId()));
+        assertThat(events).extracting(AgentRunEvent::getSequence).isSorted().doesNotHaveDuplicates();
+        assertThat(events.get(events.size() - 1).getData()).containsKeys("final_answer", "metrics");
+    }
     @Test
     void blocksWhenPlannerSelectsToolOutsideWhitelist() {
         TestFixture fixture = new TestFixture();
@@ -65,7 +99,7 @@ class AutonomousAgentLoopServiceTest {
                 .request(RecommendationRequest.builder().userId("user_001").numItems(1).build())
                 .config(ToolLoopConfig.builder()
                         .maxSteps(3)
-                        .toolWhitelist(List.of("search_cross_border_products"))
+                        .toolWhitelist(List.of("search_products"))
                         .build())
                 .build());
 
@@ -98,6 +132,12 @@ class AutonomousAgentLoopServiceTest {
                     .category("手机")
                     .price(1000)
                     .stock(10)
+                    .platform("shopify")
+                    .currency("SGD")
+                    .warehouseRegion("SG")
+                    .deliveryDays(2)
+                    .supportedRegions(List.of("SG"))
+                    .crossBorderEligible(true)
                     .build();
 
             AgentResult profileResult = AgentResult.builder()

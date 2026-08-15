@@ -19,6 +19,8 @@ export class AgentRunsService {
         id: run.id,
         taskType: run.taskType.toLowerCase(),
         userId: run.userId,
+        scene: run.recommendationTask?.scene || undefined,
+        recommendationTaskId: run.recommendationTask?.id || undefined,
         status: run.status.toLowerCase(),
         modelName: run.modelName,
         promptVersion: run.promptVersion,
@@ -29,6 +31,7 @@ export class AgentRunsService {
         outputTokens: run.outputTokens,
         totalTokens: run.totalTokens,
         createdAt: run.createdAt.toISOString(),
+        completedAt: run.completedAt?.toISOString() || null,
       })),
       page: 1,
       pageSize: 20,
@@ -63,17 +66,25 @@ export class AgentRunsService {
   async events(runId: string) {
     const events = await this.repository.findEvents(runId);
     return {
-      items: events.map((event) => ({
-        eventId: event.id,
-        runId: event.runId,
-        sequence: event.sequence,
-        type: event.eventType.toLowerCase(),
-        name: event.eventName,
-        status: event.status.toLowerCase(),
-        timestamp: event.createdAt.toISOString(),
-        data: event.rawPayload,
-        metrics: { latencyMs: event.latencyMs || 0 },
-      })),
+      items: events.map((event) => {
+        const raw = event.rawPayload && typeof event.rawPayload === "object" && !Array.isArray(event.rawPayload)
+          ? event.rawPayload as Record<string, unknown>
+          : {};
+        const data = raw.data && typeof raw.data === "object" && !Array.isArray(raw.data)
+          ? raw.data as Record<string, unknown>
+          : raw;
+        return {
+          eventId: event.id,
+          runId: event.runId,
+          sequence: event.sequence,
+          type: event.eventType.toLowerCase(),
+          name: event.eventName,
+          status: event.status.toLowerCase(),
+          timestamp: event.createdAt.toISOString(),
+          data,
+          metrics: { latencyMs: event.latencyMs ?? null },
+        };
+      }),
       page: 1,
       pageSize: events.length,
       total: events.length,
@@ -107,7 +118,7 @@ export class AgentRunsService {
     this.eventBus.publish(event);
   }
 
-  completeRealtimeRun(runId: string, finalAnswer: Record<string, unknown>, metrics: { latency_ms?: number; input_tokens?: number; output_tokens?: number; total_tokens?: number; tool_call_count?: number }) {
+  completeRealtimeRun(runId: string, finalAnswer: Record<string, unknown>, metrics: { latency_ms?: number; input_tokens?: number | null; output_tokens?: number | null; total_tokens?: number | null; tool_call_count?: number }) {
     this.eventBus.complete(runId);
     return this.repository.completeRun(runId, finalAnswer as Prisma.InputJsonObject, metrics);
   }

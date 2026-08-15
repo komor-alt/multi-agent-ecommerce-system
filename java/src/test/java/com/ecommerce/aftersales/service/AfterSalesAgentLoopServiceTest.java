@@ -453,7 +453,7 @@ class AfterSalesAgentLoopServiceTest {
         AfterSalesAgentLoopService service = new AfterSalesAgentLoopService(
                 toolExecutor, eventService, runRepository, ticketRepository, ticketContextService, attachmentRepository,
                 intakeService(), llmPlannerService("{\"nextEvidence\":\"ORDER\",\"reasonCode\":\"ORDER_CONTEXT_REQUIRED\"}"),
-                routeResolver(), new AfterSalesEscalationPolicyService(), objectMapper, 0L);
+                routeResolver(), new AfterSalesEscalationPolicyService(), objectMapper, 0L, 9);
 
         when(runRepository.findById("run-1")).thenReturn(Optional.of(run()));
         AfterSalesTicketEntity ticket = ticket();
@@ -512,7 +512,7 @@ class AfterSalesAgentLoopServiceTest {
         AfterSalesAgentLoopService service = new AfterSalesAgentLoopService(
                 toolExecutor, eventService, runRepository, ticketRepository, ticketContextService, attachmentRepository,
                 intakeService(), llmPlannerService("{\"nextEvidence\":\"SHIPMENT\",\"reasonCode\":\"SHIPMENT_STATUS_REQUIRED\"}"),
-                routeResolver(), new AfterSalesEscalationPolicyService(), objectMapper, 0L);
+                routeResolver(), new AfterSalesEscalationPolicyService(), objectMapper, 0L, 9);
 
         when(runRepository.findById("run-1")).thenReturn(Optional.of(run()));
         AfterSalesTicketEntity ticket = ticket();
@@ -578,7 +578,7 @@ class AfterSalesAgentLoopServiceTest {
         AfterSalesAgentLoopService service = new AfterSalesAgentLoopService(
                 toolExecutor, eventService, runRepository, ticketRepository, ticketContextService, attachmentRepository,
                 intakeService, llmPlannerService("{\"nextEvidence\":\"POLICY\",\"reasonCode\":\"POLICY_REQUIRED\"}"),
-                routeResolver(), new AfterSalesEscalationPolicyService(), objectMapper, 0L);
+                routeResolver(), new AfterSalesEscalationPolicyService(), objectMapper, 0L, 9);
 
         when(runRepository.findById("run-1")).thenReturn(Optional.of(run()));
         AfterSalesTicketEntity ticket = ticket();
@@ -762,7 +762,7 @@ class AfterSalesAgentLoopServiceTest {
         AfterSalesAgentLoopService service = new AfterSalesAgentLoopService(
                 toolExecutor, eventService, runRepository, ticketRepository, ticketContextService, attachmentRepository,
                 intakeService, llmPlannerService("{\"nextEvidence\":\"ORDER\",\"reasonCode\":\"ORDER_CONTEXT_REQUIRED\"}"),
-                routeResolver(), new AfterSalesEscalationPolicyService(), objectMapper, 0L);
+                routeResolver(), new AfterSalesEscalationPolicyService(), objectMapper, 0L, 9);
 
         when(runRepository.findById("run-1")).thenReturn(Optional.of(run()));
         AfterSalesTicketEntity ticket = ticket();
@@ -2186,7 +2186,7 @@ class AfterSalesAgentLoopServiceTest {
         AfterSalesAgentLoopService service = new AfterSalesAgentLoopService(
                 toolExecutor, eventService, runRepository, ticketRepository, ticketContextService,
                 attachmentRepository, intakeService(), failingLlmPlannerService(), routeResolver(),
-                new AfterSalesEscalationPolicyService(), objectMapper, 0L);
+                new AfterSalesEscalationPolicyService(), objectMapper, 0L, 9);
 
         when(runRepository.findById("run-1")).thenReturn(Optional.of(run()));
         AfterSalesTicketEntity ticket = ticket();

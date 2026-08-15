@@ -32,7 +32,10 @@ export class AgentRunsRepository {
     return this.prisma.agentRun.findMany({
       orderBy: { createdAt: "desc" },
       take: 20,
-      include: { events: { select: { id: true } } },
+      include: {
+        events: { select: { id: true } },
+        recommendationTask: { select: { id: true, scene: true } },
+      },
     });
   }
 
@@ -61,16 +64,16 @@ export class AgentRunsRepository {
     });
   }
 
-  async completeRun(runId: string, finalAnswer: Prisma.InputJsonValue, metrics: { latency_ms?: number; input_tokens?: number; output_tokens?: number; total_tokens?: number; tool_call_count?: number }) {
+  async completeRun(runId: string, finalAnswer: Prisma.InputJsonValue, metrics: { latency_ms?: number; input_tokens?: number | null; output_tokens?: number | null; total_tokens?: number | null; tool_call_count?: number }) {
     return this.prisma.agentRun.update({
       where: { id: runId },
       data: {
         status: AgentRunStatus.COMPLETED,
         completedAt: new Date(),
         latencyMs: metrics.latency_ms || 0,
-        inputTokens: metrics.input_tokens || 0,
-        outputTokens: metrics.output_tokens || 0,
-        totalTokens: metrics.total_tokens || 0,
+        inputTokens: metrics.input_tokens ?? null,
+        outputTokens: metrics.output_tokens ?? null,
+        totalTokens: metrics.total_tokens ?? null,
         toolCallCount: metrics.tool_call_count || 0,
         responsePayload: finalAnswer,
       },
@@ -89,9 +92,9 @@ export class AgentRunsRepository {
           status: AgentRunStatus.COMPLETED,
           completedAt: new Date(),
           latencyMs: response.metrics.latency_ms || 0,
-          inputTokens: response.metrics.input_tokens || 0,
-          outputTokens: response.metrics.output_tokens || 0,
-          totalTokens: response.metrics.total_tokens || 0,
+          inputTokens: response.metrics.input_tokens ?? null,
+          outputTokens: response.metrics.output_tokens ?? null,
+          totalTokens: response.metrics.total_tokens ?? null,
           toolCallCount: response.metrics.tool_call_count || 0,
           responsePayload: (response.final_answer || {}) as Prisma.InputJsonValue,
         },
@@ -119,7 +122,7 @@ export class AgentRunsRepository {
       eventType: eventTypeMap[event.type] || AgentEventType.WARNING,
       eventName: event.name,
       outputSummary: this.outputSummary(event),
-      latencyMs: event.metrics?.latency_ms || undefined,
+      latencyMs: event.metrics?.latency_ms ?? undefined,
       status: eventStatusMap[event.status] || AgentEventStatus.SUCCESS,
       rawPayload: event as unknown as Prisma.InputJsonValue,
       createdAt: new Date(event.timestamp),
@@ -131,7 +134,7 @@ export class AgentRunsRepository {
       eventType: eventTypeMap[event.type] || AgentEventType.WARNING,
       eventName: event.name,
       outputSummary: this.outputSummary(event),
-      latencyMs: event.metrics?.latency_ms || undefined,
+      latencyMs: event.metrics?.latency_ms ?? undefined,
       status: eventStatusMap[event.status] || AgentEventStatus.SUCCESS,
       rawPayload: event as unknown as Prisma.InputJsonValue,
       createdAt: new Date(event.timestamp),
@@ -147,7 +150,7 @@ export class AgentRunsRepository {
       eventName: event.name,
       inputSummary: undefined,
       outputSummary: this.outputSummary(event),
-      latencyMs: event.metrics?.latency_ms || undefined,
+      latencyMs: event.metrics?.latency_ms ?? undefined,
       status: eventStatusMap[event.status] || AgentEventStatus.SUCCESS,
       rawPayload: event as unknown as Prisma.InputJsonValue,
       createdAt: new Date(event.timestamp),

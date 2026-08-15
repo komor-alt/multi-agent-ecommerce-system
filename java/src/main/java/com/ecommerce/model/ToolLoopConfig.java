@@ -17,11 +17,15 @@ public class ToolLoopConfig {
     @Builder.Default
     private List<String> toolWhitelist = List.of(
             "get_user_profile",
-            "search_cross_border_products",
-            "rerank_products",
-            "check_fulfillment_inventory",
+            "load_campaign_constraints",
+            "get_recent_orders",
+            "search_products",
+            "check_fulfillment",
+            "check_inventory",
+            "rerank",
             "filter_products",
             "generate_localized_copy",
+            "generate_retention_copy",
             "final_answer"
     );
 }

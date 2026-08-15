@@ -41,6 +41,7 @@ from services.ab_test import ABTestEngine
 from services.evaluator import RecommendationEvaluator
 from services.feature_store import FeatureStore
 from services.metrics import MetricsCollector
+from services.llm_budget import bind_budget, current_budget
 
 logger = structlog.get_logger()
 settings = get_settings()
@@ -164,6 +165,11 @@ async def recommend_stream(request: RecommendationRequest):
 
 
 async def _recommend_event_stream(request: RecommendationRequest):
+    with bind_budget(settings.llm_max_calls):
+        async for frame in _recommend_event_stream_body(request):
+            yield frame
+
+async def _recommend_event_stream_body(request: RecommendationRequest):
     request_id = str(uuid.uuid4())
     start = time.perf_counter()
     agent_results: dict[str, Any] = {}
@@ -209,10 +215,12 @@ async def _recommend_event_stream(request: RecommendationRequest):
         asyncio.create_task(supervisor.user_profile_agent.run(
             user_id=request.user_id,
             context=request.context,
+            run_id=request_id,
         )): "user_profile",
         asyncio.create_task(supervisor.product_rec_agent.run(
             user_profile=None,
             num_items=request.num_items * 2,
+            run_id=request_id,
         )): "product_recall",
     }
 
@@ -255,6 +263,7 @@ async def _recommend_event_stream(request: RecommendationRequest):
         asyncio.create_task(supervisor.product_rec_agent.run(
             user_profile=user_profile,
             num_items=request.num_items,
+            run_id=request_id,
         )): "product_rec",
         asyncio.create_task(supervisor.inventory_agent.run(products=raw_products)): "inventory",
     }
@@ -296,6 +305,7 @@ async def _recommend_event_stream(request: RecommendationRequest):
     copy_result = await supervisor.marketing_copy_agent.run(
         user_profile=user_profile,
         products=final_products,
+        run_id=request_id,
     )
     agent_results["marketing_copy"] = copy_result
     yield _sse("agent.completed", _agent_completed_payload("marketing_copy", copy_result, elapsed_ms()))
@@ -316,6 +326,9 @@ async def _recommend_event_stream(request: RecommendationRequest):
         },
         total_latency_ms=total_latency,
     )
+    budget = current_budget()
+    if budget is not None:
+        response.llm_metrics = budget.snapshot()
     _collect_metrics(response)
 
     yield _sse("run.completed", {
@@ -406,9 +419,10 @@ async def internal_agent_run(request: InternalAgentRunRequest):
         "events": events,
         "metrics": {
             "latency_ms": total_latency_ms,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "total_tokens": 0,
+            "input_tokens": None,
+            "output_tokens": None,
+            "total_tokens": None,
+            "llm_metrics": payload.get("llm_metrics") or (payload.get("response") or {}).get("llm_metrics", {}),
             "tool_call_count": len([e for e in events if e["type"] == "tool_completed"]),
         },
         "error": None,
@@ -454,9 +468,10 @@ def _to_internal_agent_event(run_id: str, sequence: int, event_name: str, payloa
         "data": payload,
         "metrics": {
             "latency_ms": int(payload.get("latency_ms") or payload.get("elapsed_ms") or 0),
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "total_tokens": 0,
+            "input_tokens": None,
+            "output_tokens": None,
+            "total_tokens": None,
+            "llm_metrics": payload.get("llm_metrics") or (payload.get("response") or {}).get("llm_metrics", {}),
         },
     }
 @app.post("/api/v1/evaluations/smoke")
@@ -496,7 +511,8 @@ async def recommend_via_graph(request: RecommendationRequest):
         "num_items": request.num_items,
         "context": request.context,
     }
-    result = await rec_graph.ainvoke(state)
+    with bind_budget(settings.llm_max_calls) as budget:
+        result = await rec_graph.ainvoke(state)
     return {
         "request_id": result.get("request_id"),
         "user_id": result.get("user_id"),
@@ -504,6 +520,7 @@ async def recommend_via_graph(request: RecommendationRequest):
         "marketing_copies": result.get("marketing_copies", []),
         "experiment_group": result.get("experiment_group", "control"),
         "total_latency_ms": round(result.get("total_latency_ms", 0), 1),
+        "llm_metrics": budget.snapshot(),
     }
 
 

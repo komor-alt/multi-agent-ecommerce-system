@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from abc import ABC, abstractmethod
 from typing import Any
@@ -32,7 +33,9 @@ class BaseAgent(ABC):
         self._call_count += 1
 
         try:
-            result = await self._retry_execute(**kwargs)
+            result = await asyncio.wait_for(
+                self._retry_execute(**kwargs), timeout=self.timeout
+            )
             result.latency_ms = (time.perf_counter() - start) * 1000
             logger.info(
                 "agent.success",

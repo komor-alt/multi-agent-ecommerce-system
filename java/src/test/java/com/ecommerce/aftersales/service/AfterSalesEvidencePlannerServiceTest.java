@@ -30,14 +30,14 @@ class AfterSalesEvidencePlannerServiceTest {
     private AfterSalesEvidencePlannerService service(String mode, String apiKey, long timeoutMs) {
         ChatClient.Builder builder = mock(ChatClient.Builder.class);
         when(builder.build()).thenReturn(mock(ChatClient.class));
-        return new AfterSalesEvidencePlannerService(builder, objectMapper, mode, timeoutMs, apiKey);
+        return new AfterSalesEvidencePlannerService(builder, objectMapper, mode, timeoutMs, apiKey, 32);
     }
 
     /** 覆写 callModel 注入模型输出的测试替身：测试中不发真实网络请求。 */
     private AfterSalesEvidencePlannerService llmService(String response, long timeoutMs) {
         ChatClient.Builder builder = mock(ChatClient.Builder.class);
         when(builder.build()).thenReturn(mock(ChatClient.class));
-        return new AfterSalesEvidencePlannerService(builder, objectMapper, "LLM", timeoutMs, "test-key-123") {
+        return new AfterSalesEvidencePlannerService(builder, objectMapper, "LLM", timeoutMs, "test-key-123", 32) {
             @Override
             protected String callModel(String prompt) {
                 return response;
@@ -236,7 +236,7 @@ class AfterSalesEvidencePlannerServiceTest {
         ChatClient.Builder builder = mock(ChatClient.Builder.class);
         when(builder.build()).thenReturn(mock(ChatClient.class));
         AfterSalesEvidencePlannerService service = new AfterSalesEvidencePlannerService(
-                builder, objectMapper, "AUTO", 4000, "test-key-123") {
+                builder, objectMapper, "AUTO", 4000, "test-key-123", 32) {
             @Override
             protected String callModel(String prompt) {
                 modelCalled.set(true);
@@ -460,7 +460,7 @@ class AfterSalesEvidencePlannerServiceTest {
         ChatClient.Builder builder = mock(ChatClient.Builder.class);
         when(builder.build()).thenReturn(mock(ChatClient.class));
         AfterSalesEvidencePlannerService service = new AfterSalesEvidencePlannerService(
-                builder, objectMapper, "LLM", 4000, "test-key-123") {
+                builder, objectMapper, "LLM", 4000, "test-key-123", 32) {
             @Override
             protected String callModel(String prompt) {
                 throw new RuntimeException("upstream exploded with sensitive detail");
@@ -482,7 +482,7 @@ class AfterSalesEvidencePlannerServiceTest {
         CountDownLatch workerStarted = new CountDownLatch(1);
         CountDownLatch workerFinished = new CountDownLatch(1);
         AfterSalesEvidencePlannerService service = new AfterSalesEvidencePlannerService(
-                builder, objectMapper, "LLM", 100, "test-key-123") {
+                builder, objectMapper, "LLM", 100, "test-key-123", 32) {
             @Override
             protected String callModel(String prompt) {
                 workerStarted.countDown();
@@ -517,7 +517,7 @@ class AfterSalesEvidencePlannerServiceTest {
         ChatClient.Builder builder = mock(ChatClient.Builder.class);
         when(builder.build()).thenReturn(mock(ChatClient.class));
         AfterSalesEvidencePlannerService service =
-                new AfterSalesEvidencePlannerService(builder, objectMapper, "LLM", 4000, "test-key-123");
+                new AfterSalesEvidencePlannerService(builder, objectMapper, "LLM", 4000, "test-key-123", 32);
 
         service.shutdown(); // @PreDestroy 生命周期清理
 
@@ -552,7 +552,7 @@ class AfterSalesEvidencePlannerServiceTest {
     private AfterSalesEvidencePlannerService trackingLlmService(AtomicBoolean modelCalled) {
         ChatClient.Builder builder = mock(ChatClient.Builder.class);
         when(builder.build()).thenReturn(mock(ChatClient.class));
-        return new AfterSalesEvidencePlannerService(builder, objectMapper, "LLM", 4000, "test-key-123") {
+        return new AfterSalesEvidencePlannerService(builder, objectMapper, "LLM", 4000, "test-key-123", 32) {
             @Override
             protected String callModel(String prompt) {
                 modelCalled.set(true);

@@ -65,6 +65,7 @@ class LiveAfterSalesEvalRunnerTest {
     void liveEvalRunsRealModelWithoutSideEffects() {
         // 配置硬校验：开启后 key 缺失/占位 → 清晰失败（绝不静默回退规则）。
         String apiKey = LiveEvalConfig.requireApiKey();
+        int maxLlmCalls = LiveEvalConfig.requireMaxLlmCalls();
 
         // 真实生产服务 + 真实 Spring 配置的 ChatClient，mode=LLM，不做任何覆写。
         AfterSalesIntakeService intakeService = new AfterSalesIntakeService(
@@ -72,7 +73,7 @@ class LiveAfterSalesEvalRunnerTest {
         AfterSalesEvidencePlannerService plannerService = new AfterSalesEvidencePlannerService(
                 chatClientBuilder, objectMapper, "LLM", LLM_CALL_TIMEOUT_MS, apiKey);
 
-        EvalReport report = new LiveAfterSalesEvalHarness(intakeService, plannerService, objectMapper)
+        EvalReport report = new LiveAfterSalesEvalHarness(intakeService, plannerService, objectMapper, maxLlmCalls)
                 .run(baseUrl, model);
 
         // 用例数必须在 [20, 30]。

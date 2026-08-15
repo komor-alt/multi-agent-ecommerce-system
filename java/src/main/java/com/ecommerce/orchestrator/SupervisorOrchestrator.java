@@ -23,7 +23,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 /**
- * Supervisor orchestrator: bounded parallel dispatch + aggregation for cross-border recommendation agents.
+ * Fixed workflow baseline: bounded parallel dispatch + aggregation for comparison with the autonomous loop.
  */
 @Service
 public class SupervisorOrchestrator {
@@ -38,6 +38,20 @@ public class SupervisorOrchestrator {
         this.abTestService = abTestService;
     }
 
+    /** Fixed workflow baseline used by offline business simulation. */
+    public List<String> fixedWorkflowToolPath() {
+        return List.of(
+                RecommendationPipelineExecutor.GET_USER_PROFILE,
+                RecommendationPipelineExecutor.GET_CAMPAIGN_CONSTRAINTS,
+                RecommendationPipelineExecutor.GET_ORDER_CONTEXT,
+                RecommendationPipelineExecutor.SEARCH_PRODUCTS,
+                RecommendationPipelineExecutor.CHECK_FULFILLMENT,
+                RecommendationPipelineExecutor.CHECK_INVENTORY,
+                RecommendationPipelineExecutor.RERANK_PRODUCTS,
+                RecommendationPipelineExecutor.GENERATE_COPY,
+                RecommendationPipelineExecutor.GENERATE_RETENTION_COPY
+        );
+    }
     public RecommendationResponse recommend(RecommendationRequest request) {
         return recommend(request, event -> {});
     }

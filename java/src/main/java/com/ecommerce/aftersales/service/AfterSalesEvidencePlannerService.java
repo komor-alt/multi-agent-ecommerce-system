@@ -2,6 +2,7 @@ package com.ecommerce.aftersales.service;
 
 import com.ecommerce.aftersales.model.AfterSalesTypes;
 import com.ecommerce.aftersales.model.AfterSalesTypes.EvidenceType;
+import com.ecommerce.service.LlmCallBudget;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PreDestroy;
@@ -31,7 +32,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 模式（agent.aftersales.planner.mode）：
  * - RULES：直接使用 Java 规则规划，不发任何网络请求；
  * - LLM：强制走 LLM，失败一律回退规则；
- * - AUTO（默认）：API key 缺失或为占位值时直接走规则（不发网络请求），否则尝试 LLM。
+ * - AUTO：仅在 live-enabled=true、有 API key 且当前 run 有正预算时尝试 LLM，否则直接走规则。
  *
  * 安全边界（与 AfterSalesIntakeService 同一套约束）：
  * - 输入是「结构化 IntakeResult + 服务端重建的证据在场快照」：模型不可信，系统提示词显式声明
@@ -66,7 +67,7 @@ public class AfterSalesEvidencePlannerService {
 
     private static final Logger log = LoggerFactory.getLogger(AfterSalesEvidencePlannerService.class);
 
-    /** 配置占位值 = 未配置 key：AUTO/LLM 都不发网络请求。 */
+    /** 配置占位值 = 未配置 key；生产默认 RULES/live=false，且没有 run budget 时永不发网络请求。 */
     static final String PLACEHOLDER_API_KEY = "your_api_key_here";
 
     /** 模型 JSON 顶层只允许这两个键。 */
@@ -123,20 +124,57 @@ public class AfterSalesEvidencePlannerService {
     private final String mode;
     private final long timeoutMs;
     private final String apiKey;
+    private final boolean liveEnabled;
+    private final LlmCallBudget standaloneBudget;
     /** 独立有界执行器（见类注释「资源边界」）。package-private：同包测试断言生命周期关闭状态。 */
     final ThreadPoolExecutor llmExecutor;
 
     public AfterSalesEvidencePlannerService(
             ChatClient.Builder chatClientBuilder,
             ObjectMapper objectMapper,
-            @Value("${agent.aftersales.planner.mode:AUTO}") String mode,
-            @Value("${agent.aftersales.planner.timeout-ms:3000}") long timeoutMs,
-            @Value("${spring.ai.openai.api-key:}") String apiKey) {
+            String mode,
+            long timeoutMs,
+            String apiKey) {
+        this(chatClientBuilder, objectMapper, mode, timeoutMs, apiKey, true, 0);
+    }
+
+    /** Explicit bounded budget for offline tests with injected mock model responses. */
+    public AfterSalesEvidencePlannerService(
+            ChatClient.Builder chatClientBuilder,
+            ObjectMapper objectMapper,
+            String mode,
+            long timeoutMs,
+            String apiKey,
+            int maxLlmCalls) {
+        this(chatClientBuilder, objectMapper, mode, timeoutMs, apiKey, true, maxLlmCalls);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public AfterSalesEvidencePlannerService(
+            ChatClient.Builder chatClientBuilder,
+            ObjectMapper objectMapper,
+            @Value("$" + "{agent.aftersales.planner.mode:RULES}") String mode,
+            @Value("$" + "{agent.aftersales.planner.timeout-ms:3000}") long timeoutMs,
+            @Value("$" + "{spring.ai.openai.api-key:}") String apiKey,
+            @Value("$" + "{agent.aftersales.planner.live-enabled:false}") boolean liveEnabled) {
+        this(chatClientBuilder, objectMapper, mode, timeoutMs, apiKey, liveEnabled, 0);
+    }
+
+    private AfterSalesEvidencePlannerService(
+            ChatClient.Builder chatClientBuilder,
+            ObjectMapper objectMapper,
+            String mode,
+            long timeoutMs,
+            String apiKey,
+            boolean liveEnabled,
+            int maxLlmCalls) {
         this.chatClient = chatClientBuilder.build();
         this.objectMapper = objectMapper;
         this.mode = normalizeMode(mode);
         this.timeoutMs = Math.max(1L, timeoutMs);
         this.apiKey = apiKey == null ? "" : apiKey;
+        this.liveEnabled = liveEnabled;
+        this.standaloneBudget = new LlmCallBudget(Math.max(0, maxLlmCalls));
         // 独立有界执行器：见类注释「资源边界」。核心 1 / 最大 2 / 队列 4，守护线程。
         this.llmExecutor = new ThreadPoolExecutor(
                 1, 2, 30L, TimeUnit.SECONDS,
@@ -148,7 +186,6 @@ public class AfterSalesEvidencePlannerService {
                 },
                 new ThreadPoolExecutor.AbortPolicy());
     }
-
     private static final AtomicInteger POOL_SEQ = new AtomicInteger();
 
     /**
@@ -184,11 +221,14 @@ public class AfterSalesEvidencePlannerService {
         if ("RULES".equals(mode)) {
             return deterministic(input, "RULES_MODE", elapsedMs(startedNanos));
         }
+        if (!liveEnabled) {
+            return deterministic(input, "LLM_DISABLED", elapsedMs(startedNanos));
+        }
         if (apiKeyMissing()) {
             return deterministic(input, "LLM_API_KEY_MISSING", elapsedMs(startedNanos));
         }
         try {
-            return planByLlm(input);
+            return planByLlm(input, LlmCallBudget.current());
         } catch (Exception error) {
             // 最后防线：任何意外都不允许抛出到主循环。
             log.warn("Planner unexpected error, degraded to rules (code=LLM_ERROR)");
@@ -280,8 +320,12 @@ public class AfterSalesEvidencePlannerService {
         return chatClient.prompt().system(SYSTEM_PROMPT).user(prompt).call().content();
     }
 
-    private AfterSalesTypes.PlanningResult planByLlm(PlanningInput input) {
+    private AfterSalesTypes.PlanningResult planByLlm(PlanningInput input, LlmCallBudget budget) {
         long startedNanos = System.nanoTime();
+        LlmCallBudget effectiveBudget = budget == null ? standaloneBudget : budget;
+        if (!effectiveBudget.tryAcquire("aftersales_planner", String.valueOf(input.evidencePresence()))) {
+            return deterministic(input, "LLM_BUDGET_EXCEEDED", elapsedMs(startedNanos));
+        }
         String prompt = buildPrompt(input);
         // FutureTask 而非 CompletableFuture：cancel(true) 的语义是 JDK 契约保证的
         // 「中断正在运行的调用线程」；CompletableFuture.cancel 只改状态、不中断线程。

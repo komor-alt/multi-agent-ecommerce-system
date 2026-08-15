@@ -2,11 +2,11 @@ import React, { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Badge, Button, Card, Col, Descriptions, Empty, Form, Input, InputNumber, Radio, Row, Select, Space, Statistic, Table, Tag, Timeline, Typography } from "antd";
 import { ApiOutlined, BranchesOutlined, CheckCircleOutlined, ClockCircleOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
-import { createRecommendationTask } from "../../api/recommendations";
+import { createRecommendationTask, listRecommendationTasks, RecommendationTaskSummary } from "../../api/recommendations";
 
 type RunStatus = "idle" | "running" | "done" | "error";
 type ScenarioKey = "homepage" | "campaign" | "retention";
-type ExecutionMode = "gateway" | "legacy";
+type ExecutionMode = "gateway" | "fixed";
 
 type Scenario = {
   user_id: string;
@@ -126,10 +126,13 @@ export function RecommendationConsole() {
   const [executionMode, setExecutionMode] = useState<ExecutionMode>("gateway");
   const [gatewayError, setGatewayError] = useState("");
   const [health, setHealth] = useState<{ ok: boolean; text: string; model: string }>({ ok: false, text: "检查中", model: "-" });
+  const [tasks, setTasks] = useState<RecommendationTaskSummary[]>([]);
   const abortRef = useRef<AbortController | null>(null);
+  const submitInFlightRef = useRef(false);
 
   useEffect(() => {
     void checkHealth().then(setHealth);
+    void listRecommendationTasks().then((page) => setTasks(page.items)).catch(() => undefined);
     return () => abortRef.current?.abort();
   }, []);
 
@@ -146,7 +149,10 @@ export function RecommendationConsole() {
 
   async function submit(event?: FormEvent) {
     event?.preventDefault();
-    abortRef.current?.abort();
+    if (submitInFlightRef.current) return;
+    submitInFlightRef.current = true;
+    try {
+      abortRef.current?.abort();
 
     setRun(createRunState("running"));
     setProducts([]);
@@ -165,9 +171,14 @@ export function RecommendationConsole() {
           agentConfig: {
             model: "deepseek-v4-flash",
             maxSteps: 8,
-            toolWhitelist: ["get_user_profile", "search_products", "check_inventory", "generate_copy"],
+            toolWhitelist: [
+              "get_user_profile", "load_campaign_constraints", "get_recent_orders",
+              "search_products", "check_fulfillment", "check_inventory",
+              "rerank", "generate_localized_copy", "generate_retention_copy", "final_answer",
+            ],
           },
         });
+        void listRecommendationTasks().then((page) => setTasks(page.items)).catch(() => undefined);
         setRun((current) => ({
           ...current,
           status: "done",
@@ -221,13 +232,16 @@ export function RecommendationConsole() {
     } finally {
       abortRef.current = null;
     }
+    } finally {
+      submitInFlightRef.current = false;
+    }
   }
 
   return (
     <div className="page-stack">
       <div>
         <Typography.Title level={3}>Recommendations</Typography.Title>
-        <Typography.Text type="secondary">创建推荐 Agent 任务，或通过 Legacy SSE 直接观察流式执行过程。</Typography.Text>
+        <Typography.Text type="secondary">创建推荐 Agent 任务，或通过 Fixed Workflow baseline 直接观察流式执行过程。</Typography.Text>
       </div>
 
       {gatewayError ? <Alert type="error" showIcon message="Gateway 链路暂不可用" description={gatewayError} /> : null}
@@ -242,7 +256,7 @@ export function RecommendationConsole() {
               <Form.Item label="执行链路">
                 <Radio.Group value={executionMode} onChange={(event) => setExecutionMode(event.target.value)} optionType="button" buttonStyle="solid">
                   <Radio.Button value="gateway">Gateway</Radio.Button>
-                  <Radio.Button value="legacy">Legacy SSE</Radio.Button>
+                  <Radio.Button value="fixed">Fixed Workflow Baseline</Radio.Button>
                 </Radio.Group>
               </Form.Item>
               <Form.Item label="用户 ID">
@@ -281,7 +295,7 @@ export function RecommendationConsole() {
               <Space style={{ width: "100%" }}>
                 <Button onClick={() => setForm(scenarios[activeScenario])}>重置</Button>
                 <Button type="primary" htmlType="submit" loading={isRunning} icon={executionMode === "gateway" ? <BranchesOutlined /> : <ThunderboltOutlined />}>
-                  {executionMode === "gateway" ? "创建 Gateway 任务" : "运行 Legacy Agent"}
+                  {executionMode === "gateway" ? "创建 Gateway 任务" : "运行 Fixed Workflow"}
                 </Button>
               </Space>
             </Form>
@@ -317,6 +331,21 @@ export function RecommendationConsole() {
           </Card>
         </Col>
       </Row>
+      <Card title="推荐任务历史" extra={<Tag color="blue">{tasks.length} 条</Tag>}>
+        <Table<RecommendationTaskSummary>
+          rowKey="id"
+          dataSource={tasks}
+          pagination={{ pageSize: 8 }}
+          columns={[
+            { title: "场景", dataIndex: "scene" },
+            { title: "用户", dataIndex: "userId" },
+            { title: "市场", render: (_: unknown, task: RecommendationTaskSummary) => task.market.country + " / " + task.market.currency },
+            { title: "状态", dataIndex: "status", render: (status: string) => <Tag color={status === "completed" ? "success" : status === "failed" ? "error" : "processing"}>{status}</Tag> },
+            { title: "Run", dataIndex: "runId", render: (runId?: string) => runId ? <Button type="link" onClick={() => navigate("/runs/" + runId)}>{runId.slice(0, 8)}</Button> : "-" },
+            { title: "创建时间", dataIndex: "createdAt", render: (value: string) => new Date(value).toLocaleString() },
+          ]}
+        />
+      </Card>
     </div>
   );
 }
@@ -555,6 +584,11 @@ function buildPayload(form: Scenario) {
       avg_order_amount: Number(form.avg_order_amount || 0),
       note: form.note.trim(),
       active_hours: [20, 21, 22],
+      platform: "shopify",
+      region: "SEA",
+      country: "SG",
+      locale: "en-SG",
+      currency: "SGD",
     },
   };
 }

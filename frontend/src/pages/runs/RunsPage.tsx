@@ -27,6 +27,7 @@ export function RunsPage() {
           columns={[
             { title: "Run ID", dataIndex: "id", render: (id: string) => <Link to={`/runs/${id}`}>{id.slice(0, 8)}</Link> },
             { title: "任务类型", dataIndex: "taskType" },
+            { title: "场景", dataIndex: "scene", render: (scene?: string) => scene || "-" },
             { title: "状态", dataIndex: "status", render: (status: string) => <Tag color={status === "completed" ? "success" : status === "failed" ? "error" : "processing"}>{status}</Tag> },
             { title: "模型", dataIndex: "modelName" },
             { title: "步骤", dataIndex: "stepCount" },

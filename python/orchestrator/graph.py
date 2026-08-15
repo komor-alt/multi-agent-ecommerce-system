@@ -68,6 +68,7 @@ async def user_profile_node(state: PipelineState) -> PipelineState:
     result = await user_profile_agent.run(
         user_id=state["user_id"],
         context=state.get("context", {}),
+        run_id=state.get("request_id", "graph"),
     )
     state["user_profile"] = getattr(result, "profile", None)
     state["agent_results"]["user_profile"] = result
@@ -78,6 +79,7 @@ async def product_recall_node(state: PipelineState) -> PipelineState:
     result = await product_rec_agent.run(
         user_profile=None,
         num_items=state.get("num_items", 10) * 2,
+        run_id=state.get("request_id", "graph"),
     )
     state["raw_products"] = getattr(result, "products", [])
     state["agent_results"]["product_recall"] = result
@@ -99,6 +101,7 @@ async def rerank_node(state: PipelineState) -> PipelineState:
     result = await product_rec_agent.run(
         user_profile=state.get("user_profile"),
         num_items=state.get("num_items", 10),
+        run_id=state.get("request_id", "graph"),
     )
     state["ranked_products"] = getattr(result, "products", state.get("raw_products", []))
     state["agent_results"]["rerank"] = result
@@ -140,6 +143,7 @@ async def marketing_copy_node(state: PipelineState) -> PipelineState:
     result = await marketing_copy_agent.run(
         user_profile=state.get("user_profile"),
         products=state.get("final_products", []),
+        run_id=state.get("request_id", "graph"),
     )
     state["marketing_copies"] = getattr(result, "copies", [])
     state["agent_results"]["marketing_copy"] = result

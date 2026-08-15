@@ -9,9 +9,9 @@ export type AgentServiceRawEvent = {
   data: Record<string, unknown>;
   metrics?: {
     latency_ms?: number;
-    input_tokens?: number;
-    output_tokens?: number;
-    total_tokens?: number;
+    input_tokens?: number | null;
+    output_tokens?: number | null;
+    total_tokens?: number | null;
   };
 };
 
@@ -37,9 +37,9 @@ export type AgentServiceRunResponse = {
   events: AgentServiceRawEvent[];
   metrics: {
     latency_ms?: number;
-    input_tokens: number;
-    output_tokens: number;
-    total_tokens: number;
+    input_tokens: number | null;
+    output_tokens: number | null;
+    total_tokens: number | null;
     tool_call_count: number;
   };
   error?: {

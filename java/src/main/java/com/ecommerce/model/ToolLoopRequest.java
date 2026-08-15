@@ -10,6 +10,7 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor
 @AllArgsConstructor
 public class ToolLoopRequest {
+    private String runId;
     private RecommendationRequest request;
     @Builder.Default
     private ToolLoopConfig config = ToolLoopConfig.builder().build();

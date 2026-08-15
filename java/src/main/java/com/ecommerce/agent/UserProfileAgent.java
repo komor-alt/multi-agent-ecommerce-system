@@ -4,8 +4,11 @@ import com.ecommerce.model.AgentResult;
 import com.ecommerce.model.RecommendationRequest;
 import com.ecommerce.model.UserProfile;
 import com.ecommerce.service.RedisFeatureStoreService;
+import com.ecommerce.service.LlmCallBudget;
+import com.ecommerce.service.RecommendationModeResolver;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.HashMap;
@@ -21,6 +24,7 @@ public class UserProfileAgent extends BaseAgent {
     private final ChatClient chatClient;
     private final RedisFeatureStoreService featureStoreService;
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final RecommendationModeResolver modeResolver;
 
     private static final String SYSTEM_PROMPT = """
             You are an ecommerce user profiling agent for Southeast Asia cross-border commerce.
@@ -32,9 +36,16 @@ public class UserProfileAgent extends BaseAgent {
             """;
 
     public UserProfileAgent(ChatClient.Builder chatClientBuilder, RedisFeatureStoreService featureStoreService) {
-        super("user_profile", 5.0, 2);
+        this(chatClientBuilder, featureStoreService, new RecommendationModeResolver("RULES", ""));
+    }
+
+    @Autowired
+    public UserProfileAgent(ChatClient.Builder chatClientBuilder, RedisFeatureStoreService featureStoreService,
+                            RecommendationModeResolver modeResolver) {
+        super("user_profile", 5.0, 1);
         this.chatClient = chatClientBuilder.build();
         this.featureStoreService = featureStoreService;
+        this.modeResolver = modeResolver;
     }
 
     @Override
@@ -46,6 +57,11 @@ public class UserProfileAgent extends BaseAgent {
         String response;
         UserProfile profile;
         try {
+            if (!modeResolver.llmEnabled()) throw new IllegalStateException("rules_mode");
+            LlmCallBudget budget = params.get("llmBudget") instanceof LlmCallBudget value ? value : null;
+            if (budget == null || !budget.tryAcquire(name, String.valueOf(params.getOrDefault("llmFingerprint", userId)))) {
+                throw new IllegalStateException("llm_budget_exhausted");
+            }
             response = chatClient.prompt()
                     .system(SYSTEM_PROMPT)
                     .user("User ID: " + userId + "\nBehavior features: " + objectMapper.writeValueAsString(behavior))

@@ -96,4 +96,5 @@ class RecommendationResponse(BaseModel):
     experiment_group: str = "control"
     agent_results: dict[str, AgentResult] = Field(default_factory=dict)
     total_latency_ms: float = 0.0
+    llm_metrics: dict[str, Any] = Field(default_factory=dict)
     timestamp: datetime = Field(default_factory=datetime.now)

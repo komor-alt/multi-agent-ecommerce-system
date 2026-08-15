@@ -1,6 +1,7 @@
 package com.ecommerce.service;
 
 import com.ecommerce.model.RecommendationRequest;
+import com.ecommerce.data.RecommendationDataService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.ObjectProvider;
@@ -24,10 +25,14 @@ public class RedisFeatureStoreService {
 
     private final StringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper;
+    private final RecommendationDataService recommendationDataService;
     private final Map<String, List<Map<String, Object>>> memoryEvents = new ConcurrentHashMap<>();
 
-    public RedisFeatureStoreService(ObjectProvider<StringRedisTemplate> redisTemplateProvider, ObjectMapper objectMapper) {
+    public RedisFeatureStoreService(ObjectProvider<StringRedisTemplate> redisTemplateProvider,
+                                    ObjectProvider<RecommendationDataService> dataServiceProvider,
+                                    ObjectMapper objectMapper) {
         this.redisTemplate = redisTemplateProvider.getIfAvailable();
+        this.recommendationDataService = dataServiceProvider.getIfAvailable();
         this.objectMapper = objectMapper;
     }
 
@@ -41,6 +46,10 @@ public class RedisFeatureStoreService {
         event.put("timestamp", Instant.now().toString());
 
         memoryEvents.computeIfAbsent(safeUserId, ignored -> new ArrayList<>()).add(event);
+        if (recommendationDataService != null) {
+            recommendationDataService.recordUserEvent(safeUserId, String.valueOf(event.get("behavior_type")),
+                    String.valueOf(event.get("product_id")), metadata == null ? Map.of() : metadata);
+        }
         trimMemory(safeUserId);
 
         if (redisTemplate != null) {
@@ -57,8 +66,16 @@ public class RedisFeatureStoreService {
 
     public Map<String, Object> getUserFeatures(String userId, RecommendationRequest request) {
         String safeUserId = safeUserId(userId);
-        List<Map<String, Object>> events = readEvents(safeUserId);
-        if (events.isEmpty()) {
+        FeatureRead featureRead = readEvents(safeUserId);
+        List<Map<String, Object>> events = new ArrayList<>(featureRead.events());
+        if (recommendationDataService != null) {
+            List<Map<String, Object>> durable = recommendationDataService.recentUserEvents(safeUserId, MAX_RECENT_EVENTS);
+            for (Map<String, Object> event : durable) {
+                if (!events.contains(event)) events.add(event);
+            }
+        }
+        boolean requestFallback = events.isEmpty();
+        if (requestFallback) {
             events = fallbackEvents(safeUserId, request);
         }
 
@@ -84,11 +101,17 @@ public class RedisFeatureStoreService {
         features.put("behavior_counts", behaviorCounts);
         features.put("top_products", topProducts);
         features.put("recent_events", events.stream().limit(5).collect(Collectors.toList()));
-        features.put("source", redisTemplate == null ? "memory_fallback" : "redis_or_memory_fallback");
+        String source = featureRead.source();
+        if (recommendationDataService != null) {
+            source = "redis".equals(source) ? "redis+postgresql" : "postgresql+" + source;
+        }
+        if (requestFallback) source = source + "+request_context";
+        features.put("source", source);
+        features.put("redis_available", !source.contains("redis_unavailable"));
         return features;
     }
 
-    private List<Map<String, Object>> readEvents(String userId) {
+    private FeatureRead readEvents(String userId) {
         if (redisTemplate != null) {
             try {
                 List<String> values = redisTemplate.opsForList().range(behaviorKey(userId), 0, MAX_RECENT_EVENTS - 1);
@@ -97,14 +120,17 @@ public class RedisFeatureStoreService {
                     for (String value : values) {
                         parsed.add(objectMapper.readValue(value, new TypeReference<>() {}));
                     }
-                    return parsed;
+                    return new FeatureRead(parsed, "redis");
                 }
+                return new FeatureRead(memoryEvents.getOrDefault(userId, List.of()), "redis_empty");
             } catch (Exception ignored) {
-                // Fall through to in-memory events.
+                return new FeatureRead(memoryEvents.getOrDefault(userId, List.of()), "memory+redis_unavailable");
             }
         }
-        return memoryEvents.getOrDefault(userId, List.of());
+        return new FeatureRead(memoryEvents.getOrDefault(userId, List.of()), "memory");
     }
+
+    private record FeatureRead(List<Map<String, Object>> events, String source) {}
 
     private List<Map<String, Object>> fallbackEvents(String userId, RecommendationRequest request) {
         Map<String, Object> context = request.getContext() == null ? Map.of() : request.getContext();

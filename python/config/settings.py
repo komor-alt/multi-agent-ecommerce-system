@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     llm_model: str = "MiniMax-M1"
     llm_temperature: float = 0.7
     llm_max_tokens: int = 2048
+    # Live calls are opt-in and require a positive per-request budget.
+    llm_mode: str = "OFFLINE"
+    llm_live_enabled: bool = False
+    llm_max_calls: int = 0
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"
@@ -35,7 +39,17 @@ class Settings(BaseSettings):
     agent_timeout_marketing_copy: float = 10.0
     agent_timeout_inventory: float = 5.0
 
-    model_config = {"env_file": ".env", "env_prefix": "ECOM_"}
+    def llm_enabled(self) -> bool:
+        return (
+            self.llm_mode.strip().upper() == "LLM"
+            and self.llm_live_enabled
+            and bool(self.llm_api_key.strip())
+            and self.llm_max_calls > 0
+        )
+
+    # Do not auto-load .env: tests must not ingest live credentials implicitly.
+    # Container/deployment environments inject ECOM_* variables explicitly.
+    model_config = {"env_prefix": "ECOM_"}
 
 
 @lru_cache()

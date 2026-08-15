@@ -134,6 +134,34 @@ public class RecommendationController {
         }
     }
 
+    @PostMapping(value = "/recommend/agent-loop/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter recommendWithAgentLoopStream(@RequestBody ToolLoopRequest request) {
+        AgentConcurrencyGuard.GuardLease lease = acquireOrReject("agent_loop_stream");
+        SseEmitter emitter = new SseEmitter(0L);
+        CompletableFuture.runAsync(() -> {
+            try (lease) {
+                AgentLoopResponse response = autonomousAgentLoopService.run(request, event -> {
+                    try {
+                        emitter.send(SseEmitter.event()
+                                .id(event.getEventId())
+                                .name(event.getName())
+                                .data(event));
+                    } catch (IOException e) {
+                        throw new UncheckedIOException(e);
+                    }
+                });
+                metricsCollector.recordToolCalls(response.getToolCalls());
+                if (response.getResponse() != null) {
+                    metricsCollector.recordRecommendation(response.getResponse());
+                }
+                emitter.complete();
+            } catch (Exception error) {
+                emitter.completeWithError(error);
+            }
+        }, sseExecutor);
+        return emitter;
+    }
+
     @PostMapping("/evaluations/smoke")
     public Map<String, Object> smokeEvaluation(@RequestBody RecommendationRequest request) {
         try (AgentConcurrencyGuard.GuardLease ignored = acquireOrReject("smoke_evaluation")) {

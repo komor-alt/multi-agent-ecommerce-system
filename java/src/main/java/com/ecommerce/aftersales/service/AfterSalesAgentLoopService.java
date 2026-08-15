@@ -11,6 +11,7 @@ import com.ecommerce.aftersales.repository.AfterSalesRunRepository;
 import com.ecommerce.aftersales.repository.AfterSalesTicketRepository;
 import com.ecommerce.aftersales.repository.TicketAttachmentRepository;
 import com.ecommerce.aftersales.service.AfterSalesEvidencePlannerService.PlanningInput;
+import com.ecommerce.service.LlmCallBudget;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -102,9 +103,12 @@ public class AfterSalesAgentLoopService {
     private final AfterSalesEscalationPolicyService escalationPolicy;
     private final ObjectMapper objectMapper;
     private final long stepDelayMs;
+    @Value("$" + "{agent.aftersales.max-llm-calls:0}")
+    private int configuredMaxLlmCalls = 0;
     /** 证据业务前置校验（纯 Java 组件）：所有规划来源（LLM 与规则兜底）必须通过同一 Gate。 */
     private final EvidencePreconditionGate preconditionGate = new EvidencePreconditionGate();
 
+    @org.springframework.beans.factory.annotation.Autowired
     public AfterSalesAgentLoopService(
             AfterSalesToolExecutor toolExecutor,
             AfterSalesRunEventService eventService,
@@ -117,7 +121,27 @@ public class AfterSalesAgentLoopService {
             DecisionRouteResolver routeResolver,
             AfterSalesEscalationPolicyService escalationPolicy,
             ObjectMapper objectMapper,
-            @Value("${agent.aftersales.demo-step-delay-ms:0}") long stepDelayMs) {
+            @Value("$" + "{agent.aftersales.demo-step-delay-ms:0}") long stepDelayMs) {
+        this(toolExecutor, eventService, runRepository, ticketRepository, ticketContextService,
+                attachmentRepository, intakeService, plannerService, routeResolver,
+                escalationPolicy, objectMapper, stepDelayMs, 0);
+    }
+
+    /** Explicit budget constructor for offline tests with injected mock model responses. */
+    public AfterSalesAgentLoopService(
+            AfterSalesToolExecutor toolExecutor,
+            AfterSalesRunEventService eventService,
+            AfterSalesRunRepository runRepository,
+            AfterSalesTicketRepository ticketRepository,
+            AfterSalesTicketContextService ticketContextService,
+            TicketAttachmentRepository attachmentRepository,
+            AfterSalesIntakeService intakeService,
+            AfterSalesEvidencePlannerService plannerService,
+            DecisionRouteResolver routeResolver,
+            AfterSalesEscalationPolicyService escalationPolicy,
+            ObjectMapper objectMapper,
+            long stepDelayMs,
+            int maxLlmCalls) {
         this.toolExecutor = toolExecutor;
         this.eventService = eventService;
         this.runRepository = runRepository;
@@ -130,13 +154,14 @@ public class AfterSalesAgentLoopService {
         this.escalationPolicy = escalationPolicy;
         this.objectMapper = objectMapper;
         this.stepDelayMs = Math.max(0, stepDelayMs);
+        this.configuredMaxLlmCalls = Math.max(0, maxLlmCalls);
     }
-
     public void run(String runId, String ticketId) {
         AfterSalesRunEntity run = runRepository.findById(runId).orElseThrow();
         AfterSalesTicketContextService.TicketContext ticketContext = ticketContextService.load(ticketId);
         AfterSalesTicketEntity ticket = ticketContext.ticket();
         AfterSalesAgentState state = new AfterSalesAgentState(runId, ticket);
+        state.setLlmBudget(new LlmCallBudget(configuredMaxLlmCalls));
         Set<String> fingerprints = new HashSet<>();
         // 单调时钟测量分析总耗时：不受系统时间跳变影响。总耗时是用户感知的完整 run 时长
         // （含演示等待），工具事件里的 latencyMs 才不含演示等待。
@@ -144,13 +169,14 @@ public class AfterSalesAgentLoopService {
         // 跨越取证与决策两阶段的工具步数（EscalationSignal 捕获分支也需要它）。
         int step = 0;
 
-        try {
+        try (LlmCallBudget.Scope ignored = LlmCallBudget.bind(state.getLlmBudget())) {
             eventService.append(runId, "run_started", "售后分析开始", "running",
                 "工单进入受限 Agent Loop。", Map.of(
                         "summary", "正在识别客户诉求并收集当前路线所需证据。",
                         "ticketId", ticketId,
                         "orderId", ticket.getOrderId(),
-                        "maxSteps", run.getMaxSteps()
+                        "maxSteps", run.getMaxSteps(),
+                        "llmMetrics", state.getLlmBudget().snapshot()
                 ));
 
         // 恢复会话（run.parentRunId 非空 = 客户补充信息后的新 run）：还原父 run 的可恢复
@@ -228,13 +254,15 @@ public class AfterSalesAgentLoopService {
             run.setStopReason(error.getMessage());
             run.setCompletedAt(Instant.now());
             run.setDurationMs(durationMs);
+            run.setFinalAnswerJson(writeJson(Map.of("status", "FAILED", "llmMetrics", state.getLlmBudget().snapshot())));
             runRepository.save(run);
             ticket.setStatus(AfterSalesTypes.TicketStatus.FAILED);
             ticketRepository.save(ticket);
             eventService.append(runId, "error", "售后分析失败", "failed",
                     error.getMessage(), Map.of(
                             "summary", error.getMessage(),
-                            "durationMs", durationMs
+                            "durationMs", durationMs,
+                            "llmMetrics", state.getLlmBudget().snapshot()
                     ));
             eventService.complete(runId);
         }
@@ -491,6 +519,7 @@ public class AfterSalesAgentLoopService {
         long durationMs = elapsedMs(startedNanos);
         Map<String, Object> finalAnswer = baseFinalAnswer(state, ticket);
         finalAnswer.put("decisionRoute", state.getRoute().name());
+        finalAnswer.put("llmMetrics", state.getLlmBudget().snapshot());
         finalAnswer.put("requiresApproval", false);
         finalAnswer.put("externalWait", reason);
         finalAnswer.put("decisionSummary", reason.summary());
@@ -945,6 +974,7 @@ public class AfterSalesAgentLoopService {
         finalAnswer.put("evidenceIds", state.getEvidenceIds());
         finalAnswer.put("intake", state.getIntake());
         finalAnswer.put("decisionRoute", state.getRoute().name());
+        finalAnswer.put("llmMetrics", state.getLlmBudget().snapshot());
         if (state.getPolicy() != null) {
             finalAnswer.put("policy", state.getPolicy());
         }

@@ -14,6 +14,15 @@ spring:
     username: ${SPRING_DATASOURCE_USERNAME:sa}
     password: ${SPRING_DATASOURCE_PASSWORD:}
     driver-class-name: ${SPRING_DATASOURCE_DRIVER_CLASS_NAME:org.h2.Driver}
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:localhost}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+      timeout: 500ms
+  sql:
+    init:
+      mode: ${SPRING_SQL_INIT_MODE:never}
+      schema-locations: ${SPRING_SQL_INIT_SCHEMA_LOCATIONS:classpath:schema-postgresql.sql}
   jpa:
     hibernate:
       ddl-auto: ${SPRING_JPA_HIBERNATE_DDL_AUTO:update}
@@ -32,14 +41,24 @@ agent:
     core-size: ${ECOM_AGENT_SSE_CORE_SIZE:2}
     max-size: ${ECOM_AGENT_SSE_MAX_SIZE:6}
     queue-capacity: ${ECOM_AGENT_SSE_QUEUE_CAPACITY:16}
+  recommend:
+    # Zero-cost default. Live model use requires all three explicit settings.
+    mode: ${ECOM_RECOMMEND_MODE:RULES}
+    live-enabled: ${ECOM_RECOMMEND_LIVE_ENABLED:false}
+    max-llm-calls: ${ECOM_RECOMMEND_MAX_LLM_CALLS:0}
   aftersales:
+    # Shared per-run live-model budget; zero keeps aftersales cost-free by default.
+    max-llm-calls: ${ECOM_AFTERSALES_MAX_LLM_CALLS:0}
     demo-step-delay-ms: ${ECOM_AFTERSALES_STEP_DELAY_MS:0}
     retry-scan-ms: ${ECOM_AFTERSALES_RETRY_SCAN_MS:5000}
     intake:
-      # AUTO: key 缺失/占位时走规则，否则尝试 LLM；LLM: 强制 LLM，失败回退规则；RULES: 仅规则。
-      mode: ${ECOM_AFTERSALES_INTAKE_MODE:AUTO}
+      # RULES is the zero-cost default; live use requires live-enabled=true and a positive run budget.
+      mode: ${ECOM_AFTERSALES_INTAKE_MODE:RULES}
+      live-enabled: ${ECOM_AFTERSALES_INTAKE_LIVE_ENABLED:false}
+      max-llm-calls: ${ECOM_AFTERSALES_MAX_LLM_CALLS:0}
       timeout-ms: ${ECOM_AFTERSALES_INTAKE_TIMEOUT_MS:4000}
     planner:
-      # Evidence Planner：同样支持 AUTO/LLM/RULES，AUTO 在 key 缺失/占位时直接走规则（不发网络请求）。
-      mode: ${ECOM_AFTERSALES_PLANNER_MODE:AUTO}
+      # RULES is the zero-cost default; live use requires live-enabled=true and a positive run budget.
+      mode: ${ECOM_AFTERSALES_PLANNER_MODE:RULES}
+      live-enabled: ${ECOM_AFTERSALES_PLANNER_LIVE_ENABLED:false}
       timeout-ms: ${ECOM_AFTERSALES_PLANNER_TIMEOUT_MS:3000}

@@ -59,10 +59,10 @@ export class AgentRunEventBus {
       timestamp: event.timestamp,
       data: event.data,
       metrics: {
-        latencyMs: event.metrics?.latency_ms || 0,
-        inputTokens: event.metrics?.input_tokens || 0,
-        outputTokens: event.metrics?.output_tokens || 0,
-        totalTokens: event.metrics?.total_tokens || 0,
+        latencyMs: event.metrics?.latency_ms ?? null,
+        inputTokens: event.metrics?.input_tokens ?? null,
+        outputTokens: event.metrics?.output_tokens ?? null,
+        totalTokens: event.metrics?.total_tokens ?? null,
       },
     };
   }

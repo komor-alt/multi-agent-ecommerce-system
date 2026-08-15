@@ -96,6 +96,8 @@ export function RunDetailPage() {
               size="small"
               items={[
                 { key: "status", label: "状态", children: run ? <Tag color={run.status === "completed" ? "success" : run.status === "failed" ? "error" : "processing"}>{run.status}</Tag> : "-" },
+                { key: "scene", label: "场景", children: run?.scene || "-" },
+                { key: "user", label: "用户", children: run?.userId || "-" },
                 { key: "model", label: "模型", children: run?.modelName || "-" },
                 { key: "latency", label: "延迟", children: run?.latencyMs == null ? "-" : `${run.latencyMs} ms` },
                 { key: "tokens", label: "Token", children: run?.totalTokens ?? "-" },
@@ -105,7 +107,7 @@ export function RunDetailPage() {
           </Card>
         </Col>
       </Row>
-      <Card title="最终回答" loading={runQuery.isLoading}>
+      <Card title="最终 RecommendationPlan" loading={runQuery.isLoading}>
         {run?.finalAnswer ? <pre className="json-view">{JSON.stringify(run.finalAnswer, null, 2)}</pre> : <Empty description="等待 agent_runs.response_payload" />}
       </Card>
     </div>

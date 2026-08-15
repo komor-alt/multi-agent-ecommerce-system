@@ -10,9 +10,9 @@ export type AgentRunSummaryDto = {
   stepCount: number;
   toolCallCount: number;
   latencyMs?: number;
-  inputTokens: number;
-  outputTokens: number;
-  totalTokens: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  totalTokens: number | null;
   createdAt: string;
 };
 

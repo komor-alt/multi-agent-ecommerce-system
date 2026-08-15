@@ -17,6 +17,7 @@ public final class LiveEvalConfig {
     public static final String API_KEY_ENV = "ECOM_LLM_API_KEY";
     public static final String BASE_URL_ENV = "ECOM_LLM_BASE_URL";
     public static final String MODEL_ENV = "ECOM_LLM_MODEL";
+    public static final String MAX_CALLS_ENV = "ECOM_LLM_MAX_CALLS";
     /** 与 application.yml 的 ${ECOM_LLM_API_KEY:your_api_key_here} 占位值一致。 */
     public static final String PLACEHOLDER_API_KEY = "your_api_key_here";
 
@@ -61,6 +62,26 @@ public final class LiveEvalConfig {
         return key;
     }
 
+    /** Live Eval requires an explicit positive global model-call budget. */
+    public static int requireMaxLlmCalls() {
+        return requireMaxLlmCalls(System.getenv());
+    }
+
+    public static int requireMaxLlmCalls(Map<String, String> env) {
+        String raw = trimmed(env, MAX_CALLS_ENV);
+        try {
+            int value = Integer.parseInt(raw);
+            if (value <= 0) {
+                throw new NumberFormatException("not positive");
+            }
+            return value;
+        } catch (NumberFormatException error) {
+            throw new IllegalStateException(
+                    "LIVE_EVAL_CONFIG_FAILURE: " + RUN_ENV + "=true requires "
+                            + MAX_CALLS_ENV + " to be a positive integer. "
+                            + "No live model call is allowed without an explicit budget.");
+        }
+    }
     /** 空实现：静态工具类不可实例化之外的守卫（供反射/序列化框架避免误用）。 */
     private static String trimmed(Map<String, String> env, String name) {
         String value = env.get(name);
