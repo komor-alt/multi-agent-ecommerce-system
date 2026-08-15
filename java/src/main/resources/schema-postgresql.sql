@@ -37,28 +37,24 @@ ALTER TABLE IF EXISTS orders
 --
 -- This is an explicit schema/migration step. Runtime probe code is read-only
 -- and will report a fallback if this migration has not been applied.
-DO $$
-DECLARE
-    current_embedding_type TEXT;
-BEGIN
-    IF to_regclass('products') IS NULL THEN
-        RETURN;
-    END IF;
+-- Add the column before normalizing its type so this remains idempotent
+-- for products tables created by JPA or a previous schema run.
+ALTER TABLE IF EXISTS products
+    ADD COLUMN IF NOT EXISTS embedding vector;
 
-    SELECT format_type(a.atttypid, a.atttypmod)
-      INTO current_embedding_type
-      FROM pg_attribute a
-      JOIN pg_class c ON c.oid = a.attrelid
-     WHERE c.relname = 'products'
-       AND a.attname = 'embedding'
-       AND a.attnum > 0
-       AND NOT a.attisdropped;
-
-    IF current_embedding_type IS NULL THEN
-        EXECUTE 'ALTER TABLE products ADD COLUMN embedding vector';
-    ELSIF current_embedding_type <> 'vector' THEN
-        EXECUTE 'ALTER TABLE products DROP COLUMN embedding';
-        EXECUTE 'ALTER TABLE products ADD COLUMN embedding vector';
-        EXECUTE 'UPDATE products SET embedding_provider = NULL, embedding_model = NULL, embedding_dimensions = NULL, embedding_content_hash = NULL';
-    END IF;
-END $$;
+-- PostgreSQL/pgvector accepts this as a no-op for an existing unbounded
+-- vector and normalizes legacy vector(8) (or another fixed dimension) to
+-- unbounded vector without dropping stored vectors.
+-- The USING expression also clears only old demo vectors that lack
+-- complete provenance metadata; complete metadata rows are preserved.
+ALTER TABLE IF EXISTS products
+    ALTER COLUMN embedding TYPE vector
+    USING CASE
+        WHEN embedding IS NOT NULL
+             AND (embedding_provider IS NULL
+                  OR embedding_model IS NULL
+                  OR embedding_dimensions IS NULL
+                  OR embedding_content_hash IS NULL)
+        THEN NULL::vector
+        ELSE embedding
+    END;
