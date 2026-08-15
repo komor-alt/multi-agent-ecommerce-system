@@ -46,6 +46,15 @@ agent:
     mode: ${ECOM_RECOMMEND_MODE:RULES}
     live-enabled: ${ECOM_RECOMMEND_LIVE_ENABLED:false}
     max-llm-calls: ${ECOM_RECOMMEND_MAX_LLM_CALLS:0}
+  embedding:
+    # Safe Qwen OpenAI-compatible defaults; every value remains environment-overridable.
+    provider: ${ECOM_EMBEDDING_PROVIDER:qwen}
+    base-url: ${ECOM_EMBEDDING_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
+    api-key: ${ECOM_EMBEDDING_API_KEY:}
+    model: ${ECOM_EMBEDDING_MODEL:text-embedding-v4}
+    dimensions: ${ECOM_EMBEDDING_DIMENSIONS:1024}
+    live-enabled: ${ECOM_EMBEDDING_LIVE_ENABLED:false}
+    max-calls: ${ECOM_EMBEDDING_MAX_CALLS:0}
   aftersales:
     # Shared per-run live-model budget; zero keeps aftersales cost-free by default.
     max-llm-calls: ${ECOM_AFTERSALES_MAX_LLM_CALLS:0}
