@@ -27,6 +27,10 @@ public class RecProductEntity {
     @Column(nullable = false, length = 16) private String status = "ACTIVE";
     @Column(name = "supported_countries", nullable = false, length = 255) private String supportedCountries;
     @Column(name = "recommendation_tags", nullable = false, length = 255) private String tags;
+    @Column(name = "embedding_provider", length = 64) private String embeddingProvider;
+    @Column(name = "embedding_model", length = 256) private String embeddingModel;
+    @Column(name = "embedding_dimensions") private Integer embeddingDimensions;
+    @Column(name = "embedding_content_hash", length = 64) private String embeddingContentHash;
     @Column(name = "created_at", nullable = false) private Instant createdAt;
     @Column(name = "updated_at", nullable = false) private Instant updatedAt;
     @PrePersist void createTimestamps() { if (id == null) id = java.util.UUID.randomUUID().toString(); if (createdAt == null) createdAt = Instant.now(); if (updatedAt == null) updatedAt = createdAt; }

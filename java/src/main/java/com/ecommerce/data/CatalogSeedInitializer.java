@@ -77,11 +77,13 @@ public class CatalogSeedInitializer implements ApplicationRunner {
     private void seedProducts() {
         List<Product> catalog = new ArrayList<>(DemoCatalogDataFactory.createCatalog());
         catalog.addAll(marketTestProducts());
-        for (Product product : catalog) {
-            if (productRepository.findByProductId(product.getProductId()).isEmpty()) {
-                productRepository.save(toEntity(product));
+        try (ProductEmbeddingService.SeedBatchScope ignored = semanticSearch.openSeedBatch()) {
+            for (Product product : catalog) {
+                if (productRepository.findByProductId(product.getProductId()).isEmpty()) {
+                    productRepository.save(toEntity(product));
+                }
+                semanticSearch.writeProductEmbedding(product.getProductId(), product);
             }
-            semanticSearch.writeEmbedding(product.getProductId(), embeddingText(product));
         }
     }
 
@@ -273,9 +275,5 @@ public class CatalogSeedInitializer implements ApplicationRunner {
         metadata.put("scene", scene);
         metadata.put("source", "demo_seed");
         return metadata;
-    }
-
-    private String embeddingText(Product product) {
-        return product.getName() + " " + product.getCategory() + " " + String.join(" ", product.getTags() == null ? List.of() : product.getTags());
     }
 }
