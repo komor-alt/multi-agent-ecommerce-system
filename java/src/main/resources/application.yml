@@ -49,7 +49,7 @@ agent:
   embedding:
     # Safe Qwen OpenAI-compatible defaults; every value remains environment-overridable.
     provider: ${ECOM_EMBEDDING_PROVIDER:qwen}
-    base-url: ${ECOM_EMBEDDING_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
+    base-url: ${ECOM_EMBEDDING_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode}
     api-key: ${ECOM_EMBEDDING_API_KEY:}
     model: ${ECOM_EMBEDDING_MODEL:text-embedding-v4}
     dimensions: ${ECOM_EMBEDDING_DIMENSIONS:1024}

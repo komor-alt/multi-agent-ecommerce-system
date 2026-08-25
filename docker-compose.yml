@@ -68,7 +68,7 @@ services:
       ECOM_LLM_BASE_URL: ${ECOM_LLM_BASE_URL:-https://api.deepseek.com}
       ECOM_LLM_MODEL: ${ECOM_LLM_MODEL:-deepseek-v4-flash}
       ECOM_EMBEDDING_PROVIDER: "${ECOM_EMBEDDING_PROVIDER:-qwen}"
-      ECOM_EMBEDDING_BASE_URL: "${ECOM_EMBEDDING_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
+      ECOM_EMBEDDING_BASE_URL: "${ECOM_EMBEDDING_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode}"
       ECOM_EMBEDDING_API_KEY: "${ECOM_EMBEDDING_API_KEY:-}"
       ECOM_EMBEDDING_MODEL: "${ECOM_EMBEDDING_MODEL:-text-embedding-v4}"
       ECOM_EMBEDDING_DIMENSIONS: "${ECOM_EMBEDDING_DIMENSIONS:-1024}"

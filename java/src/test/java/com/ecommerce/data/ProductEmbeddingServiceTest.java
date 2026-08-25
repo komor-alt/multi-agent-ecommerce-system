@@ -54,7 +54,7 @@ class ProductEmbeddingServiceTest {
         EmbeddingModel model = mock(EmbeddingModel.class);
         ProductEmbeddingService service = new ProductEmbeddingService(
                 "qwen",
-                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "https://dashscope.aliyuncs.com/compatible-mode",
                 "",
                 "text-embedding-v4",
                 1024,

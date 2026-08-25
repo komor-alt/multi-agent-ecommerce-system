@@ -45,7 +45,7 @@ Embedding 走现有 Spring AI OpenAI-compatible 依赖；默认选择 Qwen `text
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
 | `ECOM_EMBEDDING_PROVIDER` | `qwen` | Qwen 通过 OpenAI-compatible 协议接入 |
-| `ECOM_EMBEDDING_BASE_URL` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | live 时可覆盖，指向 provider 的 embeddings endpoint base URL |
+| `ECOM_EMBEDDING_BASE_URL` | `https://dashscope.aliyuncs.com/compatible-mode` | live 时可覆盖，指向 provider 的 embeddings endpoint base URL |
 | `ECOM_EMBEDDING_API_KEY` | 空 | live 时必填；不要提交到仓库 |
 | `ECOM_EMBEDDING_MODEL` | `text-embedding-v4` | 可通过环境变量覆盖 |
 | `ECOM_EMBEDDING_DIMENSIONS` | `1024` | 与默认模型配置匹配，可通过环境变量覆盖 |
