@@ -123,8 +123,9 @@ export function RecommendationConsole() {
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [copies, setCopies] = useState<Array<{ product_id: string; copy: string }>>([]);
   const [experimentGroup, setExperimentGroup] = useState("control");
-  const [executionMode, setExecutionMode] = useState<ExecutionMode>("gateway");
+  const [executionMode, setExecutionMode] = useState<ExecutionMode>("fixed");
   const [gatewayError, setGatewayError] = useState("");
+  const [gatewayAvailable, setGatewayAvailable] = useState(false);
   const [health, setHealth] = useState<{ ok: boolean; text: string; model: string }>({ ok: false, text: "检查中", model: "-" });
   const [tasks, setTasks] = useState<RecommendationTaskSummary[]>([]);
   const abortRef = useRef<AbortController | null>(null);
@@ -132,7 +133,15 @@ export function RecommendationConsole() {
 
   useEffect(() => {
     void checkHealth().then(setHealth);
-    void listRecommendationTasks().then((page) => setTasks(page.items)).catch(() => undefined);
+    void listRecommendationTasks()
+      .then((page) => {
+        setTasks(page.items);
+        setGatewayAvailable(true);
+      })
+      .catch(() => {
+        setGatewayAvailable(false);
+        setExecutionMode("fixed");
+      });
     return () => abortRef.current?.abort();
   }, []);
 
@@ -161,7 +170,7 @@ export function RecommendationConsole() {
     setExperimentGroup("分组中");
     setGatewayError("");
 
-    if (executionMode === "gateway") {
+    if (executionMode === "gateway" && gatewayAvailable) {
       try {
         const task = await createRecommendationTask({
           userId: form.user_id.trim() || "user_001",
@@ -253,9 +262,12 @@ export function RecommendationConsole() {
               <Form.Item label="推荐场景">
                 <Select value={activeScenario} options={scenarioOptions} onChange={applyScenario} />
               </Form.Item>
-              <Form.Item label="执行链路">
+              <Form.Item
+                label="执行链路"
+                extra={!gatewayAvailable ? "Gateway 需要 Nest :3000，本机未启动，已固定走 Java。" : undefined}
+              >
                 <Radio.Group value={executionMode} onChange={(event) => setExecutionMode(event.target.value)} optionType="button" buttonStyle="solid">
-                  <Radio.Button value="gateway">Gateway</Radio.Button>
+                  <Radio.Button value="gateway" disabled={!gatewayAvailable}>Gateway</Radio.Button>
                   <Radio.Button value="fixed">Fixed Workflow Baseline</Radio.Button>
                 </Radio.Group>
               </Form.Item>
@@ -463,7 +475,7 @@ function parseSseFrame(chunk: string): SseFrame | null {
 
 function handleStreamEvent(
   event: string,
-  data: Record<string, unknown>,
+  raw: Record<string, unknown>,
   setters: {
     setRun: React.Dispatch<React.SetStateAction<RunState>>;
     setProducts: React.Dispatch<React.SetStateAction<Product[]>>;
@@ -472,7 +484,8 @@ function handleStreamEvent(
     setExperimentGroup: React.Dispatch<React.SetStateAction<string>>;
   },
 ) {
-  const elapsed = numberValue(data.elapsed_ms);
+  const data = unwrapEventData(raw);
+  const elapsed = numberValue(data.elapsed_ms ?? data.elapsedMs ?? raw.elapsedMs);
   const processEvent = buildProcessEvent(event, data);
   setters.setRun((current) => ({
     ...current,
@@ -486,17 +499,19 @@ function handleStreamEvent(
 
   if (event === "agent.completed") {
     const key = stringValue(data.key);
-    const result = data.result as AgentResult;
-    if (key === "user_profile") setters.setProfile(result.profile || null);
-    if (key === "marketing_copy") setters.setCopies(result.copies || []);
+    const result = normalizeAgentResult(data.result);
+    if (key === "user_profile" || key === "get_user_profile") setters.setProfile(result.profile || null);
+    if (key === "marketing_copy" || key === "generate_localized_copy" || key === "generate_retention_copy") {
+      setters.setCopies(result.copies || []);
+    }
   }
 
   if (event === "run.completed") {
-    const response = data.response as RecommendationResponse;
+    const response = normalizeRecommendation(data.response);
     setters.setRun((current) => ({
       ...current,
       status: "done",
-      elapsedMs: numberValue(data.elapsed_ms) ?? current.elapsedMs,
+      elapsedMs: numberValue(data.elapsed_ms ?? data.elapsedMs ?? raw.elapsedMs) ?? current.elapsedMs,
     }));
     setters.setProducts(response.products || []);
     setters.setProfile(response.agent_results?.user_profile?.profile || null);
@@ -533,7 +548,7 @@ function buildProcessEvent(event: string, data: Record<string, unknown>): Proces
     return createProcessEvent(event, `${agentLabel(key)} ${success ? "完成" : "失败"}`, detail, success ? "done" : "error", elapsed);
   }
   if (event === "run.completed") {
-    const response = data.response as RecommendationResponse;
+    const response = normalizeRecommendation(data.response);
     const ids = (response.products || []).map((item) => item.product_id).join(" / ") || "无";
     return createProcessEvent(event, "最终答案已生成", `关键商品：${ids}。总耗时 ${Math.round(response.total_latency_ms || elapsed || 0)} ms。`, "done", elapsed);
   }
@@ -573,22 +588,114 @@ function agentLabel(key: string) {
   return labels[key] || key || "Agent";
 }
 
+function unwrapEventData(raw: Record<string, unknown>): Record<string, unknown> {
+  const inner = raw.data;
+  if (inner && typeof inner === "object" && !Array.isArray(inner)) {
+    return inner as Record<string, unknown>;
+  }
+  return raw;
+}
+
+function normalizeAgentResult(value: unknown): AgentResult {
+  const raw = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  const nested = raw.data && typeof raw.data === "object" ? raw.data as Record<string, unknown> : {};
+  const profile = normalizeProfile(raw.profile || nested.profile);
+  const copies = normalizeCopies(raw.copies || nested.copies);
+  return {
+    agent_name: stringValue(raw.agent_name ?? raw.agentName),
+    success: raw.success !== false,
+    latency_ms: numberValue(raw.latency_ms ?? raw.latencyMs) || 0,
+    error: stringValue(raw.error) || null,
+    data: nested,
+    profile,
+    products: normalizeProducts(raw.products || nested.products),
+    copies,
+    available_products: Array.isArray(raw.available_products || nested.available_products)
+      ? (raw.available_products || nested.available_products) as string[]
+      : [],
+  };
+}
+
+function normalizeRecommendation(value: unknown): RecommendationResponse {
+  const raw = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  const agentResultsRaw = (raw.agent_results || raw.agentResults || {}) as Record<string, unknown>;
+  const agent_results: Record<string, AgentResult> = {};
+  Object.entries(agentResultsRaw).forEach(([key, item]) => {
+    agent_results[key] = normalizeAgentResult(item);
+  });
+  return {
+    request_id: stringValue(raw.request_id ?? raw.requestId),
+    user_id: stringValue(raw.user_id ?? raw.userId),
+    products: normalizeProducts(raw.products),
+    marketing_copies: normalizeCopies(raw.marketing_copies || raw.marketingCopies),
+    experiment_group: stringValue(raw.experiment_group ?? raw.experimentGroup) || "control",
+    agent_results,
+    total_latency_ms: numberValue(raw.total_latency_ms ?? raw.totalLatencyMs) || 0,
+  };
+}
+
+function normalizeProducts(value: unknown): Product[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => {
+    const raw = (item && typeof item === "object" ? item : {}) as Record<string, unknown>;
+    return {
+      product_id: stringValue(raw.product_id ?? raw.productId) || "unknown",
+      name: stringValue(raw.name) || "-",
+      category: stringValue(raw.category) || "-",
+      price: numberValue(raw.price) || 0,
+      brand: stringValue(raw.brand) || undefined,
+      seller_id: stringValue(raw.seller_id ?? raw.sellerId) || undefined,
+      stock: numberValue(raw.stock) || 0,
+      tags: Array.isArray(raw.tags) ? raw.tags.map(String) : [],
+      score: numberValue(raw.score),
+    };
+  });
+}
+
+function normalizeCopies(value: unknown): Array<{ product_id: string; copy: string }> {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => {
+    const raw = (item && typeof item === "object" ? item : {}) as Record<string, unknown>;
+    return {
+      product_id: stringValue(raw.product_id ?? raw.productId) || "unknown",
+      copy: stringValue(raw.copy) || "",
+    };
+  });
+}
+
+function normalizeProfile(value: unknown): UserProfile | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  return {
+    user_id: stringValue(raw.user_id ?? raw.userId),
+    segments: Array.isArray(raw.segments) ? raw.segments.map(String) : [],
+    preferred_categories: Array.isArray(raw.preferred_categories || raw.preferredCategories)
+      ? (raw.preferred_categories || raw.preferredCategories) as string[]
+      : [],
+    price_range: Array.isArray(raw.price_range || raw.priceRange)
+      ? (raw.price_range || raw.priceRange) as number[]
+      : [],
+    rfm_score: (raw.rfm_score || raw.rfmScore || {}) as Record<string, number>,
+    real_time_tags: (raw.real_time_tags || raw.realTimeTags || {}) as Record<string, unknown>,
+  };
+}
+
 function buildPayload(form: Scenario) {
   return {
-    user_id: form.user_id.trim() || "user_001",
+    userId: form.user_id.trim() || "user_001",
     scene: form.scene,
-    num_items: Number(form.num_items || 5),
+    numItems: Number(form.num_items || 5),
+    platform: "shopify",
+    region: "SEA",
+    country: "SG",
+    locale: "en-SG",
+    currency: "SGD",
     context: {
       recent_views: splitList(form.recent_views),
       purchase_count_30d: Number(form.purchase_count_30d || 0),
       avg_order_amount: Number(form.avg_order_amount || 0),
       note: form.note.trim(),
       active_hours: [20, 21, 22],
-      platform: "shopify",
-      region: "SEA",
-      country: "SG",
-      locale: "en-SG",
-      currency: "SGD",
     },
   };
 }

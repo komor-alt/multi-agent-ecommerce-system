@@ -46,6 +46,9 @@ agent:
     mode: ${ECOM_RECOMMEND_MODE:RULES}
     live-enabled: ${ECOM_RECOMMEND_LIVE_ENABLED:false}
     max-llm-calls: ${ECOM_RECOMMEND_MAX_LLM_CALLS:0}
+  supervisor:
+    # Only the supervisor router spends this budget. Specialists stay RULES.
+    max-llm-calls: ${ECOM_SUPERVISOR_MAX_LLM_CALLS:${ECOM_RECOMMEND_MAX_LLM_CALLS:0}}
   embedding:
     # Safe Qwen OpenAI-compatible defaults; every value remains environment-overridable.
     provider: ${ECOM_EMBEDDING_PROVIDER:qwen}

@@ -6,9 +6,12 @@ import com.ecommerce.agent.ProductRecAgent;
 import com.ecommerce.agent.UserProfileAgent;
 import com.ecommerce.data.RecommendationDataService;
 import com.ecommerce.data.entity.RecInventoryEntity;
+import com.ecommerce.model.AgentId;
 import com.ecommerce.model.AgentResult;
+import com.ecommerce.model.BlackboardField;
 import com.ecommerce.model.EvidenceRecord;
 import com.ecommerce.model.Product;
+import com.ecommerce.model.VetoRecord;
 import com.ecommerce.model.RecommendationRequest;
 import com.ecommerce.model.RecommendationResponse;
 import com.ecommerce.model.ToolObservation;
@@ -239,9 +242,17 @@ public class RecommendationPipelineExecutor {
     }
 
     public List<Product> filterAvailableProducts(List<Product> rankedProducts, Set<String> availableIds, int numItems) {
+        return filterAvailableProducts(rankedProducts, availableIds, Set.of(), numItems);
+    }
+
+    public List<Product> filterAvailableProducts(
+            List<Product> rankedProducts, Set<String> availableIds, Set<String> vetoedIds, int numItems) {
         List<Product> ranked = rankedProducts == null ? List.of() : rankedProducts;
         Set<String> available = availableIds == null ? Set.of() : availableIds;
-        return ranked.stream().filter(product -> available.contains(product.getProductId()))
+        Set<String> vetoed = vetoedIds == null ? Set.of() : vetoedIds;
+        return ranked.stream()
+                .filter(product -> available.contains(product.getProductId()))
+                .filter(product -> !vetoed.contains(product.getProductId()))
                 .limit(Math.max(0, numItems)).collect(Collectors.toList());
     }
 
@@ -261,16 +272,21 @@ public class RecommendationPipelineExecutor {
             case LOAD_CAMPAIGN_CONSTRAINTS ->
                     base.put("campaignId", String.valueOf(context.getRequest().getContext() == null
                             ? "default" : context.getRequest().getContext().getOrDefault("campaign_id", "default")));
-            case SEARCH_PRODUCTS ->
+            case SEARCH_PRODUCTS -> {
                     base.put("numItems", context.getRequest().getNumItems() * 2);
+                    base.put("vetoRound", context.getRecallAfterVetoCount());
+                    base.put("vetoedProductIds", context.vetoedProductIds());
+            }
             case CHECK_FULFILLMENT ->
                     base.put("candidateCount", context.getRawProducts() == null ? 0 : context.getRawProducts().size());
             case RERANK_PRODUCTS -> {
                 base.put("numItems", context.getRequest().getNumItems());
                 base.put("hasProfile", context.getProfile() != null);
             }
-            case CHECK_INVENTORY ->
+            case CHECK_INVENTORY -> {
                     base.put("productCount", context.getRawProducts() == null ? 0 : context.getRawProducts().size());
+                    base.put("vetoRound", context.getRecallAfterVetoCount());
+            }
             case FILTER_PRODUCTS -> {
                 base.put("rankedProductCount", context.getRankedProducts() == null ? 0 : context.getRankedProducts().size());
                 base.put("availableCount", context.getAvailableIds() == null ? 0 : context.getAvailableIds().size());
@@ -484,10 +500,18 @@ public class RecommendationPipelineExecutor {
                     .data(data).confidence(vectorUsed ? 0.9 : 0.82).build();
         }
         ensureSuccess(result);
+        if (context.hasUnhandledVeto()) {
+            context.incrementRecallAfterVetoCount();
+            context.clearAfterRerecall();
+            context.markVetoesHandled();
+        }
         context.putAgentResult(CROSS_BORDER_RECALL_RESULT, result);
         context.putDataSource("productRecall", source);
+        Set<String> vetoed = context.vetoedProductIds();
         List<Product> filtered = extractProducts(result, List.of()).stream()
-                .filter(product -> marketEligible(product, context.getRequest())).toList();
+                .filter(product -> marketEligible(product, context.getRequest()))
+                .filter(product -> !vetoed.contains(product.getProductId()))
+                .toList();
         context.setRawProducts(filtered);
         List<String> evidenceIds = filtered.stream()
                 .map(product -> "product:" + product.getProductId()).toList();
@@ -513,7 +537,8 @@ public class RecommendationPipelineExecutor {
         context.setRankedProducts(extractProducts(result, context.getRawProducts()));
         if (context.getAvailableIds() != null) {
             context.setFinalProducts(filterAvailableProducts(
-                    context.getRankedProducts(), context.getAvailableIds(), context.getRequest().getNumItems()));
+                    context.getRankedProducts(), context.getAvailableIds(), context.vetoedProductIds(),
+                    context.getRequest().getNumItems()));
         }
         List<String> rankedIds = context.getRankedProducts() == null ? List.of()
                 : context.getRankedProducts().stream().map(Product::getProductId).toList();
@@ -572,16 +597,30 @@ public class RecommendationPipelineExecutor {
         context.setAvailableIds(extractAvailableIds(result));
         context.putDataSource("inventory", source);
         List<String> available = context.getAvailableIds().stream().toList();
+        List<String> rejected = products.stream()
+                .map(Product::getProductId)
+                .filter(id -> !context.getAvailableIds().contains(id))
+                .distinct()
+                .toList();
+        if (!rejected.isEmpty()) {
+            context.write(AgentId.CONSTRAINT, BlackboardField.VETOES, VetoRecord.builder()
+                    .source(AgentId.CONSTRAINT)
+                    .productIds(rejected)
+                    .reason("inventory_unavailable")
+                    .build());
+        }
         List<String> evidenceIds = available.stream()
                 .map(id -> "inventory:" + context.getRequest().countryOrDefault() + ":" + id).toList();
         context.addEvidenceIds(evidenceIds);
         Map<String, Object> observationData = new LinkedHashMap<>();
         observationData.put("availableProductIds", available);
+        observationData.put("vetoedProductIds", rejected);
         observationData.put("source", source);
         observationData.put("crossBorder", crossBorderState(context.getRequest()));
         return ToolObservation.builder().toolName(CHECK_INVENTORY)
                 .summary("Country inventory kept " + available.size() + " products for "
-                        + context.getRequest().countryOrDefault() + " from " + source)
+                        + context.getRequest().countryOrDefault() + " from " + source
+                        + (rejected.isEmpty() ? "" : "; vetoed " + rejected))
                 .data(observationData).evidenceIds(evidenceIds).build();
     }
 
@@ -595,7 +634,7 @@ public class RecommendationPipelineExecutor {
 
     private ToolObservation filterProducts(RecommendationPipelineState context) {
         context.setFinalProducts(filterAvailableProducts(context.getRankedProducts(), context.getAvailableIds(),
-                context.getRequest().getNumItems()));
+                context.vetoedProductIds(), context.getRequest().getNumItems()));
         List<String> productIds = context.getFinalProducts().stream().map(Product::getProductId).toList();
         return ToolObservation.builder().toolName(FILTER_PRODUCTS)
                 .summary("Selected final fulfillment-safe products: " + productIds)
@@ -608,7 +647,12 @@ public class RecommendationPipelineExecutor {
         ensureSuccess(result);
         String resultKey = retention ? RETENTION_MARKETING_COPY_RESULT : LOCALIZED_MARKETING_COPY_RESULT;
         context.putAgentResult(resultKey, result);
-        context.setCopies(extractCopies(result));
+        Set<String> allowed = context.getFinalProducts() == null ? Set.of()
+                : context.getFinalProducts().stream().map(Product::getProductId).collect(Collectors.toSet());
+        List<Map<String, String>> copies = extractCopies(result).stream()
+                .filter(copy -> allowed.contains(copy.getOrDefault("product_id", "")))
+                .toList();
+        context.setCopies(copies);
         List<String> evidenceIds = context.getCopies().stream()
                 .map(copy -> "copy:" + copy.getOrDefault("product_id", "unknown")).toList();
         context.addEvidenceIds(evidenceIds);

@@ -1,7 +1,10 @@
 package com.ecommerce.service;
 
 import com.ecommerce.model.AgentActionDecision;
+import com.ecommerce.model.AgentId;
 import com.ecommerce.model.AgentLoopResponse;
+import com.ecommerce.model.AgentMessage;
+import com.ecommerce.model.AgentMessageType;
 import com.ecommerce.model.EvidenceRecord;
 import com.ecommerce.model.RecommendationRequest;
 import com.ecommerce.model.RecommendationPlan;
@@ -43,16 +46,16 @@ public class AutonomousAgentLoopService {
     private final ChatClient chatClient;
     private final ScenePathEnforcer scenePathEnforcer;
     private final RecommendationModeResolver modeResolver;
+    private final SupervisorLlmClient supervisorLlmClient;
     private final ObjectMapper objectMapper = new ObjectMapper();
-    @Value("$" + "{agent.recommend.max-llm-calls:0}")
-    private int configuredMaxLlmCalls = 0;
+    private final int configuredMaxLlmCalls;
 
     public AutonomousAgentLoopService(
             RecommendationPipelineExecutor pipelineExecutor,
             ABTestService abTestService,
             ChatClient.Builder chatClientBuilder) {
         this(pipelineExecutor, abTestService, chatClientBuilder, new ScenePathEnforcer(),
-                new RecommendationModeResolver("RULES", ""));
+                new RecommendationModeResolver("RULES", ""), 0, null);
     }
 
     @Autowired
@@ -61,12 +64,33 @@ public class AutonomousAgentLoopService {
             ABTestService abTestService,
             ChatClient.Builder chatClientBuilder,
             ScenePathEnforcer scenePathEnforcer,
-            RecommendationModeResolver modeResolver) {
+            RecommendationModeResolver modeResolver,
+            @Value("${agent.supervisor.max-llm-calls:0}") int supervisorMaxLlmCalls) {
+        this(pipelineExecutor, abTestService, chatClientBuilder, scenePathEnforcer, modeResolver,
+                supervisorMaxLlmCalls, null);
+    }
+
+    public AutonomousAgentLoopService(
+            RecommendationPipelineExecutor pipelineExecutor,
+            ABTestService abTestService,
+            ChatClient.Builder chatClientBuilder,
+            ScenePathEnforcer scenePathEnforcer,
+            RecommendationModeResolver modeResolver,
+            int supervisorMaxLlmCalls,
+            SupervisorLlmClient supervisorLlmClient) {
         this.pipelineExecutor = pipelineExecutor;
         this.abTestService = abTestService;
         this.chatClient = chatClientBuilder.build();
         this.scenePathEnforcer = scenePathEnforcer;
         this.modeResolver = modeResolver;
+        this.configuredMaxLlmCalls = Math.max(0, supervisorMaxLlmCalls);
+        this.supervisorLlmClient = supervisorLlmClient != null
+                ? supervisorLlmClient
+                : (systemPrompt, userPrompt) -> this.chatClient.prompt()
+                        .system(systemPrompt)
+                        .user(userPrompt)
+                        .call()
+                        .content();
     }
 
     public AgentLoopResponse run(ToolLoopRequest loopRequest) {
@@ -99,8 +123,18 @@ public class AutonomousAgentLoopService {
             AgentActionDecision decision = plan(context, observations, evidences, config, step);
             thoughts.add(decision.getThought() == null ? "" : decision.getThought());
             String action = scenePathEnforcer.canonicalTool(decision.getAction());
+            AgentId assigned = scenePathEnforcer.agentForTool(action);
+            context.addMessage(AgentMessage.builder()
+                    .type(AgentMessageType.ASSIGN)
+                    .from(AgentId.SUPERVISOR)
+                    .to(assigned)
+                    .summary(decision.getThought())
+                    .payload(Map.of("step", step, "tool", action))
+                    .build());
+            emit(eventSink, context, eventSequence, "model_completed", "agent.assigned", "success",
+                    "Assigned " + assigned, Map.of("step", step, "agent", assigned.name(), "tool", action), start);
             emit(eventSink, context, eventSequence, "model_completed", "planner.decision", "success",
-                    decision.getThought(), Map.of("step", step, "action", action), start);
+                    decision.getThought(), Map.of("step", step, "action", action, "agent", assigned.name()), start);
 
             if (!config.getToolWhitelist().contains(action)) {
                 toolCalls.add(blockedCall(step, action, "tool is not in whitelist"));
@@ -149,6 +183,20 @@ public class AutonomousAgentLoopService {
                 for (EvidenceRecord evidence : execution.evidences()) {
                     evidences.put(evidence.getEvidenceId(), evidence);
                 }
+                Object vetoed = execution.observation().getData() == null
+                        ? List.of() : execution.observation().getData().getOrDefault("vetoedProductIds", List.of());
+                if (vetoed instanceof List<?> vetoedIds && !vetoedIds.isEmpty()) {
+                    context.addMessage(AgentMessage.builder()
+                            .type(AgentMessageType.VETO)
+                            .from(AgentId.CONSTRAINT)
+                            .to(AgentId.SUPERVISOR)
+                            .summary("Vetoed unavailable products")
+                            .payload(Map.of("productIds", vetoedIds))
+                            .build());
+                    emit(eventSink, context, eventSequence, "model_completed", "agent.vetoed", "success",
+                            "Constraint vetoed " + vetoedIds, Map.of("step", step, "agent", AgentId.CONSTRAINT.name(),
+                                    "productIds", vetoedIds), start);
+                }
             }
             if ("failed".equals(execution.record().getStatus())) {
                 status = "failed";
@@ -174,6 +222,8 @@ public class AutonomousAgentLoopService {
                                     "latencyMs", plan.getMetrics().getLatencyMs()),
                             "dataSources", context.getDataSources()), start);
         }
+        Map<String, Object> llmMetrics = new LinkedHashMap<>(context.getLlmBudget().snapshot());
+        llmMetrics.put("invalidAgentSelections", context.getInvalidAgentSelections());
         return AgentLoopResponse.builder()
                 .runId(context.getRunId())
                 .status(status)
@@ -185,7 +235,7 @@ public class AutonomousAgentLoopService {
                 .observations(observations)
                 .evidences(new ArrayList<>(evidences.values()))
                 .totalLatencyMs((System.nanoTime() - start) / 1_000_000.0)
-                .llmMetrics(context.getLlmBudget().snapshot())
+                .llmMetrics(llmMetrics)
                 .build();
     }
 
@@ -204,70 +254,74 @@ public class AutonomousAgentLoopService {
             Map<String, EvidenceRecord> evidences,
             ToolLoopConfig config, int step) {
         AgentActionDecision fallback = fallbackDecision(context);
+        AgentId fallbackAgent = scenePathEnforcer.expectedNextAgent(context.getRequest().getScene(), context);
         if (!modeResolver.llmEnabled()) {
             return fallback;
         }
-        if (context.getLlmBudget() != null && !context.getLlmBudget().tryAcquire("recommendation_planner", context.getRunId() + ":planner:" + step)) {
+        if (context.getLlmBudget() != null
+                && !context.getLlmBudget().tryAcquire("supervisor", context.getRunId() + ":supervisor:" + step)) {
             return fallback;
         }
-try {
-            String response = chatClient.prompt()
-                    .system(plannerSystemPrompt(config))
-                    .user(plannerUserPrompt(context, observations, evidences))
-                    .call()
-                    .content();
-            AgentActionDecision proposed = parseDecision(response);
-            String canonicalAction = scenePathEnforcer.canonicalTool(proposed.getAction());
-            if (!scenePathEnforcer.isExpectedStep(context.getRequest().getScene(), canonicalAction, context)) {
+        try {
+            String response = supervisorLlmClient.complete(
+                    supervisorSystemPrompt(),
+                    supervisorUserPrompt(context, observations, evidences));
+            AgentId proposed = parseAgentId(response);
+            String needed = scenePathEnforcer.expectedNextStep(context.getRequest().getScene(), context);
+            if (!ownsNeededTool(proposed, needed)) {
+                context.recordInvalidAgentSelection(proposed, fallbackAgent, "does_not_own_next_tool");
                 return fallback;
             }
-            return AgentActionDecision.builder()
-                    .thought(proposed.getThought())
-                    .action(canonicalAction)
-                    .arguments(proposed.getArguments() == null ? Map.of() : proposed.getArguments())
-                    .finalAnswer(proposed.getFinalAnswer())
-                    .evidenceIds(proposed.getEvidenceIds() == null ? List.of() : proposed.getEvidenceIds())
-                    .build();
+            return decision("Supervisor selected " + proposed, needed);
         } catch (Exception ignored) {
+            context.recordInvalidAgentSelection(null, fallbackAgent, "supervisor_llm_failed");
             return fallback;
         }
     }
 
-    private String plannerSystemPrompt(ToolLoopConfig config) {
-        return """
-                You are a bounded cross-border ecommerce recommendation agent planner.
-                Choose exactly one next action from the tool whitelist.
-                Return JSON only:
-                {"thought":"brief reason","action":"tool_name","arguments":{},"finalAnswer":"","evidenceIds":[]}
-
-                Rules:
-                - Use only canonical tools: search_products, check_fulfillment, check_inventory, rerank, and scene-specific copy.
-                - Never call tools outside the whitelist.
-                - Follow the server-provided scenePath and expectedNextAction. Different scenes require different evidence.
-                - Do not invent product IDs, warehouse fields, country support, currency, locale, or evidence IDs.
-                - Arguments are advisory; the server will rebuild trusted userId, platform, region, country, locale, and currency.
-                Tool whitelist: %s
-                """.formatted(config.getToolWhitelist());
+    private boolean ownsNeededTool(AgentId proposed, String needed) {
+        if (proposed == null) {
+            return false;
+        }
+        return proposed == scenePathEnforcer.agentForTool(needed);
     }
 
-    private String plannerUserPrompt(
+    private String supervisorSystemPrompt() {
+        return """
+                You are the supervisor of a bounded recommendation team.
+                Choose exactly one next specialist. Return JSON only:
+                {"thought":"brief reason","agent":"RECALL|CONSTRAINT|COPY|SUPERVISOR"}
+
+                Roles:
+                - RECALL: profile, recent orders, product search, rerank
+                - CONSTRAINT: campaign constraints, fulfillment, inventory
+                - COPY: localized or retention copy
+                - SUPERVISOR: finish only when required evidence is complete
+                Do not invent product IDs, countries, currency, or evidence IDs.
+                """;
+    }
+
+    private String supervisorUserPrompt(
             RecommendationPipelineState context,
             List<ToolObservation> observations,
             Map<String, EvidenceRecord> evidences) {
         Map<String, Object> state = new LinkedHashMap<>();
         state.put("request", pipelineExecutor.crossBorderState(context.getRequest()));
-        state.put("goal", "Produce a market-safe RecommendationPlan for the requested scene and user.");
+        state.put("goal", "Assign the specialist who can produce the next required evidence.");
         state.put("requiredCapabilities", scenePathEnforcer.requiredCapabilities(context.getRequest().getScene()));
         state.put("optionalCapabilities", scenePathEnforcer.optionalCapabilities(context.getRequest().getScene()));
         state.put("completionConditions", scenePathEnforcer.completionConditions(context.getRequest().getScene()));
-        state.put("scenePath", scenePathEnforcer.pathFor(context.getRequest().getScene()));
-        state.put("expectedNextAction", scenePathEnforcer.expectedNextStep(context.getRequest().getScene(), context));
+        state.put("recommendedPath", scenePathEnforcer.recommendedPath(context.getRequest().getScene()));
+        state.put("expectedNextAgent", scenePathEnforcer.expectedNextAgent(context.getRequest().getScene(), context).name());
+        state.put("expectedNextTool", scenePathEnforcer.expectedNextStep(context.getRequest().getScene(), context));
         state.put("hasProfile", context.getProfile() != null);
         state.put("rawProductCount", context.getRawProducts() == null ? 0 : context.getRawProducts().size());
         state.put("rankedProductCount", context.getRankedProducts() == null ? 0 : context.getRankedProducts().size());
         state.put("hasInventory", context.getAvailableIds() != null);
         state.put("finalProductCount", context.getFinalProducts() == null ? 0 : context.getFinalProducts().size());
         state.put("copyCount", context.getCopies() == null ? 0 : context.getCopies().size());
+        state.put("unhandledVeto", context.hasUnhandledVeto());
+        state.put("invalidAgentSelections", context.getInvalidAgentSelections());
         state.put("observations", observations);
         state.put("knownEvidenceIds", evidences.keySet());
         state.put("dataSources", context.getDataSources());
@@ -275,6 +329,27 @@ try {
             return objectMapper.writeValueAsString(state);
         } catch (Exception e) {
             return state.toString();
+        }
+    }
+
+    private AgentId parseAgentId(String raw) throws Exception {
+        String cleaned = raw == null ? "" : raw.trim();
+        if (cleaned.startsWith("```")) {
+            cleaned = cleaned.substring(cleaned.indexOf('\n') + 1);
+            cleaned = cleaned.substring(0, cleaned.lastIndexOf("```"));
+        }
+        Map<String, Object> data = objectMapper.readValue(cleaned, new TypeReference<>() {});
+        Object agent = data.get("agent");
+        if (agent == null) {
+            agent = data.get("nextAgent");
+        }
+        if (agent == null) {
+            return null;
+        }
+        try {
+            return AgentId.valueOf(String.valueOf(agent).trim().toUpperCase());
+        } catch (IllegalArgumentException ignored) {
+            return null;
         }
     }
 
@@ -361,6 +436,12 @@ try {
                 .toList();
         if (!missing.isEmpty()) {
             return blockedCall(sequence, RecommendationPipelineExecutor.FINAL_ACTION, "invalid_evidence_ids: " + missing);
+        }
+        Set<String> vetoed = context.vetoedProductIds();
+        if (context.getFinalProducts() != null && !vetoed.isEmpty()) {
+            context.setFinalProducts(context.getFinalProducts().stream()
+                    .filter(product -> !vetoed.contains(product.getProductId()))
+                    .toList());
         }
         return ToolCallRecord.builder()
                 .sequence(sequence)
@@ -492,5 +573,10 @@ try {
             ToolObservation observation,
             List<EvidenceRecord> evidences
     ) {
+    }
+
+    @FunctionalInterface
+    public interface SupervisorLlmClient {
+        String complete(String systemPrompt, String userPrompt);
     }
 }

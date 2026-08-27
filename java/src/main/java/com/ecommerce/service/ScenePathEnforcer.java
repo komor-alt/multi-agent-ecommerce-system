@@ -1,5 +1,7 @@
 package com.ecommerce.service;
 
+import com.ecommerce.model.AgentId;
+
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -90,6 +92,51 @@ public class ScenePathEnforcer {
         return SCENE_PATHS.get(normalizeScene(scene));
     }
 
+    /** Recommended tool order for a scene. Not a hard next-tool lock for specialists. */
+    public List<String> recommendedPath(String scene) {
+        return pathFor(scene);
+    }
+
+    public List<String> toolsFor(AgentId agent) {
+        if (agent == null) {
+            return List.of();
+        }
+        return switch (agent) {
+            case RECALL -> List.of(GET_USER_PROFILE, GET_RECENT_ORDERS, SEARCH_PRODUCTS, RERANK);
+            case CONSTRAINT -> List.of(LOAD_CAMPAIGN_CONSTRAINTS, CHECK_FULFILLMENT, CHECK_INVENTORY);
+            case COPY -> List.of(GENERATE_LOCALIZED_COPY, GENERATE_RETENTION_COPY);
+            case SUPERVISOR -> List.of(FINAL_ACTION);
+        };
+    }
+
+    /**
+     * RULES fallback for supervisor routing. Owner of {@link #expectedNextStep} unless
+     * an unhandled veto still has a re-recall slot.
+     */
+    public AgentId expectedNextAgent(String scene, RecommendationPipelineState context) {
+        if (context != null && context.hasUnhandledVeto() && context.getRecallAfterVetoCount() < 1) {
+            return AgentId.RECALL;
+        }
+        return agentForTool(expectedNextStep(scene, context));
+    }
+
+    public AgentId agentForTool(String tool) {
+        String canonical = canonicalTool(tool);
+        if (FINAL_ACTION.equals(canonical)) {
+            return AgentId.SUPERVISOR;
+        }
+        for (AgentId agent : List.of(AgentId.RECALL, AgentId.CONSTRAINT, AgentId.COPY)) {
+            if (toolsFor(agent).contains(canonical)) {
+                return agent;
+            }
+        }
+        return AgentId.SUPERVISOR;
+    }
+
+    public boolean isToolAllowedFor(AgentId agent, String tool) {
+        return toolsFor(agent).contains(canonicalTool(tool));
+    }
+
     public SceneContract contractFor(String scene) {
         return CONTRACTS.get(normalizeScene(scene));
     }
@@ -139,6 +186,9 @@ public class ScenePathEnforcer {
 
     /** State-driven next action: required capabilities are checked one by one. */
     public String expectedNextStep(String scene, RecommendationPipelineState context) {
+        if (context != null && context.hasUnhandledVeto() && context.getRecallAfterVetoCount() < 1) {
+            return SEARCH_PRODUCTS;
+        }
         List<String> path = pathFor(scene);
         Map<String, Boolean> completed = completionMap(scene, context);
         for (String tool : path) {

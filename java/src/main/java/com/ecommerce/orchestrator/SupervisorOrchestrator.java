@@ -169,9 +169,14 @@ public class SupervisorOrchestrator {
                 .totalLatencyMs(totalLatency)
                 .build();
 
+        Map<String, Object> completed = new LinkedHashMap<>();
+        completed.put("product_count", finalProducts.size());
+        completed.put("copy_count", copies.size());
+        completed.put("total_latency_ms", totalLatency);
+        completed.put("response", response);
         emit(eventSink, requestId, sequence, "run_completed", "run.completed", "success",
                 "Final cross-border recommendation generated",
-                mergeContext(request, Map.of("product_count", finalProducts.size(), "copy_count", copies.size(), "total_latency_ms", totalLatency)),
+                mergeContext(request, completed),
                 start);
         return response;
     }
@@ -183,6 +188,7 @@ public class SupervisorOrchestrator {
         data.put("success", result.isSuccess());
         data.put("latency_ms", result.getLatencyMs());
         data.put("confidence", result.getConfidence());
+        data.put("result", result);
         if (result.getError() != null) {
             data.put("error", result.getError());
         }
