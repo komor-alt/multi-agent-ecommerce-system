@@ -64,6 +64,10 @@ def aggregate_guard_metrics(events: list[GuardEvent]) -> dict[str, Any]:
         - tool_rejections, confirmation_blocks, auth_blocks, fallbacks
         - allowed_mutations (TOOL_ALLOWED on a MUTATION tool)
     """
+    # Lazy import avoids metrics -> tool_guard -> agent_state -> metrics while
+    # agent_state is still importing GuardEvent from this module.
+    from ecommerce_tau3.tool_guard import OFFICIAL_RETAIL_TOOL_TYPES
+
     counts: dict[str, int] = {
         "guard_events": len(events),
         "tool_rejections": 0,
@@ -81,7 +85,11 @@ def aggregate_guard_metrics(events: list[GuardEvent]) -> dict[str, Any]:
             counts["auth_blocks"] += 1
         elif event.type == GuardEventType.FALLBACK:
             counts["fallbacks"] += 1
-        elif event.type == GuardEventType.TOOL_ALLOWED and event.tool:
+        elif (
+            event.type == GuardEventType.TOOL_ALLOWED
+            and event.tool
+            and OFFICIAL_RETAIL_TOOL_TYPES.get(event.tool) == "write"
+        ):
             counts["allowed_mutations"] += 1
     return counts
 
@@ -100,19 +108,33 @@ def summarize_results(df) -> dict[str, Any]:
     numbers (missing data -> None, reported as "unavailable").
     """
     if df is None or len(df) == 0:
-        return {"tasks": 0, "trials": 0, "reward": None, "success_rate": None}
+        return {
+            "tasks": 0,
+            "trials": 0,
+            "evaluated_tasks": 0,
+            "evaluated_trials": 0,
+            "infrastructure_errors": 0,
+            "reward": None,
+            "success_rate": None,
+        }
 
-    rewards = df["reward"].dropna()
+    evaluated = df[df["reward"].notna()]
+    rewards = evaluated["reward"]
     summary = {
         "tasks": int(df["task_id"].nunique()),
         "trials": int(len(df)),
+        "evaluated_tasks": int(evaluated["task_id"].nunique()),
+        "evaluated_trials": int(len(evaluated)),
+        "infrastructure_errors": int(len(df) - len(evaluated)),
         "reward": float(rewards.mean()) if len(rewards) else None,
         "success_rate": (
-            float((df["reward"] == 1.0).mean()) if len(df) else None
+            float((rewards == 1.0).mean()) if len(rewards) else None
         ),
         "avg_tool_calls": None,  # computed by caller from messages if available
         "avg_turns": (
-            float(df["num_messages"].mean()) if "num_messages" in df.columns else None
+            float(evaluated["num_messages"].mean())
+            if len(evaluated) and "num_messages" in evaluated.columns
+            else None
         ),
     }
     return summary

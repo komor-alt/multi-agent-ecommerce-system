@@ -6,6 +6,7 @@ import org.springframework.stereotype.Service;
 import java.util.Map;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @Service
 public class AgentConcurrencyGuard {
@@ -35,6 +36,9 @@ public class AgentConcurrencyGuard {
         runSemaphore.release();
     }
 
+    public int activeRunCount() { return activeRuns.get(); }
+    public int capacity() { return maxConcurrentRuns; }
+
     public Map<String, Object> snapshot() {
         return Map.of(
                 "max_concurrent_runs", maxConcurrentRuns,
@@ -49,7 +53,7 @@ public class AgentConcurrencyGuard {
         private final String requestType;
         private final boolean acquired;
         private final String rejectReason;
-        private boolean closed;
+        private final AtomicBoolean closed = new AtomicBoolean();
 
         private GuardLease(AgentConcurrencyGuard owner, String requestType, boolean acquired, String rejectReason) {
             this.owner = owner;
@@ -80,8 +84,7 @@ public class AgentConcurrencyGuard {
 
         @Override
         public void close() {
-            if (acquired && !closed) {
-                closed = true;
+            if (acquired && closed.compareAndSet(false, true)) {
                 owner.release();
             }
         }

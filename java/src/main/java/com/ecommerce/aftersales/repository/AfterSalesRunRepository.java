@@ -2,14 +2,25 @@ package com.ecommerce.aftersales.repository;
 
 import com.ecommerce.aftersales.entity.AfterSalesRunEntity;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.transaction.annotation.Transactional;
+import jakarta.persistence.LockModeType;
 
 import java.time.Instant;
+import java.util.Optional;
 
 public interface AfterSalesRunRepository extends JpaRepository<AfterSalesRunEntity, String> {
+
+    /**
+     * 事件序号分配锁：锁定父 run 后再读取最大 sequence，使多个应用实例对同一 run
+     * 的 append 串行化。事件表上的 (run_id, sequence) 唯一约束是最后一道防线。
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select run from AfterSalesRunEntity run where run.id = :runId")
+    Optional<AfterSalesRunEntity> findByIdForUpdate(@Param("runId") String runId);
 
     /**
      * 原子认领：仅当 run 仍为 READY 时更新为 RUNNING 并写入 startedAt。

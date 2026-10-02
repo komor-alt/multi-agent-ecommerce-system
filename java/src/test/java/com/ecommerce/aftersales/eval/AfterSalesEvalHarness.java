@@ -1093,6 +1093,8 @@ public final class AfterSalesEvalHarness {
             });
             when(repo.findById(anyString())).thenAnswer(inv ->
                     Optional.ofNullable(runs.get(inv.getArgument(0))));
+            when(repo.findByIdForUpdate(anyString())).thenAnswer(inv ->
+                    Optional.ofNullable(runs.get(inv.getArgument(0))));
             when(repo.existsById(anyString())).thenAnswer(inv ->
                     runs.containsKey(inv.getArgument(0)));
             when(repo.claimReady(anyString(), any())).thenAnswer(inv -> 0);

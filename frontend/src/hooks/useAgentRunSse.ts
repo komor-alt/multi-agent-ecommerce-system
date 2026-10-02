@@ -9,7 +9,7 @@ import type { AgentRunSseEvent } from "../types/contracts";
 
 export function createAgentRunEventSource(runId: string, lastEventId?: string) {
   const params = lastEventId ? `?lastEventId=${encodeURIComponent(lastEventId)}` : "";
-  return new EventSource(`${API_BASE_URL}/agent-runs/${encodeURIComponent(runId)}/stream${params}`);
+  return new EventSource(`${API_BASE_URL}/agent-runs/${encodeURIComponent(runId)}/stream${params}`, { withCredentials: true });
 }
 
 export function parseAgentRunSseMessage(event: MessageEvent<string>): AgentRunSseEvent | null {

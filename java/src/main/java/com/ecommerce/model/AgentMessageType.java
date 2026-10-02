@@ -1,7 +1,10 @@
 package com.ecommerce.model;
 
 public enum AgentMessageType {
-    ASSIGN,
+    DELEGATE,
     RESULT,
-    VETO
+    VETO,
+    REQUEST_REVISION,
+    COMPLETE,
+    ERROR
 }

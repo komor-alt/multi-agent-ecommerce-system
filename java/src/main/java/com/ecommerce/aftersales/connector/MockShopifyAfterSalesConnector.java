@@ -83,6 +83,11 @@ public class MockShopifyAfterSalesConnector {
                 .orElseThrow(() -> new IllegalArgumentException("ORDER_NOT_FOUND"));
 
         String country = String.valueOf(order.get("country"));
+        String paymentStatus = String.valueOf(order.get("payment_status"));
+        String refundStatus = String.valueOf(order.getOrDefault(
+                "refund_status",
+                "refunded".equalsIgnoreCase(paymentStatus) ? "REFUNDED" : "NONE"
+        ));
         return new AfterSalesTypes.OrderSnapshot(
                 orderId,
                 String.valueOf(order.get("user_id")),
@@ -91,10 +96,11 @@ public class MockShopifyAfterSalesConnector {
                 String.valueOf(order.get("currency")),
                 String.valueOf(order.get("warehouse_region")),
                 BigDecimal.valueOf(((Number) order.get("order_value")).doubleValue()),
-                "paid".equals(order.get("payment_status")),
+                "paid".equalsIgnoreCase(paymentStatus),
                 String.valueOf(order.get("fulfillment_status")),
                 ((Number) order.get("promised_delivery_days")).intValue(),
-                deriveTrackingNumber(orderId, country)
+                deriveTrackingNumber(orderId, country),
+                refundStatus
         );
     }
 
@@ -243,6 +249,13 @@ public class MockShopifyAfterSalesConnector {
             AfterSalesTypes.OrderSnapshot order,
             BigDecimal amount,
             String idempotencyKey) {
+        // 连接器边界再做一次防御性校验；真实渠道应在服务端以条件写/原子命令校验同一条件。
+        if (order == null || order.fullyRefunded()) {
+            throw new IllegalStateException("ORDER_ALREADY_REFUNDED");
+        }
+        if (!order.paid()) {
+            throw new IllegalStateException("ORDER_NOT_PAID");
+        }
         String reference = "CPN-" + idempotencyKey.substring(0, 12).toUpperCase();
         return new AfterSalesTypes.ExecutionResult(reference, "ISSUED", Instant.now());
     }

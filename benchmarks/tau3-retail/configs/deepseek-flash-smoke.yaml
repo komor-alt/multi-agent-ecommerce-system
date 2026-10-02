@@ -1,0 +1,64 @@
+# DeepSeek V4 Flash smoke run: use one task with --task-ids for the initial
+# connectivity check, then run this 10-task set for the paired comparison.
+
+benchmark:
+  repository: sierra-research/tau2-bench
+  commit: 79975ac5741e23fbb1d2ac44262d62398a6d87bd
+  domain: retail
+  taskSplitName: base
+
+run:
+  taskIds:
+    - "0"
+    - "10"
+    - "17"
+    - "22"
+    - "40"
+    - "48"
+    - "56"
+    - "67"
+    - "89"
+    - "113"
+  numTrials: 1
+  seed: 300
+  maxSteps: 200
+  maxErrors: 10
+  maxConcurrency: 1
+
+# LiteLLM's OpenAI-compatible provider lets the existing OPENAI_API_KEY
+# variable hold a DeepSeek API key while api_base guarantees that requests
+# are sent to DeepSeek, not OpenAI. Both sides use identical model settings.
+agent:
+  implementation: llm_agent
+  llm: openai/deepseek-v4-flash
+  llmArgs:
+    api_base: https://api.deepseek.com
+    extra_body:
+      thinking:
+        type: disabled
+    temperature: 0.0
+user:
+  implementation: user_simulator
+  llm: openai/deepseek-v4-flash
+  llmArgs:
+    api_base: https://api.deepseek.com
+    extra_body:
+      thinking:
+        type: disabled
+    temperature: 0.0
+
+# The pinned upstream evaluator otherwise hard-codes GPT-4.1 for tasks with
+# natural-language assertions. The adapter binds that official evaluator to
+# this explicit judge while leaving its prompt and reward aggregation intact.
+evaluator:
+  llm: openai/deepseek-v4-flash
+  llmArgs:
+    api_base: https://api.deepseek.com
+    extra_body:
+      thinking:
+        type: disabled
+    temperature: 0.0
+
+save:
+  baseline: official-baseline
+  guarded: guarded-agent

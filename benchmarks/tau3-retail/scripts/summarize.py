@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import importlib.metadata
 import json
+import math
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -69,6 +70,14 @@ def _load_results(run_dir: Path) -> dict:
         )
         tool_calls.append(n)
 
+    evaluated_mask = df["reward"].notna()
+    evaluated_df = df[evaluated_mask]
+    evaluated_tool_calls = [
+        count
+        for count, evaluated in zip(tool_calls, evaluated_mask.tolist())
+        if evaluated
+    ]
+
     info = results.info
     entry = {
         "implementation": info.agent_info.implementation,
@@ -89,12 +98,29 @@ def _load_results(run_dir: Path) -> dict:
         "runner_git_commit": info.git_commit,
         "tasks": int(df["task_id"].nunique()),
         "simulations": int(len(df)),
-        "official_reward_mean": round(float(df["reward"].mean()), 4),
-        "success_rate": round(float((df["reward"] == 1.0).mean()), 4),
-        "avg_turns": round(float(df["num_messages"].mean()), 2),
-        "avg_tool_calls": round(sum(tool_calls) / len(tool_calls), 2)
-        if tool_calls
-        else None,
+        "evaluated_tasks": int(evaluated_df["task_id"].nunique()),
+        "evaluated_simulations": int(len(evaluated_df)),
+        "infrastructure_errors": int(len(df) - len(evaluated_df)),
+        "official_reward_mean": (
+            round(float(evaluated_df["reward"].mean()), 4)
+            if len(evaluated_df)
+            else None
+        ),
+        "success_rate": (
+            round(float((evaluated_df["reward"] == 1.0).mean()), 4)
+            if len(evaluated_df)
+            else None
+        ),
+        "avg_turns": (
+            round(float(evaluated_df["num_messages"].mean()), 2)
+            if len(evaluated_df)
+            else None
+        ),
+        "avg_tool_calls": (
+            round(sum(evaluated_tool_calls) / len(evaluated_tool_calls), 2)
+            if evaluated_tool_calls
+            else None
+        ),
         "per_task": [
             {
                 "task_id": row["task_id"],
@@ -123,6 +149,45 @@ def _load_guard_events(run_dir: Path) -> dict:
 def _task_trial_set(entry: dict) -> set[tuple[str, object]]:
     """The exact (task_id, trial) pairs actually run, as a comparable set."""
     return {(str(row["task_id"]), row["trial"]) for row in entry["per_task"]}
+
+
+def _shared_evaluated_metrics(baseline: dict, guarded: dict) -> dict:
+    """Compare rewards only where both sides produced an evaluated result."""
+    def has_reward(row: dict) -> bool:
+        value = row["reward"]
+        return value is not None and not math.isnan(float(value))
+
+    baseline_rows = {
+        (str(row["task_id"]), row["trial"]): row
+        for row in baseline["per_task"]
+        if has_reward(row)
+    }
+    guarded_rows = {
+        (str(row["task_id"]), row["trial"]): row
+        for row in guarded["per_task"]
+        if has_reward(row)
+    }
+    shared_keys = baseline_rows.keys() & guarded_rows.keys()
+
+    def summarize(rows: dict) -> dict:
+        rewards = [float(rows[key]["reward"]) for key in shared_keys]
+        successes = sum(reward == 1.0 for reward in rewards)
+        return {
+            "evaluated_simulations": len(rewards),
+            "successes": successes,
+            "official_reward_mean": (
+                round(sum(rewards) / len(rewards), 4) if rewards else None
+            ),
+            "success_rate": (
+                round(successes / len(rewards), 4) if rewards else None
+            ),
+        }
+
+    return {
+        "shared_task_trials": len(shared_keys),
+        "baseline": summarize(baseline_rows),
+        "guarded": summarize(guarded_rows),
+    }
 
 
 def _installed_tau2_commit() -> Optional[str]:
@@ -391,6 +456,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         },
         "baseline": baseline,
         "guarded": guarded,
+        "shared_evaluated": _shared_evaluated_metrics(baseline, guarded),
         "guarded_guard_metrics": guarded_events or None,
     }
 
@@ -420,6 +486,9 @@ def _render_markdown(comparison: dict, parity: dict) -> str:
     b = comparison["baseline"]
     g = comparison["guarded"]
     gm = comparison.get("guarded_guard_metrics") or {}
+    shared = comparison.get("shared_evaluated") or {}
+    shared_b = shared.get("baseline") or {}
+    shared_g = shared.get("guarded") or {}
     tau3 = comparison["tau3"]
 
     def cell(entry, key) -> str:
@@ -434,11 +503,22 @@ def _render_markdown(comparison: dict, parity: dict) -> str:
         "",
         "| Metric | LLMAgent (baseline) | GuardedRetailAgent |",
         "|---|---|---|",
-        f"| Official Reward (mean) | {cell(b, 'official_reward_mean')} | {cell(g, 'official_reward_mean')} |",
-        f"| Success Rate | {cell(b, 'success_rate')} | {cell(g, 'success_rate')} |",
-        f"| Avg Tool Calls / Task | {cell(b, 'avg_tool_calls')} | {cell(g, 'avg_tool_calls')} |",
-        f"| Avg Turns | {cell(b, 'avg_turns')} | {cell(g, 'avg_turns')} |",
-        f"| Tasks / Simulations | {b.get('tasks')} / {b.get('simulations')} | {g.get('tasks')} / {g.get('simulations')} |",
+        f"| Official Reward (mean, evaluated only) | {cell(b, 'official_reward_mean')} | {cell(g, 'official_reward_mean')} |",
+        f"| Success Rate (evaluated only) | {cell(b, 'success_rate')} | {cell(g, 'success_rate')} |",
+        f"| Evaluated / Total Simulations | {b.get('evaluated_simulations')} / {b.get('simulations')} | {g.get('evaluated_simulations')} / {g.get('simulations')} |",
+        f"| Infrastructure Errors | {b.get('infrastructure_errors')} | {g.get('infrastructure_errors')} |",
+        f"| Avg Tool Calls / Evaluated Task | {cell(b, 'avg_tool_calls')} | {cell(g, 'avg_tool_calls')} |",
+        f"| Avg Turns / Evaluated Task | {cell(b, 'avg_turns')} | {cell(g, 'avg_turns')} |",
+        f"| Tasks / Simulations | {b.get('tasks')} / {b.get('simulations')} | {g.get('tasks')} / {g.get('simulations')} |",        "",
+        "## Strict paired comparison (only task/trials evaluated by both agents)",
+        "",
+        f"- shared evaluated task/trials: {shared.get('shared_task_trials', 'unavailable')}",
+        "",
+        "| Metric | LLMAgent (baseline) | GuardedRetailAgent |",
+        "|---|---|---|",
+        f"| Successes | {shared_b.get('successes', 'unavailable')} | {shared_g.get('successes', 'unavailable')} |",
+        f"| Official Reward Mean | {cell(shared_b, 'official_reward_mean')} | {cell(shared_g, 'official_reward_mean')} |",
+        f"| Success Rate | {cell(shared_b, 'success_rate')} | {cell(shared_g, 'success_rate')} |",
         "",
         "## Guarded agent — supplemental guard metrics (never substitute the official reward)",
         "",
@@ -449,6 +529,7 @@ def _render_markdown(comparison: dict, parity: dict) -> str:
         f"| Confirmation Blocks | {gm.get('confirmation_blocks', 'unavailable')} |",
         f"| Auth Blocks | {gm.get('auth_blocks', 'unavailable')} |",
         f"| Fallbacks | {gm.get('fallbacks', 'unavailable')} |",
+        f"| Allowed Mutations | {gm.get('allowed_mutations', 'unavailable')} |",
         "",
         "## Run settings (from official results metadata)",
         "",

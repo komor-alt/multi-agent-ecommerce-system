@@ -80,6 +80,7 @@ public class ScenePathEnforcer {
     public static final List<String> DEFAULT_WHITELIST = List.of(
             GET_USER_PROFILE, LOAD_CAMPAIGN_CONSTRAINTS, GET_RECENT_ORDERS,
             SEARCH_PRODUCTS, CHECK_FULFILLMENT, CHECK_INVENTORY, RERANK,
+            RecommendationPipelineExecutor.FILTER_PRODUCTS,
             GENERATE_LOCALIZED_COPY, GENERATE_RETENTION_COPY, FINAL_ACTION);
 
     public String normalizeScene(String scene) {
@@ -102,8 +103,9 @@ public class ScenePathEnforcer {
             return List.of();
         }
         return switch (agent) {
-            case RECALL -> List.of(GET_USER_PROFILE, GET_RECENT_ORDERS, SEARCH_PRODUCTS, RERANK);
-            case CONSTRAINT -> List.of(LOAD_CAMPAIGN_CONSTRAINTS, CHECK_FULFILLMENT, CHECK_INVENTORY);
+            case PROFILE -> List.of(GET_USER_PROFILE, GET_RECENT_ORDERS);
+            case PRODUCT -> List.of(SEARCH_PRODUCTS, RERANK);
+            case INVENTORY -> List.of(LOAD_CAMPAIGN_CONSTRAINTS, CHECK_FULFILLMENT, CHECK_INVENTORY);
             case COPY -> List.of(GENERATE_LOCALIZED_COPY, GENERATE_RETENTION_COPY);
             case SUPERVISOR -> List.of(FINAL_ACTION);
         };
@@ -115,7 +117,7 @@ public class ScenePathEnforcer {
      */
     public AgentId expectedNextAgent(String scene, RecommendationPipelineState context) {
         if (context != null && context.hasUnhandledVeto() && context.getRecallAfterVetoCount() < 1) {
-            return AgentId.RECALL;
+            return AgentId.PRODUCT;
         }
         return agentForTool(expectedNextStep(scene, context));
     }
@@ -125,7 +127,7 @@ public class ScenePathEnforcer {
         if (FINAL_ACTION.equals(canonical)) {
             return AgentId.SUPERVISOR;
         }
-        for (AgentId agent : List.of(AgentId.RECALL, AgentId.CONSTRAINT, AgentId.COPY)) {
+        for (AgentId agent : List.of(AgentId.PROFILE, AgentId.PRODUCT, AgentId.INVENTORY, AgentId.COPY)) {
             if (toolsFor(agent).contains(canonical)) {
                 return agent;
             }
@@ -135,6 +137,73 @@ public class ScenePathEnforcer {
 
     public boolean isToolAllowedFor(AgentId agent, String tool) {
         return toolsFor(agent).contains(canonicalTool(tool));
+    }
+
+    /** Specialists that can make progress from the current blackboard. */
+    public List<AgentId> allowedAgents(String scene, RecommendationPipelineState context) {
+        if (isPathComplete(scene, context)) return List.of(AgentId.SUPERVISOR);
+        List<AgentId> allowed = new ArrayList<>();
+        for (AgentId agent : List.of(AgentId.PROFILE, AgentId.PRODUCT, AgentId.INVENTORY, AgentId.COPY)) {
+            if (!executableTools(agent, scene, context).isEmpty()) allowed.add(agent);
+        }
+        return allowed;
+    }
+
+    /** Tools a specialist may safely choose now, after prerequisites are checked. */
+    public List<String> executableTools(AgentId agent, String scene, RecommendationPipelineState context) {
+        if (agent == null || context == null) return List.of();
+        String normalized = normalizeScene(scene);
+        List<String> executable = new ArrayList<>();
+        if (agent == AgentId.PROFILE) {
+            if (!SCENE_CAMPAIGN.equals(normalized)
+                    && !context.getAgentResults().containsKey(RecommendationPipelineExecutor.USER_PROFILE_RESULT)) {
+                executable.add(GET_USER_PROFILE);
+            }
+            if (SCENE_RETENTION.equals(normalized)
+                    && !context.getAgentResults().containsKey(RecommendationPipelineExecutor.ORDER_CONTEXT_RESULT)) {
+                executable.add(GET_RECENT_ORDERS);
+            }
+        } else if (agent == AgentId.PRODUCT) {
+            if (context.hasUnhandledVeto() && context.getRecallAfterVetoCount() < 1) {
+                executable.add(SEARCH_PRODUCTS);
+            } else if (!context.getAgentResults().containsKey(RecommendationPipelineExecutor.CROSS_BORDER_RECALL_RESULT)) {
+                boolean profileReady = SCENE_CAMPAIGN.equals(normalized) || context.getProfile() != null;
+                boolean ordersReady = !SCENE_RETENTION.equals(normalized) || context.getOrderContext() != null;
+                // Campaign constraints are consumed by fulfillment, not product recall, so both
+                // independent actions may be scheduled in the same parallel batch.
+                if (profileReady && ordersReady) executable.add(SEARCH_PRODUCTS);
+            }
+            // Ranking reads candidates/profile only. Final filtering is performed by the
+            // Supervisor after the parallel ranking + inventory barrier has completed.
+            if (context.getRawProducts() != null && context.getRankedProducts() == null
+                    && !context.hasUnhandledVeto()) executable.add(RERANK);
+        } else if (agent == AgentId.INVENTORY) {
+            if (SCENE_CAMPAIGN.equals(normalized) && context.getCampaignConstraints() == null) {
+                executable.add(LOAD_CAMPAIGN_CONSTRAINTS);
+            }
+            if (context.getRawProducts() != null) {
+                if (SCENE_CAMPAIGN.equals(normalized)
+                        && !context.getAgentResults().containsKey(RecommendationPipelineExecutor.FULFILLMENT_RESULT)) {
+                    executable.add(CHECK_FULFILLMENT);
+                }
+                boolean fulfillmentReady = !SCENE_CAMPAIGN.equals(normalized)
+                        || context.getAgentResults().containsKey(RecommendationPipelineExecutor.FULFILLMENT_RESULT);
+                if (fulfillmentReady
+                        && !context.getAgentResults().containsKey(RecommendationPipelineExecutor.FULFILLMENT_INVENTORY_RESULT)) {
+                    executable.add(CHECK_INVENTORY);
+                }
+            }
+        } else if (agent == AgentId.COPY && context.getFinalProducts() != null) {
+            if (SCENE_CAMPAIGN.equals(normalized)
+                    && !context.getAgentResults().containsKey(RecommendationPipelineExecutor.LOCALIZED_MARKETING_COPY_RESULT)) {
+                executable.add(GENERATE_LOCALIZED_COPY);
+            }
+            if (SCENE_RETENTION.equals(normalized)
+                    && !context.getAgentResults().containsKey(RecommendationPipelineExecutor.RETENTION_MARKETING_COPY_RESULT)) {
+                executable.add(GENERATE_RETENTION_COPY);
+            }
+        }
+        return executable;
     }
 
     public SceneContract contractFor(String scene) {

@@ -11,9 +11,10 @@ import {
   ShoppingCartOutlined,
   TeamOutlined,
 } from "@ant-design/icons";
-import { Layout, Menu, Space, Tag, Typography } from "antd";
+import { Button, Layout, Menu, Space, Tag, Typography } from "antd";
 import type { MenuProps } from "antd";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
+import { useAuth } from "../app/auth";
 
 const { Header, Sider, Content } = Layout;
 
@@ -30,6 +31,7 @@ const menuItems: MenuProps["items"] = [
 ];
 
 export function AppLayout() {
+  const { principal, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const selectedKey = `/${location.pathname.split("/")[1] || "dashboard"}`;
@@ -59,7 +61,8 @@ export function AppLayout() {
           </div>
           <Space>
             <Tag color="processing"><BarChartOutlined /> Gateway Ready</Tag>
-            <Tag>viewer</Tag>
+            <Tag>{principal.username} · {principal.roles.join(" / ")}</Tag>
+            {principal.demo ? <Tag color="orange">开发演示</Tag> : <Button onClick={() => void logout()}>退出</Button>}
           </Space>
         </Header>
         <Content className="app-content">

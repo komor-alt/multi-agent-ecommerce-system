@@ -104,23 +104,23 @@ def test_auth_tool_call_intent():
 # ---------------------------------------------------------------------------
 
 
-def test_both_text_and_tool_call_fails_safe():
+def test_text_with_tool_call_discards_text_and_keeps_guarded_tool():
     call = ToolCall(name="cancel_pending_order", arguments={"order_id": "#W1"})
     plan = _plan_with_output(_planner(), _assistant("Cancelling now", [call]))
-    assert plan.plan_source == "fallback"
-    assert plan.candidate_tool_call is None
-    assert plan.intent == "CLARIFY"
-    assert plan.message_text
+    assert plan.plan_source == "planner"
+    assert plan.candidate_tool_call is call
+    assert plan.message_text is None
 
 
-def test_multiple_tool_calls_fails_safe():
+def test_multiple_tool_calls_keep_only_first_bounded_step():
     calls = [
+        ToolCall(name="get_user_details", arguments={"user_id": "user_1"}),
         ToolCall(name="get_order_details", arguments={"order_id": "#W1"}),
-        ToolCall(name="get_order_details", arguments={"order_id": "#W2"}),
     ]
     plan = _plan_with_output(_planner(), _assistant(None, calls))
-    assert plan.plan_source == "fallback"
-    assert plan.candidate_tool_call is None
+    assert plan.plan_source == "planner"
+    assert plan.candidate_tool_call is calls[0]
+    assert plan.candidate_tool_call.name == "get_user_details"
 
 
 def test_empty_output_fails_safe():
@@ -142,13 +142,6 @@ def test_tool_call_without_name_fails_safe():
 
 def test_convert_raises_plan_output_error_on_malformed():
     planner = _planner()
-    call = ToolCall(name="x", arguments={})
-    with pytest.raises(PlanOutputError):
-        planner._convert_llm_output(_assistant("text", [call]))
-    with pytest.raises(PlanOutputError):
-        planner._convert_llm_output(
-            _assistant(None, [call, ToolCall(name="y", arguments={})])
-        )
     with pytest.raises(PlanOutputError):
         planner._convert_llm_output(_assistant(None, None))
 
@@ -200,6 +193,7 @@ def test_system_prompt_contains_bounded_planning_instructions():
     assert "EXACTLY ONE" in prompt
     assert "find_user_id_by_email" in prompt
     assert "confirmation" in prompt.lower()
+    assert "Do not ask for confirmation in a free-form" in prompt
 
 
 def test_plan_uses_message_history(monkeypatch):

@@ -2,7 +2,7 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_USER: ecommerce
       POSTGRES_PASSWORD: ecommerce
@@ -19,7 +19,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes
@@ -35,7 +35,7 @@ services:
       context: ./python
       dockerfile: Dockerfile
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       ECOM_LLM_API_KEY: ${ECOM_LLM_API_KEY:-your_api_key_here}
       ECOM_LLM_BASE_URL: ${ECOM_LLM_BASE_URL:-https://api.deepseek.com}
@@ -54,7 +54,7 @@ services:
       context: ./java
       dockerfile: Dockerfile
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/ecommerce_agent
       SPRING_DATASOURCE_USERNAME: ecommerce
@@ -71,6 +71,28 @@ services:
       ECOM_RECOMMEND_LIVE_ENABLED: ${ECOM_RECOMMEND_LIVE_ENABLED:-false}
       ECOM_RECOMMEND_MAX_LLM_CALLS: ${ECOM_RECOMMEND_MAX_LLM_CALLS:-0}
       ECOM_SUPERVISOR_MAX_LLM_CALLS: ${ECOM_SUPERVISOR_MAX_LLM_CALLS:-0}
+      ECOM_AGENT_OUTBOX_TRANSPORT: ${ECOM_AGENT_OUTBOX_TRANSPORT:-local}
+      ECOM_AGENT_OUTBOX_SCAN_MS: ${ECOM_AGENT_OUTBOX_SCAN_MS:-250}
+      ECOM_AGENT_OUTBOX_BATCH_SIZE: ${ECOM_AGENT_OUTBOX_BATCH_SIZE:-200}
+      ECOM_AGENT_OUTBOX_MAX_ATTEMPTS: ${ECOM_AGENT_OUTBOX_MAX_ATTEMPTS:-10}
+      ECOM_AGENT_OUTBOX_RETRY_DELAY_MS: ${ECOM_AGENT_OUTBOX_RETRY_DELAY_MS:-5000}
+      ECOM_AGENT_OUTBOX_LEASE_MS: ${ECOM_AGENT_OUTBOX_LEASE_MS:-60000}
+      ECOM_INTERNAL_API_AUTH_ENABLED: ${ECOM_INTERNAL_API_AUTH_ENABLED:-false}
+      JAVA_INTERNAL_SERVICE_TOKEN: ${JAVA_INTERNAL_SERVICE_TOKEN:-}
+      ECOM_AGENT_RUN_TIMEOUT: ${ECOM_AGENT_RUN_TIMEOUT:-60s}
+      ECOM_AGENT_RECOVERY_ENABLED: ${ECOM_AGENT_RECOVERY_ENABLED:-true}
+      ECOM_AGENT_RECOVERY_LEASE_DURATION: ${ECOM_AGENT_RECOVERY_LEASE_DURATION:-30s}
+      ECOM_AGENT_RECOVERY_HEARTBEAT_INTERVAL: ${ECOM_AGENT_RECOVERY_HEARTBEAT_INTERVAL:-5s}
+      ECOM_AGENT_RECOVERY_RENEWAL_TIMEOUT_SECONDS: ${ECOM_AGENT_RECOVERY_RENEWAL_TIMEOUT_SECONDS:-3}
+      ECOM_AGENT_RECOVERY_SCAN_INTERVAL: ${ECOM_AGENT_RECOVERY_SCAN_INTERVAL:-1s}
+      ECOM_AGENT_RECOVERY_BATCH_SIZE: ${ECOM_AGENT_RECOVERY_BATCH_SIZE:-16}
+      ECOM_AGENT_RECOVERY_MAX_ATTEMPTS: ${ECOM_AGENT_RECOVERY_MAX_ATTEMPTS:-3}
+      ECOM_AGENT_RECOVERY_HEARTBEAT_THREADS: ${ECOM_AGENT_RECOVERY_HEARTBEAT_THREADS:-1}
+      ECOM_AGENT_RECOVERY_HEARTBEAT_SHUTDOWN_SECONDS: ${ECOM_AGENT_RECOVERY_HEARTBEAT_SHUTDOWN_SECONDS:-5}
+      ECOM_OUTBOUND_CONNECT_TIMEOUT: ${ECOM_OUTBOUND_CONNECT_TIMEOUT:-3s}
+      ECOM_OUTBOUND_READ_TIMEOUT: ${ECOM_OUTBOUND_READ_TIMEOUT:-15s}
+      ECOM_DB_MAX_POOL_SIZE: ${ECOM_DB_MAX_POOL_SIZE:-20}
+      ECOM_DB_MIN_IDLE: ${ECOM_DB_MIN_IDLE:-4}
       ECOM_EMBEDDING_PROVIDER: "${ECOM_EMBEDDING_PROVIDER:-qwen}"
       ECOM_EMBEDDING_BASE_URL: "${ECOM_EMBEDDING_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode}"
       ECOM_EMBEDDING_API_KEY: "${ECOM_EMBEDDING_API_KEY:-}"
@@ -92,13 +114,19 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       PORT: 3000
       DATABASE_URL: postgresql://ecommerce:ecommerce@postgres:5432/ecommerce_agent?schema=public
       LEGACY_PYTHON_AGENT_SERVICE_BASE_URL: http://agent-service:8000
       JAVA_AGENT_SERVICE_BASE_URL: http://java-agent-service:8080
-      JWT_SECRET: ${JWT_SECRET:-replace-me-in-local-env}
+      # This compose file is a loopback-only developer environment, not production deployment.
+      NODE_ENV: ${ECOM_NODE_ENV:-development}
+      AUTH_MODE: ${AUTH_MODE:-demo}
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-}
+      AUTH_ACCOUNTS_JSON: ${AUTH_ACCOUNTS_JSON:-[]}
+      AUTH_ALLOWED_ORIGINS: ${AUTH_ALLOWED_ORIGINS:-http://localhost:5173}
+      JAVA_INTERNAL_SERVICE_TOKEN: ${JAVA_INTERNAL_SERVICE_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -113,7 +141,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "5173:5173"
+      - "127.0.0.1:5173:5173"
     environment:
       VITE_API_BASE_URL: http://localhost:3000/api/v1
       VITE_ASSET_BASE: "/"

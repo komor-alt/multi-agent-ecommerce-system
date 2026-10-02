@@ -277,15 +277,24 @@ public class RecommendationPipelineExecutor {
                     base.put("vetoRound", context.getRecallAfterVetoCount());
                     base.put("vetoedProductIds", context.vetoedProductIds());
             }
-            case CHECK_FULFILLMENT ->
-                    base.put("candidateCount", context.getRawProducts() == null ? 0 : context.getRawProducts().size());
+            case CHECK_FULFILLMENT -> {
+                base.put("candidateCount", context.getRawProducts() == null ? 0 : context.getRawProducts().size());
+                base.put("candidateVersion", context.getCandidateVersion());
+            }
             case RERANK_PRODUCTS -> {
                 base.put("numItems", context.getRequest().getNumItems());
                 base.put("hasProfile", context.getProfile() != null);
+                base.put("vetoRound", context.getRecallAfterVetoCount());
+                base.put("candidateVersion", context.getCandidateVersion());
+                base.put("candidateProductIds", context.getRawProducts() == null ? List.of()
+                        : context.getRawProducts().stream().map(Product::getProductId).toList());
             }
             case CHECK_INVENTORY -> {
                     base.put("productCount", context.getRawProducts() == null ? 0 : context.getRawProducts().size());
                     base.put("vetoRound", context.getRecallAfterVetoCount());
+                    base.put("candidateVersion", context.getCandidateVersion());
+                    base.put("candidateProductIds", context.getRawProducts() == null ? List.of()
+                            : context.getRawProducts().stream().map(Product::getProductId).toList());
             }
             case FILTER_PRODUCTS -> {
                 base.put("rankedProductCount", context.getRankedProducts() == null ? 0 : context.getRankedProducts().size());
@@ -454,7 +463,7 @@ public class RecommendationPipelineExecutor {
                 || value.equalsIgnoreCase(request.regionOrDefault()));
     }
     private ToolObservation getUserProfile(RecommendationPipelineState context) {
-        AgentResult result = userProfileAsync(context.getRequest(), context.getLlmBudget()).join();
+        AgentResult result = context.await(userProfileAsync(context.getRequest(), context.getLlmBudget()));
         ensureSuccess(result);
         context.putAgentResult(USER_PROFILE_RESULT, result);
         context.setProfile(extractProfile(result));
@@ -480,7 +489,7 @@ public class RecommendationPipelineExecutor {
         boolean vectorUsed = false;
         String fallbackReason = null;
         if (recommendationDataService == null) {
-            result = productRecallAsync(context.getRequest(), context.getLlmBudget()).join();
+            result = context.await(productRecallAsync(context.getRequest(), context.getLlmBudget()));
             source = "legacy_connector";
             fallbackReason = "postgresql_data_service_unavailable";
         } else {
@@ -530,41 +539,54 @@ public class RecommendationPipelineExecutor {
     }
 
     private ToolObservation rerankProducts(RecommendationPipelineState context) {
-        AgentResult result = rerankAsync(context.getRequest(), context.getProfile(),
-                context.getRawProducts() == null ? List.of() : context.getRawProducts(), context.getLlmBudget()).join();
+        long candidateVersion = context.getCandidateVersion();
+        List<Product> candidates = context.getRawProducts() == null
+                ? List.of() : List.copyOf(context.getRawProducts());
+        AgentResult result = context.await(rerankAsync(context.getRequest(), context.getProfile(),
+                candidates, context.getLlmBudget()));
         ensureSuccess(result);
-        context.putAgentResult(RERANK_RESULT, result);
-        context.setRankedProducts(extractProducts(result, context.getRawProducts()));
-        if (context.getAvailableIds() != null) {
-            context.setFinalProducts(filterAvailableProducts(
-                    context.getRankedProducts(), context.getAvailableIds(), context.vetoedProductIds(),
-                    context.getRequest().getNumItems()));
+        List<Product> ranked = extractProducts(result, candidates);
+        if (!context.setRankedProductsIfCurrent(candidateVersion, ranked)) {
+            throw new StaleAgentResultException(RERANK, candidateVersion, context.getCandidateVersion());
         }
+        context.putAgentResult(RERANK_RESULT, result);
         List<String> rankedIds = context.getRankedProducts() == null ? List.of()
                 : context.getRankedProducts().stream().map(Product::getProductId).toList();
-        List<String> finalIds = context.getFinalProducts() == null ? List.of()
-                : context.getFinalProducts().stream().map(Product::getProductId).toList();
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("rankedProductIds", rankedIds);
-        data.put("finalProductIds", finalIds);
+        data.put("finalProductIds", List.of());
         data.put("crossBorder", crossBorderState(context.getRequest()));
         return ToolObservation.builder().toolName(RERANK)
-                .summary(finalIds.isEmpty() ? "Reranked products; fulfillment filtering remains pending"
-                        : "Reranked and selected fulfillment-safe products: " + finalIds)
+                .summary("Reranked products; Supervisor fulfillment merge remains pending")
                 .data(data).evidenceIds(rankedIds.stream()
                         .map(id -> "product:" + id).toList()).build();
     }
 
+    /** Merge barrier after ranking and inventory have both completed. */
+    public boolean finalizeProductsIfReady(RecommendationPipelineState context) {
+        if (context == null || context.getRankedProducts() == null || context.getAvailableIds() == null
+                || context.hasUnhandledVeto() || !context.candidateDerivedResultsCurrent()) {
+            return false;
+        }
+        List<Product> finalProducts = filterAvailableProducts(
+                context.getRankedProducts(), context.getAvailableIds(), context.vetoedProductIds(),
+                context.getRequest().getNumItems());
+        return context.writeFinalProductsIfCurrent(AgentId.SUPERVISOR, finalProducts);
+    }
+
     private ToolObservation checkInventory(RecommendationPipelineState context) {
-        List<Product> products = context.getRawProducts() == null ? List.of() : context.getRawProducts();
+        long candidateVersion = context.getCandidateVersion();
+        List<Product> products = context.getRawProducts() == null
+                ? List.of() : List.copyOf(context.getRawProducts());
         if (context.getFulfillmentEligibleIds() != null) {
             products = products.stream()
                     .filter(product -> context.getFulfillmentEligibleIds().contains(product.getProductId())).toList();
         }
         AgentResult result;
         String source;
+        Map<String, Object> fulfillmentDetails = Map.of();
         if (recommendationDataService == null) {
-            result = inventoryAsync(context.getRequest(), products).join();
+            result = context.await(inventoryAsync(context.getRequest(), products));
             source = "inventory_agent_fallback";
         } else {
             Map<String, RecInventoryEntity> rows = recommendationDataService.inventoryByProduct(
@@ -590,21 +612,24 @@ public class RecommendationPipelineExecutor {
             result = AgentResult.builder().agentName("inventory").success(true)
                     .data(data).confidence(1.0).build();
             source = "postgresql";
-            context.setFulfillment(details);
+            fulfillmentDetails = details;
         }
         ensureSuccess(result);
+        Set<String> availableIds = extractAvailableIds(result);
+        if (!context.applyInventoryIfCurrent(candidateVersion, availableIds, fulfillmentDetails)) {
+            throw new StaleAgentResultException(CHECK_INVENTORY, candidateVersion, context.getCandidateVersion());
+        }
         context.putAgentResult(FULFILLMENT_INVENTORY_RESULT, result);
-        context.setAvailableIds(extractAvailableIds(result));
         context.putDataSource("inventory", source);
-        List<String> available = context.getAvailableIds().stream().toList();
+        List<String> available = availableIds.stream().toList();
         List<String> rejected = products.stream()
                 .map(Product::getProductId)
-                .filter(id -> !context.getAvailableIds().contains(id))
+                .filter(id -> !availableIds.contains(id))
                 .distinct()
                 .toList();
         if (!rejected.isEmpty()) {
-            context.write(AgentId.CONSTRAINT, BlackboardField.VETOES, VetoRecord.builder()
-                    .source(AgentId.CONSTRAINT)
+            context.write(AgentId.INVENTORY, BlackboardField.VETOES, VetoRecord.builder()
+                    .source(AgentId.INVENTORY)
                     .productIds(rejected)
                     .reason("inventory_unavailable")
                     .build());
@@ -642,8 +667,8 @@ public class RecommendationPipelineExecutor {
                 .evidenceIds(productIds.stream().map(id -> "product:" + id).toList()).build();
     }
     private ToolObservation generateCopy(RecommendationPipelineState context, boolean retention) {
-        AgentResult result = marketingCopyAsync(context.getRequest(), context.getProfile(),
-                context.getFinalProducts() == null ? List.of() : context.getFinalProducts(), context.getLlmBudget()).join();
+        AgentResult result = context.await(marketingCopyAsync(context.getRequest(), context.getProfile(),
+                context.getFinalProducts() == null ? List.of() : context.getFinalProducts(), context.getLlmBudget()));
         ensureSuccess(result);
         String resultKey = retention ? RETENTION_MARKETING_COPY_RESULT : LOCALIZED_MARKETING_COPY_RESULT;
         context.putAgentResult(resultKey, result);

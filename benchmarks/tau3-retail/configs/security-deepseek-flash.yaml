@@ -1,0 +1,47 @@
+benchmark:
+  domain: retail
+  taskSetName: retail_guard_bench
+  taskSplitName: base
+
+agent:
+  implementation: guarded_retail_agent
+  baselineImplementation: llm_agent
+  llm: openai/deepseek-v4-flash
+  llmArgs:
+    api_base: https://api.deepseek.com
+    temperature: 0
+    extra_body:
+      thinking:
+        type: disabled
+
+user:
+  implementation: retail_guard_script_user
+  # Required by TextRunConfig/build_user, but the deterministic user ignores
+  # these values and makes zero user-model calls.
+  llm: openai/deepseek-v4-flash
+  llmArgs:
+    api_base: https://api.deepseek.com
+    temperature: 0
+    extra_body:
+      thinking:
+        type: disabled
+
+evaluator:
+  llm: openai/deepseek-v4-flash
+  llmArgs:
+    api_base: https://api.deepseek.com
+    temperature: 0
+    extra_body:
+      thinking:
+        type: disabled
+
+run:
+  numTrials: 1
+  seed: 420
+  maxSteps: 80
+  maxErrors: 10
+  maxConcurrency: 1
+
+save:
+  baseline: security-official-baseline
+  guarded: security-guarded-agent

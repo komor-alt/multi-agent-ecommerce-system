@@ -4,12 +4,16 @@ import com.ecommerce.aftersales.model.AfterSalesTypes;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.mockito.MockedStatic;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
+import static org.mockito.Mockito.mockStatic;
 
 class MockShopifyAfterSalesConnectorTest {
 
@@ -147,19 +151,24 @@ class MockShopifyAfterSalesConnectorTest {
 
     @Test
     void damagePhotoIsDerivedWithVerifiedAndRejectedSeeds() {
-        AfterSalesTypes.DamagePhotoSnapshot verified = connector.getDamagePhoto(connector.getOrder("O-SG-1001"));
-        assertThat(verified.photoId()).isEqualTo("DP-SG-1001-01");
-        assertThat(verified.evidenceId()).isEqualTo("damage-photo:DP-SG-1001-01:v1");
-        assertThat(verified.status()).isEqualTo("VERIFIED");
-        assertThat(verified.reviewSummary()).contains("confirmed");
+        Instant reference = Instant.parse("2026-09-25T12:00:00Z");
+        // Both independently derived evidence snapshots must use the same wall-clock instant.
+        try (MockedStatic<Instant> clock = mockStatic(Instant.class, CALLS_REAL_METHODS)) {
+            clock.when(Instant::now).thenReturn(reference);
+            AfterSalesTypes.DamagePhotoSnapshot verified = connector.getDamagePhoto(connector.getOrder("O-SG-1001"));
+            assertThat(verified.photoId()).isEqualTo("DP-SG-1001-01");
+            assertThat(verified.evidenceId()).isEqualTo("damage-photo:DP-SG-1001-01:v1");
+            assertThat(verified.status()).isEqualTo("VERIFIED");
+            assertThat(verified.reviewSummary()).contains("confirmed");
 
-        AfterSalesTypes.DamagePhotoSnapshot rejected = connector.getDamagePhoto(connector.getOrder("O-MY-2001"));
-        assertThat(rejected.status()).isEqualTo("REJECTED");
-        assertThat(rejected.evidenceId()).isEqualTo("damage-photo:DP-MY-2001-01:v1");
+            AfterSalesTypes.DamagePhotoSnapshot rejected = connector.getDamagePhoto(connector.getOrder("O-MY-2001"));
+            assertThat(rejected.status()).isEqualTo("REJECTED");
+            assertThat(rejected.evidenceId()).isEqualTo("damage-photo:DP-MY-2001-01:v1");
 
-        AfterSalesTypes.DamagePhotoSnapshot pending = connector.getDamagePhoto(connector.getOrder("O-TH-3001"));
-        assertThat(pending.status()).isEqualTo("PENDING_REVIEW");
-        assertThat(pending.capturedAt()).isEqualTo(connector.getDelivery(connector.getOrder("O-TH-3001")).deliveredAt());
+            AfterSalesTypes.DamagePhotoSnapshot pending = connector.getDamagePhoto(connector.getOrder("O-TH-3001"));
+            assertThat(pending.status()).isEqualTo("PENDING_REVIEW");
+            assertThat(pending.capturedAt()).isEqualTo(connector.getDelivery(connector.getOrder("O-TH-3001")).deliveredAt());
+        }
     }
 
     @Test
@@ -173,5 +182,28 @@ class MockShopifyAfterSalesConnectorTest {
         assertThat(product.category()).isEqualTo("accessory");
         assertThat(product.crossBorderEligible()).isTrue();
         assertThat(product.listPrice()).isNotNull();
+    }
+
+    @Test
+    void issueCouponRejectsRefundedOrderAtConnectorBoundary() {
+        AfterSalesTypes.OrderSnapshot refundedOrder = new AfterSalesTypes.OrderSnapshot(
+                "O-SG-1001",
+                "U-1",
+                "shopify",
+                "SG",
+                "SGD",
+                "SG",
+                new BigDecimal("100.00"),
+                true,
+                "IN_TRANSIT",
+                5,
+                "SF-SG-1001",
+                "REFUNDED"
+        );
+
+        assertThatThrownBy(() -> connector.issueDelayCoupon(
+                refundedOrder, new BigDecimal("10.00"), "0123456789abcdef"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("ORDER_ALREADY_REFUNDED");
     }
 }

@@ -1,0 +1,21 @@
+# Deliberately no embedded DB, weak credentials or Hibernate schema mutation in production.
+# Apply/review the SQL migration separately before starting this profile.
+spring:
+  datasource:
+    url: ${SPRING_DATASOURCE_URL}
+    username: ${SPRING_DATASOURCE_USERNAME}
+    password: ${SPRING_DATASOURCE_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: validate
+  sql:
+    init:
+      mode: never
+agent:
+  demo:
+    seed-enabled: false
+  security:
+    internal-api:
+      enabled: true
+      token: ${JAVA_INTERNAL_SERVICE_TOKEN}

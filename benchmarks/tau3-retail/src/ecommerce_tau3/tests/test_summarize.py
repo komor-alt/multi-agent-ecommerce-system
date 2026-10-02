@@ -205,6 +205,34 @@ def test_load_results_captures_reproducibility_fields(tmp_path, monkeypatch):
     assert entry["per_task"][0]["task_id"] == "0"
 
 
+def test_load_results_excludes_infrastructure_errors_from_metrics(
+    tmp_path, monkeypatch
+):
+    rows = _rows() + [
+        {
+            "task_id": "11",
+            "trial": 1,
+            "reward": None,
+            "termination_reason": "infrastructure_error",
+            "num_messages": 0,
+        }
+    ]
+    _patch_results(monkeypatch, _fake_info(), rows, tool_calls=(1, 2, 0))
+    (tmp_path / "results.json").write_text("{}", encoding="utf-8")
+
+    entry = summarize._load_results(tmp_path)
+
+    assert entry["tasks"] == 3
+    assert entry["simulations"] == 3
+    assert entry["evaluated_tasks"] == 2
+    assert entry["evaluated_simulations"] == 2
+    assert entry["infrastructure_errors"] == 1
+    assert entry["official_reward_mean"] == 0.5
+    assert entry["success_rate"] == 0.5
+    assert entry["avg_turns"] == 6.0
+    assert entry["avg_tool_calls"] == 1.5
+
+
 def test_load_results_missing_results_raises(tmp_path):
     with pytest.raises(FileNotFoundError, match="results.json"):
         summarize._load_results(tmp_path)
@@ -283,6 +311,39 @@ def test_task_trial_set_mismatch_raises(lock):
     guarded = _guarded(per_task=[*_entry()["per_task"], extra])
     with pytest.raises(ValueError, match=r"\(task_id, trial\) set"):
         summarize._validate_fair_pair(_entry(), guarded, lock)
+
+
+def test_shared_evaluated_metrics_uses_only_rows_evaluated_by_both_agents():
+    baseline = _entry(
+        per_task=[
+            {"task_id": "0", "trial": 1, "reward": 1.0, "termination_reason": "user_stop"},
+            {"task_id": "10", "trial": 1, "reward": 0.0, "termination_reason": "user_stop"},
+            {"task_id": "11", "trial": 1, "reward": 1.0, "termination_reason": "user_stop"},
+        ]
+    )
+    guarded = _guarded(
+        per_task=[
+            {"task_id": "0", "trial": 1, "reward": 1.0, "termination_reason": "user_stop"},
+            {"task_id": "10", "trial": 1, "reward": 1.0, "termination_reason": "user_stop"},
+            {"task_id": "11", "trial": 1, "reward": float("nan"), "termination_reason": "infrastructure_error"},
+        ]
+    )
+
+    paired = summarize._shared_evaluated_metrics(baseline, guarded)
+
+    assert paired["shared_task_trials"] == 2
+    assert paired["baseline"] == {
+        "evaluated_simulations": 2,
+        "successes": 1,
+        "official_reward_mean": 0.5,
+        "success_rate": 0.5,
+    }
+    assert paired["guarded"] == {
+        "evaluated_simulations": 2,
+        "successes": 2,
+        "official_reward_mean": 1.0,
+        "success_rate": 1.0,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -416,9 +477,13 @@ def test_main_writes_metadata_and_comparison(tmp_path, monkeypatch):
     assert comparison["tau3"]["taskSplit"] == "base"
     assert comparison["baseline"]["official_reward_mean"] == 0.5
     assert comparison["guarded"]["implementation"] == "guarded_retail_agent"
+    assert comparison["shared_evaluated"]["shared_task_trials"] == 2
+    assert comparison["shared_evaluated"]["baseline"]["successes"] == 1
+    assert comparison["shared_evaluated"]["guarded"]["successes"] == 1
 
     md = (tmp_path / "comparison.md").read_text(encoding="utf-8")
-    assert "Official Reward (mean)" in md
+    assert "Official Reward (mean, evaluated only)" in md
+    assert "Strict paired comparison" in md
     assert "fair-pair parity: validated" in md
 
 

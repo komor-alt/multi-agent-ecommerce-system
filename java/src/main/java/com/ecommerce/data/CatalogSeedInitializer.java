@@ -17,6 +17,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.stereotype.Component;
+import org.springframework.context.annotation.Profile;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -35,6 +37,8 @@ import java.util.Map;
  * TH-only or VN-only product.
  */
 @Component
+@Profile("!production & !prod")
+@ConditionalOnProperty(name = "agent.demo.seed-enabled", havingValue = "true", matchIfMissing = true)
 public class CatalogSeedInitializer implements ApplicationRunner {
 
     private static final Logger log = LoggerFactory.getLogger(CatalogSeedInitializer.class);

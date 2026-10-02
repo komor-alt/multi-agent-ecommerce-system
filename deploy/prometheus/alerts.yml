@@ -1,0 +1,56 @@
+groups:
+  - name: ecommerce-runtime
+    rules:
+      - alert: AgentScrapeUnavailable
+        expr: up{job="ecommerce-java"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: Java metrics target unavailable (check readiness and service token)
+      - alert: AgentHttpErrorBudgetBurn
+        # Starter budget: 99.9% HTTP availability, 14.4x burn over 5m AND 1h.
+        expr: >-
+          (sum(rate(http_server_requests_seconds_count{job="ecommerce-java",uri=~"/api/v1/recommend.*",status=~"5.."}[5m]))
+          / clamp_min(sum(rate(http_server_requests_seconds_count{job="ecommerce-java",uri=~"/api/v1/recommend.*"}[5m])), 0.001) > 0.0144)
+          and
+          (sum(rate(http_server_requests_seconds_count{job="ecommerce-java",uri=~"/api/v1/recommend.*",status=~"5.."}[1h]))
+          / clamp_min(sum(rate(http_server_requests_seconds_count{job="ecommerce-java",uri=~"/api/v1/recommend.*"}[1h])), 0.001) > 0.0144)
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: Recommendation HTTP availability budget burning quickly
+      - alert: AgentTaskFailures
+        expr: >-
+          sum(rate(agent_runs_total{job="ecommerce-java",outcome!="completed"}[5m]))
+          / clamp_min(sum(rate(agent_runs_total{job="ecommerce-java"}[5m])), 0.001) > 0.01
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: Agent task failures exceed 1 percent (separate from HTTP success)
+      - alert: AgentOverloaded
+        expr: >-
+          sum(rate(http_server_requests_seconds_count{job="ecommerce-java",uri=~"/api/v1/recommend.*",status="429"}[5m]))
+          / clamp_min(sum(rate(http_server_requests_seconds_count{job="ecommerce-java",uri=~"/api/v1/recommend.*"}[5m])), 0.001) > 0.01
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: Recommendation admission rejections exceed 1 percent
+      - alert: AgentOutboxDeadLetter
+        # Counts are shared DB gauges: use max, not sum across instances.
+        expr: max(agent_persistence{job="ecommerce-java",state="outboxDeadLetter"}) > 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: Outbox dead letters require reconciliation, not blind replay
+      - alert: AgentOutboxStalled
+        expr: max(agent_persistence{job="ecommerce-java",state="outboxOldestUnfinishedAgeSeconds"}) > 120
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: Oldest undelivered outbox record is stalled
+      - alert: AgentMetricsRefreshFailed
+        expr: sum(increase(agent_persistence_refresh_errors_total{job="ecommerce-java"}[5m])) > 0
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: Database-backed gauges may be stale

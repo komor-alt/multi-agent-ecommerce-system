@@ -56,6 +56,12 @@ echo "==> Official baseline: $AGENT_IMPL | domain=$DOMAIN split=$SPLIT tasks=${T
 echo "    agent-llm=$AGENT_LLM user-llm=$USER_LLM"
 echo "    results -> $RESULTS_DIR/$SAVE_NAME"
 
+# The official runner refuses to overwrite an existing save directory. Use a
+# run-scoped source name so repeated benchmark runs cannot resume from or
+# collide with stale official artifacts; copy it under the stable comparison
+# name only after the run succeeds.
+OFFICIAL_SAVE_NAME="${SAVE_NAME}-${RUN_ID}"
+
 # Official runner writes into <TAU2_DATA_DIR>/simulations/<save-to>/
 export TAU2_DATA_DIR="$TAU2_CHECKOUT/data"
 
@@ -69,13 +75,13 @@ CMD+=(
   --num-trials "$TRIALS" --seed "$SEED"
   --max-steps "$MAX_STEPS" --max-errors "$MAX_ERRORS"
   --max-concurrency "$MAX_CONCURRENCY"
-  --save-to "$SAVE_NAME"
+  --save-to "$OFFICIAL_SAVE_NAME"
 )
 # Forward extra CLI arguments after the config path (e.g. --num-tasks 50).
 # $1 is the config path and must NOT reach the runner.
 "${CMD[@]}" "${@:2}"
 
 # Copy official artifacts verbatim into the benchmark results directory.
-cp -r "$TAU2_DATA_DIR/simulations/$SAVE_NAME" "$RESULTS_DIR/$SAVE_NAME"
+cp -r "$TAU2_DATA_DIR/simulations/$OFFICIAL_SAVE_NAME" "$RESULTS_DIR/$SAVE_NAME"
 echo "==> Official results (byte-identical copy): $RESULTS_DIR/$SAVE_NAME"
 echo "    run dir: $RESULTS_DIR"

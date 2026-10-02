@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import type { AgentServiceRawEvent, AgentServiceRunRequest, AgentServiceRunResponse } from "./agent-service.contract";
+import { internalServiceHeaders } from "./internal-service-auth";
 
 type SseFrame = {
   event: string;
@@ -28,7 +29,7 @@ export class AgentClientService {
     const context = objectValue(request.input.context);
     const response = await fetch(`${this.javaBaseUrl()}/api/v1/recommend/agent-loop/stream`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...internalServiceHeaders(this.config) },
       body: JSON.stringify({
         runId: request.run_id,
         request: {

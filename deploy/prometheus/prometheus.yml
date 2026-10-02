@@ -1,0 +1,15 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+rule_files:
+  - /etc/prometheus/alerts.yml
+scrape_configs:
+  - job_name: ecommerce-java
+    metrics_path: /actuator/prometheus
+    # Supply this header through a trusted reverse proxy or the http_headers
+    # supported by your deployed Prometheus version. Never commit the secret.
+    http_headers:
+      X-Internal-Service-Token:
+        files: [/run/secrets/java_internal_service_token]
+    static_configs:
+      - targets: ['java-agent-service:8080']

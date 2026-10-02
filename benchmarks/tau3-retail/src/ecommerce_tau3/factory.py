@@ -41,6 +41,8 @@ def create_guarded_retail_agent(tools, domain_policy, **kwargs):
     """
     llm: Optional[str] = kwargs.get("llm")
     llm_args: Optional[dict] = kwargs.get("llm_args")
+    task = kwargs.get("task")
+    task_id = str(task.id) if task is not None and task.id is not None else None
     if llm is None:
         raise ValueError(
             f"{AGENT_NAME} requires an LLM. Pass --agent-llm <model> "
@@ -51,6 +53,7 @@ def create_guarded_retail_agent(tools, domain_policy, **kwargs):
         domain_policy=domain_policy,
         llm=llm,
         llm_args=llm_args,
+        task_id=task_id,
     )
 
 

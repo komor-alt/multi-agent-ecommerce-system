@@ -1,0 +1,51 @@
+# Full official Retail base split with DeepSeek V4 Flash.
+
+benchmark:
+  repository: sierra-research/tau2-bench
+  commit: 79975ac5741e23fbb1d2ac44262d62398a6d87bd
+  domain: retail
+  taskSplitName: base
+
+run:
+  taskIds: []
+  numTasks: null
+  numTrials: 1
+  seed: 300
+  maxSteps: 200
+  maxErrors: 10
+  maxConcurrency: 3
+
+agent:
+  implementation: guarded_retail_agent
+  baselineImplementation: llm_agent
+  llm: openai/deepseek-v4-flash
+  llmArgs:
+    api_base: https://api.deepseek.com
+    extra_body:
+      thinking:
+        type: disabled
+    temperature: 0.0
+
+user:
+  implementation: user_simulator
+  llm: openai/deepseek-v4-flash
+  llmArgs:
+    api_base: https://api.deepseek.com
+    extra_body:
+      thinking:
+        type: disabled
+    temperature: 0.0
+
+evaluator:
+  llm: openai/deepseek-v4-flash
+  llmArgs:
+    api_base: https://api.deepseek.com
+    extra_body:
+      thinking:
+        type: disabled
+    temperature: 0.0
+
+save:
+  baseline: official-baseline
+  guarded: guarded-agent
+

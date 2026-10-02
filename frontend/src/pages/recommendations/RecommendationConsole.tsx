@@ -3,6 +3,7 @@ import { Alert, Badge, Button, Card, Col, Descriptions, Empty, Form, Input, Inpu
 import { ApiOutlined, BranchesOutlined, CheckCircleOutlined, ClockCircleOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import { createRecommendationTask, listRecommendationTasks, RecommendationTaskSummary } from "../../api/recommendations";
+import { getApiBaseUrl } from "../../api/client";
 
 type RunStatus = "idle" | "running" | "done" | "error";
 type ScenarioKey = "homepage" | "campaign" | "retention";
@@ -210,8 +211,9 @@ export function RecommendationConsole() {
     abortRef.current = controller;
 
     try {
-      const response = await fetch("/api/v1/recommend/stream", {
+      const response = await fetch(`${getApiBaseUrl()}/recommend/stream`, {
         method: "POST",
+        credentials: "include",
         headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
         body: JSON.stringify(buildPayload(form)),
         signal: controller.signal,

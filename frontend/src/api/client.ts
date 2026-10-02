@@ -67,6 +67,7 @@ function extractApiError(payload: unknown): ApiErrorPayload | null {
 }
 
 function throwApiError(payload: unknown, status: number): never {
+  if (status === 401 && typeof window !== "undefined") window.dispatchEvent(new Event("auth-expired"));
   const error = extractApiError(payload);
   throw new ApiClientError(
     error?.message || `HTTP ${status}`,
@@ -78,6 +79,7 @@ function throwApiError(payload: unknown, status: number): never {
 
 export async function apiGet<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
+    credentials: "include",
     ...init,
     headers: {
       Accept: "application/json",
@@ -93,6 +95,7 @@ export async function apiGet<T>(path: string, init?: RequestInit): Promise<T> {
 
 export async function apiPost<T>(path: string, body: unknown, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
+    credentials: "include",
     method: "POST",
     ...init,
     headers: {

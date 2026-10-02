@@ -25,6 +25,7 @@ official and untouched.
 from __future__ import annotations
 
 import json
+import re
 import threading
 from typing import Optional
 
@@ -65,7 +66,9 @@ from ecommerce_tau3.tool_guard import ToolCategory, ToolGuard
 # results). The batch runner builds one agent per simulation; stop() drains
 # each agent's guard events into this list, and the driver
 # (ecommerce_tau3.run) writes them next to the official results as
-# guard_events.json. Pairing with simulations is by index at max_concurrency=1.
+# guard_events.json. Every entry carries the official task id supplied to the
+# agent factory, so concurrent single-trial runs never depend on completion
+# order for attribution.
 # ---------------------------------------------------------------------------
 _EVENT_COLLECTOR: list[dict] = []
 _EVENT_COLLECTOR_LOCK = threading.Lock()
@@ -90,6 +93,7 @@ class Tau3TrustBoundaryAgent(
         domain_policy: str,
         llm: Optional[str] = None,
         llm_args: Optional[dict] = None,
+        task_id: Optional[str] = None,
     ):
         super().__init__(
             tools=tools,
@@ -99,6 +103,7 @@ class Tau3TrustBoundaryAgent(
         )
         self.tool_guard = ToolGuard(tools)
         self.policy_guard = PolicyGuard()
+        self.task_id = task_id
         self.planner = BoundedPlanner(
             tools=tools,
             domain_policy=domain_policy,
@@ -118,6 +123,7 @@ class Tau3TrustBoundaryAgent(
             message_history = []
         return Tau3AgentState(
             messages=list(message_history),
+            task_id=self.task_id,
             known_entities={
                 "orders_owned": [],  # ownership-verified via tool observations
                 "users_seen": [],
@@ -162,6 +168,7 @@ class Tau3TrustBoundaryAgent(
             with _EVENT_COLLECTOR_LOCK:
                 _EVENT_COLLECTOR.append(
                     {
+                        "task_id": state.task_id,
                         "turn": state.turn,
                         "events": [e.model_dump(mode="json") for e in state.guard_events],
                     }
@@ -469,7 +476,7 @@ class Tau3TrustBoundaryAgent(
         latest = state.messages[-1] if state.messages else None
         if not isinstance(latest, UserMessage) or not latest.content:
             return False
-        if not self._is_affirmative(latest.content):
+        if not self._is_affirmative(latest.content, pending):
             return False
         pending.confirmation_received = True
         self._record_event(
@@ -481,9 +488,57 @@ class Tau3TrustBoundaryAgent(
         return True
 
     @staticmethod
-    def _is_affirmative(text: str) -> bool:
-        lowered = text.strip().lower()
-        return lowered.startswith(("yes", "yeah", "yep", "sure", "ok", "okay", "correct"))
+    def _is_affirmative(
+        text: str, pending: Optional[PendingAction] = None
+    ) -> bool:
+        """Accept natural confirmation without accepting a changed request.
+
+        PolicyGuard still compares the planner's next tool name and complete
+        arguments with the immutable pending snapshot. This parser only
+        decides whether the user affirmed that snapshot.
+        """
+        normalized = text.strip().lower()
+        if not re.match(
+            r"^(?:yes|yeah|yep|sure|ok(?:ay)?|correct|confirmed)\b",
+            normalized,
+        ):
+            return False
+
+        # Do not let a leading "yes" override a revocation or correction.
+        # Action verbs such as "cancel" and "change" are valid restatements:
+        # "Yes, please cancel #W1" and "go ahead with that change".
+        if re.search(
+            r"\b(?:but|instead|however|except|actually|rather)\b"
+            r"|\b(?:no|not|never|don't|do not|stop|wait|hold on|abort)\b"
+            r"|\bchanged? my mind\b",
+            normalized,
+        ):
+            return False
+        if re.search(
+            r"\b(?:change|switch|replace|update|set)\b.{0,40}"
+            r"\b(?:to|with|instead of)\b",
+            normalized,
+        ):
+            return False
+
+        if pending is not None:
+            # Concrete entity references in a restatement must already occur
+            # in the pending argument snapshot. Generic "that change" phrases
+            # require no fuzzy semantic matching.
+            pending_blob = json.dumps(
+                pending.arguments, sort_keys=True, ensure_ascii=False
+            ).lower()
+            references = re.findall(
+                r"#[a-z0-9_-]+"
+                r"|\b[a-z][a-z0-9]*_[a-z0-9_]*\d[a-z0-9_]*\b"
+                r"|\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b"
+                r"|\b\d{6,}\b",
+                normalized,
+            )
+            if any(reference not in pending_blob for reference in references):
+                return False
+
+        return True
 
     @staticmethod
     def _confirmation_text(plan: BoundedPlan, tool_call: ToolCall) -> str:

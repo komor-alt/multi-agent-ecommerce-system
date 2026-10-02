@@ -8,6 +8,8 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
@@ -48,6 +50,8 @@ public class AfterSalesRunEventService {
             Map<String, Object> data) {
         Object lock = runLocks.computeIfAbsent(runId, ignored -> new Object());
         synchronized (lock) {
+            runRepository.findByIdForUpdate(runId)
+                    .orElseThrow(() -> new IllegalArgumentException("AGENT_RUN_NOT_FOUND"));
             int sequence = eventRepository.findTopByRunIdOrderBySequenceDesc(runId)
                     .map(event -> event.getSequence() + 1)
                     .orElse(1);
@@ -62,9 +66,27 @@ public class AfterSalesRunEventService {
                     .dataJson(writeJson(data))
                     .createdAt(Instant.now())
                     .build());
-            publish(runId, event);
+            publishAfterCommit(runId, event);
             return event;
         }
+    }
+
+    /**
+     * SSE 只能看到已经提交的事件。否则数据库事务随后回滚时，客户端会收到一个
+     * 无法通过 Last-Event-ID 重放的“幽灵事件”。非事务调用（主要是纯单元测试）
+     * 保持立即发布。
+     */
+    private void publishAfterCommit(String runId, AfterSalesRunEventEntity event) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            publish(runId, event);
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                publish(runId, event);
+            }
+        });
     }
 
     @Transactional(readOnly = true)

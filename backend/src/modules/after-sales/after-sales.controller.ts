@@ -5,6 +5,8 @@ import {
   CreateAfterSalesTicketDto,
   ReviewAfterSalesProposalDto,
 } from "./dto/after-sales.dto";
+import { CurrentPrincipal, Roles } from "../auth/auth.decorators";
+import type { AuthPrincipal } from "../auth/auth.types";
 
 @Controller("after-sales")
 export class AfterSalesController {
@@ -15,10 +17,10 @@ export class AfterSalesController {
     return this.success(await this.service.listTickets(), "after-sales-list");
   }
 
-  /** 当前 Gateway 可信审批人（只读，Demo 配置；生产由认证中间件生成，不构成生产认证）。 */
+  /** Identity comes from the authenticated session, never from browser-supplied IDs. */
   @Get("operator-context")
-  async getOperatorContext() {
-    return this.success(await this.service.getOperatorContext(), "after-sales-operator-context");
+  async getOperatorContext(@CurrentPrincipal() principal: AuthPrincipal) {
+    return this.success(this.service.getOperatorContext(principal), "after-sales-operator-context");
   }
 
   @Post("tickets")
@@ -54,22 +56,27 @@ export class AfterSalesController {
   }
 
   @Post("proposals/:proposalId/approve")
+  @Roles("ADMIN")
   async approveProposal(
     @Param("proposalId") proposalId: string,
     @Body() dto: ReviewAfterSalesProposalDto,
+    @CurrentPrincipal() principal: AuthPrincipal,
   ) {
-    return this.success(await this.service.approveProposal(proposalId, dto), proposalId);
+    return this.success(await this.service.approveProposal(proposalId, dto, principal), proposalId);
   }
 
   @Post("proposals/:proposalId/reject")
+  @Roles("ADMIN")
   async rejectProposal(
     @Param("proposalId") proposalId: string,
     @Body() dto: ReviewAfterSalesProposalDto,
+    @CurrentPrincipal() principal: AuthPrincipal,
   ) {
-    return this.success(await this.service.rejectProposal(proposalId, dto), proposalId);
+    return this.success(await this.service.rejectProposal(proposalId, dto, principal), proposalId);
   }
 
   @Post("execution-jobs/:jobId/retry")
+  @Roles("ADMIN")
   async retryExecution(@Param("jobId") jobId: string) {
     return this.success(await this.service.retryExecution(jobId), jobId);
   }

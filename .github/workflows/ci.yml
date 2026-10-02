@@ -78,6 +78,10 @@ jobs:
         working-directory: backend
         run: npm run build
 
+      - name: Authentication and authorization contracts
+        working-directory: backend
+        run: npm run test:auth
+
   frontend:
     name: Frontend (React)
     runs-on: ubuntu-latest

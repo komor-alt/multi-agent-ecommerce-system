@@ -7,6 +7,8 @@ OFFICIAL factory registry, exactly like the official examples
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from tau2.agent.base_agent import HalfDuplexAgent
@@ -49,11 +51,12 @@ def test_factory_contract_matches_official():
         domain_policy="official policy text",
         llm="gpt-4.1-2025-04-14",
         llm_args={"temperature": 0.0},
-        task=None,  # official build_agent passes task= for all agents
+        task=SimpleNamespace(id="retail-task-17"),
         audio_native_config=None,
         audio_taps_dir=None,
     )
     assert isinstance(agent, Tau3TrustBoundaryAgent)
+    assert agent.get_init_state().task_id == "retail-task-17"
 
 
 def test_agent_is_half_duplex_agent():

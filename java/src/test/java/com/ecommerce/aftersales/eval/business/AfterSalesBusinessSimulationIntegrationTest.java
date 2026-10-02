@@ -55,7 +55,7 @@ import static org.assertj.core.api.Assertions.assertThat;
         "agent.aftersales.intake.mode=RULES",
         "agent.aftersales.planner.mode=RULES",
         "agent.aftersales.demo-step-delay-ms=0",
-        "agent.aftersales.retry-scan-ms=3600000"
+        "agent.aftersales.execution.retry-scan-ms=3600000"
 })
 class AfterSalesBusinessSimulationIntegrationTest {
 

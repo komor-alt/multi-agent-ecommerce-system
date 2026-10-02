@@ -6,6 +6,8 @@ import com.ecommerce.aftersales.repository.AfterSalesRunEventRepository;
 import com.ecommerce.aftersales.repository.AfterSalesRunRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseBodyEmitter.DataWithMediaType;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
@@ -119,6 +121,7 @@ class AfterSalesRunEventServiceTest {
     void streamSendsStreamReadyFirstThenReplaysHistoryWithoutPersisting() {
         when(runRepository.existsById("run-1")).thenReturn(true);
         when(runRepository.findById("run-1")).thenReturn(Optional.of(run("RUNNING")));
+        when(runRepository.findByIdForUpdate("run-1")).thenReturn(Optional.of(run("RUNNING")));
         when(eventRepository.findTopByRunIdOrderBySequenceDesc("run-1"))
                 .thenReturn(Optional.of(event("e2", 2, "tool_completed")));
         when(eventRepository.findByRunIdAndSequenceGreaterThanOrderBySequenceAsc("run-1", 0))
@@ -201,6 +204,7 @@ class AfterSalesRunEventServiceTest {
         };
         when(runRepository.existsById("run-1")).thenReturn(true);
         when(runRepository.findById("run-1")).thenReturn(Optional.of(run("RUNNING")));
+        when(runRepository.findByIdForUpdate("run-1")).thenReturn(Optional.of(run("RUNNING")));
         when(eventRepository.findByRunIdAndSequenceGreaterThanOrderBySequenceAsc("run-1", 0))
                 .thenReturn(List.of());
         when(eventRepository.findTopByRunIdOrderBySequenceDesc("run-1")).thenReturn(Optional.empty());
@@ -222,6 +226,41 @@ class AfterSalesRunEventServiceTest {
                 "run-1", "execution_started", "started", "running", "started",
                 Map.of("summary", "started"))).doesNotThrowAnyException();
         assertThat(emitter.sendAttempts).isEqualTo(2);
+    }
+
+    @Test
+    void transactionalAppendPublishesOnlyAfterCommit() {
+        DisconnectedSseEmitter emitter = new DisconnectedSseEmitter();
+        AfterSalesRunEventService localService = new AfterSalesRunEventService(
+                eventRepository, runRepository, new ObjectMapper()) {
+            @Override
+            protected SseEmitter createEmitter() {
+                return emitter;
+            }
+        };
+        when(runRepository.existsById("run-1")).thenReturn(true);
+        when(runRepository.findById("run-1")).thenReturn(Optional.of(run("RUNNING")));
+        when(runRepository.findByIdForUpdate("run-1")).thenReturn(Optional.of(run("RUNNING")));
+        when(eventRepository.findByRunIdAndSequenceGreaterThanOrderBySequenceAsc("run-1", 0))
+                .thenReturn(List.of());
+        when(eventRepository.findTopByRunIdOrderBySequenceDesc("run-1")).thenReturn(Optional.empty());
+        when(eventRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        localService.stream("run-1", null);
+        assertThat(emitter.sendAttempts).isEqualTo(1);
+
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            localService.append("run-1", "execution_started", "started", "running", "started",
+                    Map.of("summary", "started"));
+            assertThat(emitter.sendAttempts).isEqualTo(1);
+
+            TransactionSynchronizationManager.getSynchronizations()
+                    .forEach(TransactionSynchronization::afterCommit);
+            assertThat(emitter.sendAttempts).isEqualTo(2);
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
     }
 
     @Test

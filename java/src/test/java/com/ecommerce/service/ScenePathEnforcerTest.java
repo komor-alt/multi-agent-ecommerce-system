@@ -28,16 +28,16 @@ class ScenePathEnforcerTest {
     @Test
     void expectedNextAgentIsOwnerOfExpectedNextTool() {
         RecommendationPipelineState empty = newState("homepage");
-        assertEquals(AgentId.RECALL, enforcer.expectedNextAgent("homepage", empty));
-        assertEquals(AgentId.RECALL, enforcer.agentForTool(ScenePathEnforcer.GET_USER_PROFILE));
-        assertEquals(AgentId.CONSTRAINT, enforcer.agentForTool(ScenePathEnforcer.CHECK_INVENTORY));
+        assertEquals(AgentId.PROFILE, enforcer.expectedNextAgent("homepage", empty));
+        assertEquals(AgentId.PROFILE, enforcer.agentForTool(ScenePathEnforcer.GET_USER_PROFILE));
+        assertEquals(AgentId.INVENTORY, enforcer.agentForTool(ScenePathEnforcer.CHECK_INVENTORY));
         assertEquals(AgentId.COPY, enforcer.agentForTool(ScenePathEnforcer.GENERATE_LOCALIZED_COPY));
         assertEquals(AgentId.SUPERVISOR, enforcer.agentForTool(ScenePathEnforcer.FINAL_ACTION));
 
         RecommendationPipelineState afterSearch = newState("homepage");
         afterSearch.putAgentResult(RecommendationPipelineExecutor.USER_PROFILE_RESULT, ok());
         afterSearch.putAgentResult(RecommendationPipelineExecutor.CROSS_BORDER_RECALL_RESULT, ok());
-        assertEquals(AgentId.CONSTRAINT, enforcer.expectedNextAgent("homepage", afterSearch));
+        assertEquals(AgentId.INVENTORY, enforcer.expectedNextAgent("homepage", afterSearch));
 
         RecommendationPipelineState ready = newState("homepage");
         ready.putAgentResult(RecommendationPipelineExecutor.USER_PROFILE_RESULT, ok());
@@ -53,12 +53,12 @@ class ScenePathEnforcerTest {
         RecommendationPipelineState state = newState("campaign");
         markCampaignReadyForCopy(state);
         state.getVetoes().add(VetoRecord.builder()
-                .source(AgentId.CONSTRAINT)
+                .source(AgentId.INVENTORY)
                 .productIds(List.of("p-low"))
                 .reason("low stock")
                 .build());
 
-        assertEquals(AgentId.RECALL, enforcer.expectedNextAgent("campaign", state));
+        assertEquals(AgentId.PRODUCT, enforcer.expectedNextAgent("campaign", state));
         assertEquals(ScenePathEnforcer.SEARCH_PRODUCTS, enforcer.expectedNextStep("campaign", state));
         state.incrementRecallAfterVetoCount();
         state.getVetoes().get(0).setHandled(true);
@@ -67,8 +67,8 @@ class ScenePathEnforcerTest {
 
     @Test
     void specialistToolAllowlistsDoNotOverlapProductMutationAcrossCopy() {
-        assertTrue(enforcer.isToolAllowedFor(AgentId.RECALL, "search_products"));
-        assertTrue(enforcer.isToolAllowedFor(AgentId.CONSTRAINT, "check_inventory"));
+        assertTrue(enforcer.isToolAllowedFor(AgentId.PRODUCT, "search_products"));
+        assertTrue(enforcer.isToolAllowedFor(AgentId.INVENTORY, "check_inventory"));
         assertTrue(enforcer.isToolAllowedFor(AgentId.COPY, "generate_localized_copy"));
         assertFalse(enforcer.isToolAllowedFor(AgentId.COPY, "search_products"));
         assertFalse(enforcer.isToolAllowedFor(AgentId.COPY, "check_inventory"));

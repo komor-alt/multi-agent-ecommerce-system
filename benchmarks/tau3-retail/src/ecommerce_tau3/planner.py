@@ -17,9 +17,10 @@ in agent.py first.
 The LLM integration uses the OFFICIAL `tau2.utils.llm_utils.generate`
 utility (the same one `tau2.agent.llm_agent` uses). The system prompt keeps
 the complete official domain policy and adds bounded-planning instructions.
-The model may return either a plain assistant response or exactly one
-official ToolCall; malformed or multiple tool calls fail safely to the
-deterministic fallback. No gold actions, expected actions, evaluation
+The model may return either a plain assistant response or official ToolCalls.
+Mixed text/tool output and parallel calls are normalized to the first tool
+call before it reaches the guards; malformed or empty output fails safely to
+the deterministic fallback. No gold actions, expected actions, evaluation
 criteria, evaluator output, or task ids are ever used here
 (requirements §15 / §16 / §37).
 """
@@ -80,9 +81,12 @@ Follow the policy strictly:
 - Only operate on the authenticated user's own orders and profile. Never
   reference an order id, user id, or payment method id that you did not
   obtain from your own successful tool calls.
-- Before any database-updating action (cancel, modify, return, exchange,
-  address change), summarize the exact action and wait for explicit user
-  confirmation ("yes") before calling the mutation tool.
+- Once all exact arguments for a database update are known, PROPOSE the
+  mutation tool call immediately. Do not ask for confirmation in a free-form
+  message: the server-side guard will intercept the proposal, display the
+  exact arguments, and wait for the user's explicit confirmation.
+- After that guard-generated confirmation is accepted, propose the exact same
+  mutation tool call again. Never change its tool name or arguments.
 - Do not make up information: use only what the tools return.
 
 Always make sure you generate valid JSON only.
@@ -128,8 +132,9 @@ class BoundedPlan(BaseModel):
 
 
 class PlanOutputError(ValueError):
-    """The model output does not match the bounded protocol (malformed or
-    multiple tool calls). Failing safe means: never emit a guessed action;
+    """The model output does not match the bounded protocol.
+
+    Failing safe means: never emit a guessed action;
     route to the deterministic fallback instead."""
 
 
@@ -163,8 +168,9 @@ class BoundedPlanner:
             A BoundedPlan. The candidate tool call is a PROPOSAL: it is only
             executed after ToolGuard / PolicyGuard approve it.
 
-        Malformed model output (mixed or multiple tool calls) fails safely to
-        the deterministic fallback, which also passes the guards.
+        Mixed or parallel tool output is reduced to its first tool call before
+        guard evaluation. Malformed or empty output fails safely to the
+        deterministic fallback, which also passes the guards.
         """
         try:
             return self._plan_with_llm(state, incoming_message)
@@ -194,8 +200,8 @@ class BoundedPlanner:
 
         Same official call shape as `tau2.agent.llm_agent`:
         generate(model=self.llm, tools=self.tools, messages=..., call_name=...).
-        The model must return either one plain assistant response or exactly
-        one tool call — anything else is PlanOutputError and fails safe.
+        A plain assistant response becomes a message plan. Tool output is
+        reduced to its first call; malformed or empty output fails safe.
         """
         messages: list = [SystemMessage(role="system", content=self.system_prompt)]
         messages.extend(state.messages)
@@ -211,21 +217,27 @@ class BoundedPlanner:
     def _convert_llm_output(self, assistant_message: AssistantMessage) -> BoundedPlan:
         """Convert the official model output into exactly one BoundedPlan.
 
-        Valid outputs (the model can only do one per turn):
+        Valid outputs:
           - text content, no tool call  -> message plan
-          - exactly one tool call, no text -> candidate tool-call plan
-        Everything else (both, several calls, nothing) fails safe.
+          - one or more tool calls -> the first candidate tool-call plan
+        Accompanying text and remaining parallel calls are discarded before
+        guard evaluation. Empty or malformed output fails safe.
         """
         tool_calls = assistant_message.tool_calls or []
         content = (assistant_message.content or "").strip()
 
-        if len(tool_calls) > 1:
-            raise PlanOutputError(
-                f"model returned {len(tool_calls)} tool calls; at most one is allowed"
-            )
         if tool_calls and content:
-            raise PlanOutputError(
-                "model returned both a message and a tool call; exactly one is allowed"
+            logger.warning(
+                "Model returned text with %d tool call(s); discarding the text "
+                "and retaining tool calls for bounded normalization.",
+                len(tool_calls),
+            )
+        if len(tool_calls) > 1:
+            logger.warning(
+                "Model returned %d parallel tool calls; retaining only the first "
+                "bounded step (%s) and discarding the rest before guards.",
+                len(tool_calls),
+                tool_calls[0].name,
             )
         if tool_calls:
             tool_call = tool_calls[0]

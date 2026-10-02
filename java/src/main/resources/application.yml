@@ -14,6 +14,11 @@ spring:
     username: ${SPRING_DATASOURCE_USERNAME:sa}
     password: ${SPRING_DATASOURCE_PASSWORD:}
     driver-class-name: ${SPRING_DATASOURCE_DRIVER_CLASS_NAME:org.h2.Driver}
+    hikari:
+      maximum-pool-size: ${ECOM_DB_MAX_POOL_SIZE:20}
+      minimum-idle: ${ECOM_DB_MIN_IDLE:4}
+      connection-timeout: ${ECOM_DB_CONNECTION_TIMEOUT_MS:3000}
+      validation-timeout: ${ECOM_DB_VALIDATION_TIMEOUT_MS:1000}
   data:
     redis:
       host: ${SPRING_DATA_REDIS_HOST:localhost}
@@ -24,19 +29,116 @@ spring:
       mode: ${SPRING_SQL_INIT_MODE:never}
       schema-locations: ${SPRING_SQL_INIT_SCHEMA_LOCATIONS:classpath:schema-postgresql.sql}
   jpa:
+    open-in-view: false
     hibernate:
       ddl-auto: ${SPRING_JPA_HIBERNATE_DDL_AUTO:update}
+  lifecycle:
+    timeout-per-shutdown-phase: ${ECOM_SHUTDOWN_TIMEOUT:30s}
+  task:
+    scheduling:
+      pool:
+        size: ${ECOM_SCHEDULER_POOL_SIZE:4}
 
 server:
   port: 8080
+  shutdown: graceful
+  error:
+    include-message: never
+    include-stacktrace: never
+  tomcat:
+    connection-timeout: ${ECOM_INBOUND_TIMEOUT:10s}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  endpoint:
+    health:
+      show-details: never
+      probes:
+        enabled: true
+      group:
+        liveness:
+          include: livenessState
+        readiness:
+          include: readinessState,db
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
 
 agent:
+  demo:
+    seed-enabled: ${ECOM_DEMO_SEED_ENABLED:true}
+  feature-store:
+    max-cached-users: ${ECOM_FEATURE_MAX_CACHED_USERS:1000}
+    max-recent-events: ${ECOM_FEATURE_MAX_RECENT_EVENTS:20}
+    recent-event-preview-size: ${ECOM_FEATURE_PREVIEW_SIZE:5}
+    max-event-bytes: ${ECOM_FEATURE_MAX_EVENT_BYTES:4096}
+    memory-ttl: ${ECOM_FEATURE_MEMORY_TTL:30m}
+    redis-ttl: ${ECOM_FEATURE_REDIS_TTL:24h}
+  security:
+    internal-api:
+      enabled: ${ECOM_INTERNAL_API_AUTH_ENABLED:false}
+      token: ${JAVA_INTERNAL_SERVICE_TOKEN:}
+  limits:
+    run-timeout: ${ECOM_AGENT_RUN_TIMEOUT:60s}
+    connect-timeout: ${ECOM_OUTBOUND_CONNECT_TIMEOUT:3s}
+    read-timeout: ${ECOM_OUTBOUND_READ_TIMEOUT:15s}
+    max-steps: ${ECOM_AGENT_MAX_STEPS:32}
+    max-items: ${ECOM_AGENT_MAX_ITEMS:100}
+  events:
+    poll-interval-ms: ${ECOM_AGENT_EVENTS_POLL_MS:250}
+    page-size: ${ECOM_AGENT_EVENTS_PAGE_SIZE:100}
+    history-max-page-size: ${ECOM_AGENT_EVENTS_HISTORY_LIMIT:500}
+    max-subscribers: ${ECOM_AGENT_EVENTS_MAX_SUBSCRIBERS:256}
+    max-subscribers-per-run: ${ECOM_AGENT_EVENTS_MAX_PER_RUN:8}
+    sender-threads: ${ECOM_AGENT_EVENTS_THREADS:4}
+    sender-queue-capacity: ${ECOM_AGENT_EVENTS_QUEUE_CAPACITY:256}
+    stream-timeout-ms: ${ECOM_AGENT_EVENTS_TIMEOUT_MS:600000}
+    heartbeat-interval-ms: ${ECOM_AGENT_EVENTS_HEARTBEAT_MS:15000}
+  recovery:
+    # Only read-only recommendation attempts are replayed; never replay aftersales operations here.
+    enabled: ${ECOM_AGENT_RECOVERY_ENABLED:true}
+    lease-duration: ${ECOM_AGENT_RECOVERY_LEASE_DURATION:30s}
+    heartbeat-interval: ${ECOM_AGENT_RECOVERY_HEARTBEAT_INTERVAL:5s}
+    renewal-timeout-seconds: ${ECOM_AGENT_RECOVERY_RENEWAL_TIMEOUT_SECONDS:3}
+    heartbeat-scheduler-pool-size: ${ECOM_AGENT_RECOVERY_HEARTBEAT_THREADS:1}
+    heartbeat-shutdown-await-seconds: ${ECOM_AGENT_RECOVERY_HEARTBEAT_SHUTDOWN_SECONDS:5}
+    scan-interval: ${ECOM_AGENT_RECOVERY_SCAN_INTERVAL:1s}
+    batch-size: ${ECOM_AGENT_RECOVERY_BATCH_SIZE:16}
+    max-attempts: ${ECOM_AGENT_RECOVERY_MAX_ATTEMPTS:3}
+    worker-id: ${ECOM_AGENT_RECOVERY_WORKER_ID:${HOSTNAME:local}-${random.uuid}}
+  persistence:
+    # Transactional outbox is durable even while the local transport is used.
+    # Replace RecommendationOutboxTransport with Kafka/RabbitMQ in distributed deployment.
+    outbox-transport: ${ECOM_AGENT_OUTBOX_TRANSPORT:local}
+    outbox-scan-ms: ${ECOM_AGENT_OUTBOX_SCAN_MS:250}
+    outbox-batch-size: ${ECOM_AGENT_OUTBOX_BATCH_SIZE:200}
+    outbox-max-attempts: ${ECOM_AGENT_OUTBOX_MAX_ATTEMPTS:10}
+    outbox-retry-delay-ms: ${ECOM_AGENT_OUTBOX_RETRY_DELAY_MS:5000}
+    outbox-lease-ms: ${ECOM_AGENT_OUTBOX_LEASE_MS:60000}
+    outbox-retry-max-delay-ms: ${ECOM_AGENT_OUTBOX_RETRY_MAX_DELAY_MS:300000}
+    outbox-retry-jitter-ratio: ${ECOM_AGENT_OUTBOX_JITTER_RATIO:0.2}
   guard:
     max-concurrent-runs: ${ECOM_AGENT_MAX_CONCURRENT_RUNS:12}
   executor:
     core-size: ${ECOM_AGENT_EXECUTOR_CORE_SIZE:8}
     max-size: ${ECOM_AGENT_EXECUTOR_MAX_SIZE:16}
     queue-capacity: ${ECOM_AGENT_EXECUTOR_QUEUE_CAPACITY:32}
+  orchestration:
+    parallel-enabled: ${ECOM_AGENT_PARALLEL_ENABLED:true}
+    speculative-rerank-enabled: ${ECOM_AGENT_SPECULATIVE_RERANK_ENABLED:true}
+    max-parallel-specialists: ${ECOM_AGENT_MAX_PARALLEL_SPECIALISTS:2}
+    core-size: ${ECOM_AGENT_ORCHESTRATION_CORE_SIZE:2}
+    max-size: ${ECOM_AGENT_ORCHESTRATION_MAX_SIZE:4}
+    queue-capacity: ${ECOM_AGENT_ORCHESTRATION_QUEUE_CAPACITY:16}
+    keep-alive-seconds: ${ECOM_AGENT_ORCHESTRATION_KEEP_ALIVE_SECONDS:60}
+    max-retained-runs: ${ECOM_AGENT_MAX_RETAINED_RUNS:100}
+    thread-name-prefix: ${ECOM_AGENT_ORCHESTRATION_THREAD_PREFIX:agent-orchestrator-}
   sse:
     core-size: ${ECOM_AGENT_SSE_CORE_SIZE:2}
     max-size: ${ECOM_AGENT_SSE_MAX_SIZE:6}
@@ -47,7 +149,7 @@ agent:
     live-enabled: ${ECOM_RECOMMEND_LIVE_ENABLED:false}
     max-llm-calls: ${ECOM_RECOMMEND_MAX_LLM_CALLS:0}
   supervisor:
-    # Only the supervisor router spends this budget. Specialists stay RULES.
+    # Shared per-run budget for supervisor/specialist planning and LLM-backed tools.
     max-llm-calls: ${ECOM_SUPERVISOR_MAX_LLM_CALLS:${ECOM_RECOMMEND_MAX_LLM_CALLS:0}}
   embedding:
     # Safe Qwen OpenAI-compatible defaults; every value remains environment-overridable.
@@ -62,7 +164,36 @@ agent:
     # Shared per-run live-model budget; zero keeps aftersales cost-free by default.
     max-llm-calls: ${ECOM_AFTERSALES_MAX_LLM_CALLS:0}
     demo-step-delay-ms: ${ECOM_AFTERSALES_STEP_DELAY_MS:0}
-    retry-scan-ms: ${ECOM_AFTERSALES_RETRY_SCAN_MS:5000}
+    llm-executors:
+      # Intake and planner stay isolated so a slow stage cannot exhaust the other stage's capacity.
+      intake:
+        core-size: ${ECOM_AFTERSALES_INTAKE_LLM_CORE_SIZE:1}
+        max-size: ${ECOM_AFTERSALES_INTAKE_LLM_MAX_SIZE:2}
+        queue-capacity: ${ECOM_AFTERSALES_INTAKE_LLM_QUEUE_CAPACITY:4}
+        keep-alive-seconds: ${ECOM_AFTERSALES_INTAKE_LLM_KEEP_ALIVE_SECONDS:30}
+        thread-name-prefix: ${ECOM_AFTERSALES_INTAKE_LLM_THREAD_PREFIX:aftersales-intake-llm-}
+      planner:
+        core-size: ${ECOM_AFTERSALES_PLANNER_LLM_CORE_SIZE:1}
+        max-size: ${ECOM_AFTERSALES_PLANNER_LLM_MAX_SIZE:2}
+        queue-capacity: ${ECOM_AFTERSALES_PLANNER_LLM_QUEUE_CAPACITY:4}
+        keep-alive-seconds: ${ECOM_AFTERSALES_PLANNER_LLM_KEEP_ALIVE_SECONDS:30}
+        thread-name-prefix: ${ECOM_AFTERSALES_PLANNER_LLM_THREAD_PREFIX:aftersales-planner-llm-}
+    execution:
+      # Persistent execution queue. The lease must exceed the connector's maximum call timeout.
+      max-attempts: ${ECOM_AFTERSALES_EXECUTION_MAX_ATTEMPTS:3}
+      retry-delay-ms: ${ECOM_AFTERSALES_EXECUTION_RETRY_DELAY_MS:10000}
+      retry-scan-ms: ${ECOM_AFTERSALES_RETRY_SCAN_MS:5000}
+      retry-batch-size: ${ECOM_AFTERSALES_EXECUTION_RETRY_BATCH_SIZE:10}
+      lease-duration-ms: ${ECOM_AFTERSALES_EXECUTION_LEASE_DURATION_MS:120000}
+      worker-id: ${ECOM_AFTERSALES_EXECUTION_WORKER_ID:${HOSTNAME:local}-${random.uuid}}
+      executor:
+        core-size: ${ECOM_AFTERSALES_EXECUTOR_CORE_SIZE:2}
+        max-size: ${ECOM_AFTERSALES_EXECUTOR_MAX_SIZE:8}
+        queue-capacity: ${ECOM_AFTERSALES_EXECUTOR_QUEUE_CAPACITY:64}
+        keep-alive-seconds: ${ECOM_AFTERSALES_EXECUTOR_KEEP_ALIVE_SECONDS:60}
+        shutdown-await-seconds: ${ECOM_AFTERSALES_EXECUTOR_SHUTDOWN_AWAIT_SECONDS:10}
+        thread-name-prefix: ${ECOM_AFTERSALES_EXECUTOR_THREAD_PREFIX:aftersales-exec-}
+        rejection-policy: ${ECOM_AFTERSALES_EXECUTOR_REJECTION_POLICY:ABORT}
     intake:
       # RULES is the zero-cost default; live use requires live-enabled=true and a positive run budget.
       mode: ${ECOM_AFTERSALES_INTAKE_MODE:RULES}

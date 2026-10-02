@@ -50,10 +50,16 @@ echo "==> Guarded agent: $AGENT_IMPL | domain=$DOMAIN split=$SPLIT tasks=${TASK_
 echo "    agent-llm=$AGENT_LLM user-llm=$USER_LLM"
 echo "    results -> $RESULTS_DIR/$SAVE_NAME"
 
+# Keep the official source directory unique per run. The official runner
+# fails or resumes when a save name already exists; either behavior would
+# contaminate a fresh comparison with stale artifacts.
+OFFICIAL_SAVE_NAME="${SAVE_NAME}-${RUN_ID}"
+
+
 # Official runner writes into <TAU2_DATA_DIR>/simulations/<save-to>/
 export TAU2_DATA_DIR="$TAU2_CHECKOUT/data"
 
-ARGS=(--config "$CONFIG" --agent "$AGENT_IMPL" --save-to "$SAVE_NAME")
+ARGS=(--config "$CONFIG" --agent "$AGENT_IMPL" --save-to "$OFFICIAL_SAVE_NAME")
 [ -n "${TAU3_STAGE:-}" ] && ARGS+=(--stage "$TAU3_STAGE")
 [ -n "$TASK_IDS" ] && ARGS+=(--task-ids $TASK_IDS)
 [ -n "$NUM_TASKS" ] && ARGS+=(--num-tasks "$NUM_TASKS")
@@ -68,6 +74,6 @@ ARGS+=(
 uv run python -m ecommerce_tau3.run "${ARGS[@]}" "${@:2}"
 
 # Copy official artifacts + adapter guard events verbatim into results/.
-cp -r "$TAU2_DATA_DIR/simulations/$SAVE_NAME" "$RESULTS_DIR/$SAVE_NAME"
+cp -r "$TAU2_DATA_DIR/simulations/$OFFICIAL_SAVE_NAME" "$RESULTS_DIR/$SAVE_NAME"
 echo "==> Official results (byte-identical copy): $RESULTS_DIR/$SAVE_NAME"
 echo "    run dir: $RESULTS_DIR"

@@ -56,6 +56,7 @@ export function createAfterSalesEventSource(runId: string, lastEventId?: string)
   const params = lastEventId ? `?lastEventId=${encodeURIComponent(lastEventId)}` : "";
   return new EventSource(
     `${getApiBaseUrl()}/after-sales/runs/${encodeURIComponent(runId)}/stream${params}`,
+    { withCredentials: true },
   );
 }
 

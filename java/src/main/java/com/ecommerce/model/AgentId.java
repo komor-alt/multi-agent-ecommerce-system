@@ -1,11 +1,10 @@
 package com.ecommerce.model;
 
-/**
- * v1 collaboration roles. Profile and rank stay as tools inside {@link #RECALL}.
- */
+/** Collaboration identities. Each non-supervisor identity owns a bounded agent loop. */
 public enum AgentId {
     SUPERVISOR,
-    RECALL,
-    CONSTRAINT,
+    PROFILE,
+    PRODUCT,
+    INVENTORY,
     COPY
 }

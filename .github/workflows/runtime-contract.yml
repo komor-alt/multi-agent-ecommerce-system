@@ -1,0 +1,54 @@
+name: Runtime production contracts
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  postgres-contract:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: runtime_contract
+          POSTGRES_USER: contract
+          POSTGRES_PASSWORD: contract_ci_only
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U contract -d runtime_contract"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - name: Exercise actual PostgreSQL migration, claims and fencing
+        working-directory: java
+        env:
+          ECOM_RUN_POSTGRES_TESTS: 'true'
+          ECOM_POSTGRES_TEST_URL: jdbc:postgresql://localhost:5432/runtime_contract
+          ECOM_POSTGRES_TEST_USER: contract
+          ECOM_POSTGRES_TEST_PASSWORD: contract_ci_only
+        run: mvn -B -Dtest=RecommendationPostgresPersistenceTest,RecommendationExecutionLeasePostgresTest,RecommendationRecoveryProcessTest test
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: postgres-contract-results
+          path: java/target/surefire-reports/
+  monitoring-rules:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Prometheus rules with the real parser
+        run: >-
+          docker run --rm --entrypoint /bin/promtool
+          -v "$PWD/deploy/prometheus:/etc/prometheus:ro"
+          prom/prometheus:v3.2.1 check rules /etc/prometheus/alerts.yml
+      - name: Check scrape configuration without production secrets
+        run: >-
+          docker run --rm --entrypoint /bin/promtool
+          -v "$PWD/deploy/prometheus:/etc/prometheus:ro"
+          prom/prometheus:v3.2.1 check config --syntax-only /etc/prometheus/prometheus.yml

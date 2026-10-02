@@ -2,6 +2,7 @@ package com.ecommerce.aftersales.service;
 
 import com.ecommerce.aftersales.model.AfterSalesTypes;
 import com.ecommerce.aftersales.model.AfterSalesTypes.EvidenceType;
+import com.ecommerce.config.AfterSalesLlmExecutorProperties;
 import com.ecommerce.service.LlmCallBudget;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -57,7 +58,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * - fallbackReason 只暴露安全错误码（输入预校验失败为 INVALID_INPUT），绝不外泄 key、prompt
  *   或底层异常消息。
  *
- * 资源边界（线程池饥饿防护）：与 Intake 相同的独立有界执行器（核心 1、最大 2、队列 4），
+ * 资源边界（线程池饥饿防护）：使用 agent.aftersales.llm-executors.planner 配置的独立有界执行器，
  * 超时后 future.cancel(true) 中断底层模型调用线程；@PreDestroy 时 shutdownNow 兜底清理；
  * 队列满抛拒绝异常 → LLM_BUSY 回退。规划循环本身运行在 agentExecutor 线程上，
  * 绝不能向同一池提交并等待，否则饥饿死锁。
@@ -135,7 +136,8 @@ public class AfterSalesEvidencePlannerService {
             String mode,
             long timeoutMs,
             String apiKey) {
-        this(chatClientBuilder, objectMapper, mode, timeoutMs, apiKey, true, 0);
+        this(chatClientBuilder, objectMapper, mode, timeoutMs, apiKey, true, 0,
+                AfterSalesLlmExecutorProperties.plannerDefaults());
     }
 
     /** Explicit bounded budget for offline tests with injected mock model responses. */
@@ -146,7 +148,8 @@ public class AfterSalesEvidencePlannerService {
             long timeoutMs,
             String apiKey,
             int maxLlmCalls) {
-        this(chatClientBuilder, objectMapper, mode, timeoutMs, apiKey, true, maxLlmCalls);
+        this(chatClientBuilder, objectMapper, mode, timeoutMs, apiKey, true, maxLlmCalls,
+                AfterSalesLlmExecutorProperties.plannerDefaults());
     }
 
     @org.springframework.beans.factory.annotation.Autowired
@@ -156,8 +159,10 @@ public class AfterSalesEvidencePlannerService {
             @Value("$" + "{agent.aftersales.planner.mode:RULES}") String mode,
             @Value("$" + "{agent.aftersales.planner.timeout-ms:3000}") long timeoutMs,
             @Value("$" + "{spring.ai.openai.api-key:}") String apiKey,
-            @Value("$" + "{agent.aftersales.planner.live-enabled:false}") boolean liveEnabled) {
-        this(chatClientBuilder, objectMapper, mode, timeoutMs, apiKey, liveEnabled, 0);
+            @Value("$" + "{agent.aftersales.planner.live-enabled:false}") boolean liveEnabled,
+            AfterSalesLlmExecutorProperties executorProperties) {
+        this(chatClientBuilder, objectMapper, mode, timeoutMs, apiKey, liveEnabled, 0,
+                executorProperties.getPlanner());
     }
 
     private AfterSalesEvidencePlannerService(
@@ -167,7 +172,8 @@ public class AfterSalesEvidencePlannerService {
             long timeoutMs,
             String apiKey,
             boolean liveEnabled,
-            int maxLlmCalls) {
+            int maxLlmCalls,
+            AfterSalesLlmExecutorProperties.Pool executorPool) {
         this.chatClient = chatClientBuilder.build();
         this.objectMapper = objectMapper;
         this.mode = normalizeMode(mode);
@@ -175,12 +181,14 @@ public class AfterSalesEvidencePlannerService {
         this.apiKey = apiKey == null ? "" : apiKey;
         this.liveEnabled = liveEnabled;
         this.standaloneBudget = new LlmCallBudget(Math.max(0, maxLlmCalls));
-        // 独立有界执行器：见类注释「资源边界」。核心 1 / 最大 2 / 队列 4，守护线程。
+        // 独立有界执行器：见类注释「资源边界」。容量由配置控制，守护线程。
         this.llmExecutor = new ThreadPoolExecutor(
-                1, 2, 30L, TimeUnit.SECONDS,
-                new ArrayBlockingQueue<>(4),
+                executorPool.getCoreSize(), executorPool.getMaxSize(),
+                executorPool.getKeepAliveSeconds(), TimeUnit.SECONDS,
+                new ArrayBlockingQueue<>(executorPool.getQueueCapacity()),
                 r -> {
-                    Thread thread = new Thread(r, "aftersales-planner-llm-" + POOL_SEQ.incrementAndGet());
+                    Thread thread = new Thread(r,
+                            executorPool.getThreadNamePrefix() + POOL_SEQ.incrementAndGet());
                     thread.setDaemon(true);
                     return thread;
                 },

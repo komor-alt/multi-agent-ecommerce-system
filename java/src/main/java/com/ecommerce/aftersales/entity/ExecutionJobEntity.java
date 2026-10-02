@@ -13,6 +13,12 @@ import java.time.Instant;
         uniqueConstraints = {
                 @UniqueConstraint(name = "uk_execution_proposal", columnNames = "proposal_id"),
                 @UniqueConstraint(name = "uk_execution_idempotency", columnNames = "idempotency_key")
+        },
+        indexes = {
+                @Index(name = "idx_execution_status_retry",
+                        columnList = "status,next_retry_at,created_at"),
+                @Index(name = "idx_execution_status_lease",
+                        columnList = "status,lease_until")
         }
 )
 @Getter
@@ -48,6 +54,8 @@ public class ExecutionJobEntity {
 
     private int attemptCount;
     private Instant nextRetryAt;
+    private String leaseOwner;
+    private Instant leaseUntil;
 
     @Lob
     private String lastError;

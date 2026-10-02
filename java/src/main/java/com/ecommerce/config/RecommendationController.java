@@ -9,6 +9,10 @@ import com.ecommerce.model.RecommendationResponse;
 import com.ecommerce.model.ToolLoopRequest;
 import com.ecommerce.model.ToolLoopResponse;
 import com.ecommerce.orchestrator.SupervisorOrchestrator;
+import com.ecommerce.runtime.DynamicSubAgentRuntime;
+import com.ecommerce.runtime.DynamicSubAgentRuntimeRegistry;
+import com.ecommerce.runtime.persistence.RecommendationRunEventService;
+import com.ecommerce.runtime.persistence.RecommendationPersistenceMonitor;
 import com.ecommerce.service.ABTestService;
 import com.ecommerce.service.AgentConcurrencyGuard;
 import com.ecommerce.service.AgentRunRejectedException;
@@ -26,21 +30,24 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
-import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @RestController
 @RequestMapping("/api/v1")
 public class RecommendationController {
+    private static final Logger log = LoggerFactory.getLogger(RecommendationController.class);
 
     private final SupervisorOrchestrator orchestrator;
     private final ABTestService abTestService;
@@ -51,6 +58,9 @@ public class RecommendationController {
     private final RedisFeatureStoreService featureStoreService;
     private final DemoDataService demoDataService;
     private final AgentConcurrencyGuard concurrencyGuard;
+    private final DynamicSubAgentRuntimeRegistry subAgentRuntimeRegistry;
+    private final RecommendationRunEventService recommendationRunEventService;
+    private final RecommendationPersistenceMonitor recommendationPersistenceMonitor;
     private final Executor sseExecutor;
 
     public RecommendationController(
@@ -63,6 +73,9 @@ public class RecommendationController {
             RedisFeatureStoreService featureStoreService,
             DemoDataService demoDataService,
             AgentConcurrencyGuard concurrencyGuard,
+            DynamicSubAgentRuntimeRegistry subAgentRuntimeRegistry,
+            RecommendationRunEventService recommendationRunEventService,
+            RecommendationPersistenceMonitor recommendationPersistenceMonitor,
             @Qualifier("sseExecutor") Executor sseExecutor) {
         this.orchestrator = orchestrator;
         this.abTestService = abTestService;
@@ -73,13 +86,18 @@ public class RecommendationController {
         this.featureStoreService = featureStoreService;
         this.demoDataService = demoDataService;
         this.concurrencyGuard = concurrencyGuard;
+        this.subAgentRuntimeRegistry = subAgentRuntimeRegistry;
+        this.recommendationRunEventService = recommendationRunEventService;
+        this.recommendationPersistenceMonitor = recommendationPersistenceMonitor;
         this.sseExecutor = sseExecutor;
     }
 
     @PostMapping("/recommend")
     public RecommendationResponse recommend(@RequestBody RecommendationRequest request) {
         try (AgentConcurrencyGuard.GuardLease ignored = acquireOrReject("recommend")) {
-            RecommendationResponse response = orchestrator.recommend(request);
+            AgentLoopResponse agentResponse = autonomousAgentLoopService.run(
+                    ToolLoopRequest.builder().request(request).build());
+            RecommendationResponse response = requireCompletedRecommendation(agentResponse);
             metricsCollector.recordRecommendation(response);
             return response;
         }
@@ -87,27 +105,7 @@ public class RecommendationController {
 
     @PostMapping(value = "/recommend/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter recommendStream(@RequestBody RecommendationRequest request) {
-        AgentConcurrencyGuard.GuardLease lease = acquireOrReject("recommend_stream");
-        SseEmitter emitter = new SseEmitter(0L);
-        CompletableFuture.runAsync(() -> {
-            try (lease) {
-                RecommendationResponse response = orchestrator.recommend(request, event -> {
-                    try {
-                        emitter.send(SseEmitter.event()
-                                .id(event.getEventId())
-                                .name(event.getName())
-                                .data(event));
-                    } catch (IOException e) {
-                        throw new UncheckedIOException(e);
-                    }
-                });
-                metricsCollector.recordRecommendation(response);
-                emitter.complete();
-            } catch (Exception e) {
-                emitter.completeWithError(e);
-            }
-        }, sseExecutor);
-        return emitter;
+        return startStream(ToolLoopRequest.builder().request(request).build(), "recommend_stream");
     }
 
     @PostMapping("/recommend/tool-loop")
@@ -136,39 +134,78 @@ public class RecommendationController {
 
     @PostMapping(value = "/recommend/agent-loop/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter recommendWithAgentLoopStream(@RequestBody ToolLoopRequest request) {
-        AgentConcurrencyGuard.GuardLease lease = acquireOrReject("agent_loop_stream");
-        SseEmitter emitter = new SseEmitter(0L);
-        CompletableFuture.runAsync(() -> {
-            try (lease) {
-                AgentLoopResponse response = autonomousAgentLoopService.run(request, event -> {
-                    try {
-                        emitter.send(SseEmitter.event()
-                                .id(event.getEventId())
-                                .name(event.getName())
-                                .data(event));
-                    } catch (IOException e) {
-                        throw new UncheckedIOException(e);
+        return startStream(request, "agent_loop_stream");
+    }
+
+    /** Network delivery runs independently; disconnecting must not abort an admitted run. */
+    private SseEmitter startStream(ToolLoopRequest request, String type) {
+        AgentConcurrencyGuard.GuardLease lease = acquireOrReject(type);
+        ToolLoopRequest prepared = null;
+        SseEmitter emitter = null;
+        try {
+            prepared = autonomousAgentLoopService.prepareRun(request);
+            emitter = recommendationRunEventService.stream(prepared.getRunId(), null);
+            ToolLoopRequest admitted = prepared;
+            sseExecutor.execute(() -> {
+                try (lease) {
+                    AgentLoopResponse response = autonomousAgentLoopService.runPrepared(admitted);
+                    if (response != null) {
+                        metricsCollector.recordToolCalls(response.getToolCalls());
+                        metricsCollector.recordRecommendation(response.getResponse());
                     }
-                });
-                metricsCollector.recordToolCalls(response.getToolCalls());
-                if (response.getResponse() != null) {
-                    metricsCollector.recordRecommendation(response.getResponse());
+                } catch (RuntimeException error) {
+                    log.warn("Recommendation run {} failed: {}", admitted.getRunId(), error.getClass().getSimpleName());
+                    failDispatchSafely(admitted.getRunId(), "execution_failed", error);
                 }
-                emitter.complete();
-            } catch (Exception error) {
-                emitter.completeWithError(error);
+            });
+            return emitter;
+        } catch (RuntimeException error) {
+            lease.close();
+            if (prepared != null) {
+                failDispatchSafely(prepared.getRunId(), "dispatch_rejected", error);
             }
-        }, sseExecutor);
-        return emitter;
+            if (emitter != null) {
+                try {
+                    emitter.completeWithError(error);
+                } catch (RuntimeException cleanupError) {
+                    error.addSuppressed(cleanupError);
+                }
+            }
+            if (error instanceof RejectedExecutionException) {
+                throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Agent runtime busy");
+            }
+            throw error;
+        }
+    }
+
+    private void failDispatchSafely(String runId, String reason, RuntimeException original) {
+        try {
+            autonomousAgentLoopService.failPreparedRun(runId, reason);
+        } catch (RuntimeException cleanupError) {
+            original.addSuppressed(cleanupError);
+            log.error("Unable to persist failed recommendation run {}: {}", runId,
+                    cleanupError.getClass().getSimpleName());
+        }
     }
 
     @PostMapping("/evaluations/smoke")
     public Map<String, Object> smokeEvaluation(@RequestBody RecommendationRequest request) {
         try (AgentConcurrencyGuard.GuardLease ignored = acquireOrReject("smoke_evaluation")) {
-            RecommendationResponse response = orchestrator.recommend(request);
+            RecommendationResponse response = requireCompletedRecommendation(autonomousAgentLoopService.run(
+                    ToolLoopRequest.builder().request(request).build()));
             metricsCollector.recordRecommendation(response);
             EvaluationReport report = evaluator.evaluate(request, response);
             return Map.of("evaluation", report, "response", response);
+        }
+    }
+
+    /** Explicit deterministic baseline; it is intentionally not the product default. */
+    @PostMapping("/recommend/workflow-baseline")
+    public RecommendationResponse recommendWithWorkflowBaseline(@RequestBody RecommendationRequest request) {
+        try (AgentConcurrencyGuard.GuardLease ignored = acquireOrReject("workflow_baseline")) {
+            RecommendationResponse response = orchestrator.recommend(request);
+            metricsCollector.recordRecommendation(response);
+            return response;
         }
     }
 
@@ -204,7 +241,49 @@ public class RecommendationController {
     public Map<String, Object> metrics() {
         Map<String, Object> snapshot = new LinkedHashMap<>(metricsCollector.snapshot());
         snapshot.put("runtime_guard", concurrencyGuard.snapshot());
+        snapshot.put("recommendation_persistence", recommendationPersistenceMonitor.snapshot());
+        snapshot.put("recommendation_events", recommendationRunEventService.snapshot());
         return snapshot;
+    }
+
+    /** Inspect the live or recently completed child-task DAG for one Agent run. */
+    @GetMapping("/agent-runs/{runId}/subagents")
+    public DynamicSubAgentRuntime.RunView subAgentRun(@PathVariable String runId) {
+        return subAgentRuntimeRegistry.find(runId)
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.NOT_FOUND, "Unknown Agent run: " + runId));
+    }
+
+    /** Replay persisted events and then continue streaming live events. */
+    @GetMapping(value = "/agent-runs/{runId}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter recommendationRunEvents(
+            @PathVariable String runId,
+            @RequestHeader(value = "Last-Event-ID", required = false) String lastEventId) {
+        try {
+            return recommendationRunEventService.stream(runId, lastEventId);
+        } catch (IllegalArgumentException error) {
+            throw eventRequestError(error);
+        } catch (RejectedExecutionException error) {
+            throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Event subscriber capacity reached");
+        }
+    }
+
+    @GetMapping("/agent-runs/{runId}/event-history")
+    public List<Map<String, Object>> recommendationRunEventHistory(
+            @PathVariable String runId,
+            @RequestParam(defaultValue = "0") int afterSequence,
+            @RequestParam(defaultValue = "100") int limit) {
+        try {
+            return recommendationRunEventService.history(runId, afterSequence, limit);
+        } catch (IllegalArgumentException error) {
+            throw eventRequestError(error);
+        }
+    }
+
+    private ResponseStatusException eventRequestError(IllegalArgumentException error) {
+        HttpStatus status = "RECOMMENDATION_RUN_NOT_FOUND".equals(error.getMessage())
+                ? HttpStatus.NOT_FOUND : HttpStatus.BAD_REQUEST;
+        return new ResponseStatusException(status, error.getMessage());
     }
 
     @GetMapping("/health")
@@ -241,6 +320,15 @@ public class RecommendationController {
                     "Agent runtime busy: " + lease.getRejectReason());
         }
         return lease;
+    }
+
+    private RecommendationResponse requireCompletedRecommendation(AgentLoopResponse result) {
+        if (result == null || result.getResponse() == null || !"completed".equals(result.getStatus())) {
+            String reason = result == null ? "empty_agent_result" : result.getStopReason();
+            throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+                    "Multi-agent recommendation did not complete: " + reason);
+        }
+        return result.getResponse();
     }
 }
 

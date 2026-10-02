@@ -31,10 +31,25 @@ taskSplit:  base
 
 ## Status
 
-```
-PUBLIC_BENCHMARK_NOT_RUN_NO_API_KEY
-```
+Current verified status:
 
+- Offline suite: 120 tests pass, including natural-language confirmation,
+  stale-action, entity-binding, and infrastructure-error metric regressions.
+- Real DeepSeek V4 Flash paired smoke completed: baseline 10/10, guarded 10/10.
+- The confirmation fix eliminated all 16 prior max_steps loops in a targeted
+  rerun; Guarded Agent completed normally on 16/16 and passed 14/16.
+- Full-base single-trial run: baseline evaluated 114/114 at 84.21%; Guarded
+  Agent evaluated 106/114 at 89.62%. On the strictly paired 106 tasks,
+  baseline passed 89/106 (83.96%) and Guarded passed 95/106 (89.62%), a
+  5.66 percentage-point difference. The final 8 Guarded tasks had zero-message
+  infrastructure errors after the DeepSeek API returned Insufficient Balance;
+  they are excluded from evaluated-only metrics and still require a retry.
+- RetailGuardBench completed on all 24 cases across 3 trials before the
+  confirmation fix: official LLMAgent attack success 20.0%, Guarded Agent
+  0.0%; benign success 100.0% for both. A post-fix one-trial regression kept
+  the same 20.0% vs 0.0% attack result and 100.0% benign success.
+
+<!-- Outdated pre-run status retained for history:
 Delivered: pinned config, committed `uv.lock`, offline guard tests, official
 registration path, bounded LLM planning via the official `generate` API, and
 run scripts. **No benchmark has been run** — running requires real LLM API
@@ -42,6 +57,7 @@ keys (agent + user simulator); both scripts stop with
 `PUBLIC_BENCHMARK_NOT_RUN_NO_API_KEY` before any model call when
 `OPENAI_API_KEY` is absent. Results will be reported only from actual runs;
 nothing is fabricated or estimated.
+-->
 
 - ✅ Official interfaces confirmed from the pinned source (CLI, agent
   factory, HalfDuplexAgent, retail domain/splits, result structure)
@@ -49,11 +65,12 @@ nothing is fabricated or estimated.
   confirmation gate, tool inventory pinning, registration)
 - ✅ Bounded LLM planner implemented on the official `tau2.utils.llm_utils.generate`
   API (system prompt keeps the complete official policy + bounded protocol;
-  malformed / multiple tool calls fail safely to the deterministic fallback)
+  DeepSeek mixed/parallel tool output is normalized to one bounded step before
+  every server-side guard)
 - ✅ Smoke config: 10 real tasks from the official retail `base` split,
   1 trial
 - ✅ `uv.lock` committed; setup uses `uv sync --frozen` (strict Python 3.12)
-- ⏳ Actual runs (needs API keys)
+- ⏳ Retry the 8 balance-blocked full-run tasks, then run repeated full-base trials.
 
 ## Install
 
@@ -186,6 +203,20 @@ actions were read.
 
 ## Run
 
+Cross-platform paired runner (recommended, including Windows):
+
+```powershell
+# Set OPENAI_API_KEY in the process environment or in the ignored local .env
+# file before running.
+uv run python -m ecommerce_tau3.run_pair --config configs/smoke.yaml
+
+# Cheapest real install check: the same one official task for both agents.
+uv run python -m ecommerce_tau3.run_pair --config configs/smoke.yaml --task-ids 0
+```
+
+It runs both agents, isolates official source artifacts, copies them into one
+run directory, validates parity, and generates comparison/failure reports.
+
 ```bash
 # smoke: 10 tasks x 1 trial, both agents, identical settings
 RUN_ID=$(date +%Y%m%d-%H%M%S)
@@ -222,9 +253,11 @@ blocks are selected via `TAU3_STAGE`.
 
 ## Results
 
-The official runner writes official artifacts to
-`<TAU2_DATA_DIR>/simulations/<save-to>/` (results.json + trajectories);
-scripts copy them **verbatim** into:
+The official runner writes artifacts to a run-scoped source directory,
+`<TAU2_DATA_DIR>/simulations/<save-to>-<run-id>/`. Run-scoped names prevent
+a later run from resuming or colliding with stale official artifacts.
+Scripts then copy the result files verbatim into the stable comparison
+directory:
 
 ```text
 benchmarks/tau3-retail/results/
@@ -268,6 +301,36 @@ and parity status — and never contains scores (scores live in
 - No Pass@k claims unless enough trials are actually run and computed by
   official tools.
 
+## RetailGuardBench security evaluation
+
+RetailGuardBench is a project-owned adversarial task set executed inside the
+pinned official Retail environment. It contains 20 attacks covering
+unauthenticated writes, prompt injection, confirmation bypass/state reuse,
+cross-user access, and entity binding, plus 4 valid mutation controls. The
+user scripts are deterministic and the security verdict is derived from
+successful tool results and DB end state; no LLM Judge is used.
+
+```powershell
+uv run python -m ecommerce_tau3.security_run_pair --config configs/security-deepseek-flash.yaml --run-id retailguardbench24x3-deepseek-v4-flash-v1 --num-trials 3
+```
+
+Verified three-trial result (72 paired cases / 144 simulations):
+
+| Metric | Official LLMAgent | Guarded Agent |
+|---|---:|---:|
+| Attack success rate (lower is better) | 20.0% | 0.0% |
+| Unsafe mutation rate | 10.0% | 0.0% |
+| Private-read violation rate | 10.0% | 0.0% |
+| DB integrity failure rate | 10.0% | 0.0% |
+| Benign task success rate | 100.0% | 100.0% |
+| False reject rate | 0.0% | 0.0% |
+
+The exact generated report is
+`results/retailguardbench24x3-deepseek-v4-flash-v1/security-comparison.md`.
+This establishes a reproducible security regression, not a public leaderboard
+score. All three trials repeated the same 4/20 baseline attack failures and
+0/20 guarded failures while both agents passed all 4 benign controls.
+
 ## Guarded agent design (requirements §11–§13)
 
 1. **Tool classification** — derived from the pinned official retail tool
@@ -282,9 +345,11 @@ and parity status — and never contains scores (scores live in
    observed through its own successful reads).
 3. **Confirmation gate** — DB-updating mutations (cancel/modify/return/
    exchange/address) require explicit user confirmation matching the exact
-   pending action (tool + arguments). Old confirmations cannot be reused
-   across actions; a new pending action invalidates the old one; the
-   confirmation is consumed when the mutation executes.
+   pending action (tool + arguments). Natural restatements such as "Yes,
+   please cancel order #W1" are accepted only when referenced entity ids match
+   the pending snapshot; denial, contrast, corrections, and changed parameters
+   are rejected. Old confirmations cannot be reused across actions; a new
+   pending action invalidates the old one; confirmation is consumed on execute.
 
 ## Limitations (honest)
 
@@ -317,3 +382,47 @@ and parity status — and never contains scores (scores live in
   `TAU3_RUN_ID` persisted via `GITHUB_ENV`, shares it between both
   experiment steps (so summarize sees a single directory), and fails
   without `OPENAI_API_KEY` (no fake fallback).
+
+## DeepSeek V4 Flash verified run
+
+Agent, user simulator, and NL-assertion judge use the same DeepSeek endpoint;
+thinking mode is disabled.
+
+```powershell
+uv run python -m ecommerce_tau3.run_pair `
+  --config configs/deepseek-flash-smoke.yaml `
+  --run-id deepseek-v4-flash-smoke10-v2
+```
+
+The pinned upstream NL-assertion evaluator defaults to GPT-4.1. This config
+explicitly binds it to `deepseek-v4-flash` while preserving the official
+prompt, task data, evaluator code path, and reward aggregation. Therefore this
+run is reproducible, but it is not default-judge leaderboard parity. Each
+result directory includes the exact no-secret `run-config.yaml` snapshot.
+
+LiteLLM does not yet map V4 Flash pricing; reported zero or n/a cost is invalid.
+
+### Full-base confirmation-fix run
+
+Command:
+
+    uv run python -m ecommerce_tau3.run_pair --config configs/deepseek-flash-full.yaml --run-id retail114-deepseek-v4-flash-confirmation-fix-v2
+
+| Metric | Official LLMAgent | Guarded Agent |
+|---|---:|---:|
+| Evaluated / total simulations | 114 / 114 | 106 / 114 |
+| Official reward / success (evaluated only) | 84.21% | 89.62% |
+| Infrastructure errors | 0 | 8 |
+| Average tool calls / evaluated task | 5.03 | 7.84 |
+| Average turns / evaluated task | 27.32 | 33.89 |
+
+On the 106 task/trial pairs evaluated by both agents, Official LLMAgent
+passed 89/106 (83.96%) and Guarded Agent passed 95/106 (89.62%). This is the
+strictly comparable subset; the 5.66 percentage-point difference is a
+single-trial observation, not a statistical significance claim.
+
+The eight Guarded infrastructure errors contain zero messages and occurred
+after the API returned Insufficient Balance; they are not counted as task
+failures in evaluated-only metrics. Consequently 89.62% is an interim
+106-sample result, not a completed 114-task score. The report is at
+results/retail114-deepseek-v4-flash-confirmation-fix-v2/comparison.md.

@@ -1,0 +1,24 @@
+# Isolated test infrastructure only. No named volume and no shared application network.
+# Use Run-PostgresValidation.ps1 for a random project, loopback port and password.
+services:
+  postgres:
+    image: ${ECOM_TEST_POSTGRES_IMAGE:-postgres:16-alpine}
+    labels:
+      com.ecommerce.purpose: isolated-postgres-validation
+    environment:
+      POSTGRES_DB: ecom_validation
+      POSTGRES_USER: ecom_validation
+      POSTGRES_PASSWORD: ${ECOM_TEST_POSTGRES_PASSWORD:?Provide a temporary test password}
+    ports:
+      - target: 5432
+        published: "0"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    stop_grace_period: 10s

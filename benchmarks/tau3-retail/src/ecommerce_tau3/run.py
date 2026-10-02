@@ -31,6 +31,25 @@ from typing import Optional
 from ecommerce_tau3.runconfig import load_config, resolve_run_config
 
 
+def _configure_nl_assertion_evaluator(config: dict) -> None:
+    """Bind the official NL assertion evaluator to the configured judge.
+
+    Upstream hard-codes gpt-4.1 for this evaluator instead of reading
+    TextRunConfig. The adapter overrides only those two module constants;
+    official tasks, prompts, evaluator code and reward aggregation stay intact.
+    """
+    evaluator_cfg = config.get("evaluator", {})
+    model = evaluator_cfg.get("llm")
+    if not model:
+        return
+    llm_args = dict(evaluator_cfg.get("llmArgs") or {})
+
+    from tau2.evaluator import evaluator_nl_assertions
+
+    evaluator_nl_assertions.DEFAULT_LLM_NL_ASSERTIONS = model
+    evaluator_nl_assertions.DEFAULT_LLM_NL_ASSERTIONS_ARGS = llm_args
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the driver's argument parser.
 
@@ -102,6 +121,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     from ecommerce_tau3.factory import ensure_registered
 
     ensure_registered()
+    _configure_nl_assertion_evaluator(config)
 
     # Import the official runner pieces (same path as `tau2 run`).
     from tau2.data_model.simulation import TextRunConfig
@@ -120,6 +140,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     config_obj = TextRunConfig(
         domain=config["benchmark"]["domain"],
+        task_set_name=config["benchmark"].get("taskSetName"),
         task_split_name=config["benchmark"].get("taskSplitName", "base"),
         task_ids=task_ids,
         num_tasks=num_tasks,

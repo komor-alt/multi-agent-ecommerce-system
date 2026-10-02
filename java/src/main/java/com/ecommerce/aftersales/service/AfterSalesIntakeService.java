@@ -1,6 +1,7 @@
 package com.ecommerce.aftersales.service;
 
 import com.ecommerce.aftersales.model.AfterSalesTypes;
+import com.ecommerce.config.AfterSalesLlmExecutorProperties;
 import com.ecommerce.service.LlmCallBudget;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -49,7 +50,7 @@ import java.util.regex.Pattern;
  *
  * 资源边界（线程池饥饿防护）：LLM 超时使用独立有界执行器，绝不向 agentExecutor 提交任务——
  * Agent 线程已占用 agentExecutor 的有界线程，再向同一池提交并等待会造成饥饿死锁。
- * 本执行器：核心 1、最大 2、队列 4 ⇒ 最多 6 个 LLM 调用在途/排队；超时后 future.cancel(true)
+ * 本执行器容量由 agent.aftersales.llm-executors.intake 配置；超时后 future.cancel(true)
  * 中断底层模型调用线程，尽快归还执行器线程；@PreDestroy 时 shutdownNow 兜底清理；
  * 队列满抛拒绝异常 → LLM_BUSY 回退。
  */
@@ -166,7 +167,8 @@ public class AfterSalesIntakeService {
             String mode,
             long timeoutMs,
             String apiKey) {
-        this(chatClientBuilder, objectMapper, mode, timeoutMs, apiKey, true, 0);
+        this(chatClientBuilder, objectMapper, mode, timeoutMs, apiKey, true, 0,
+                AfterSalesLlmExecutorProperties.intakeDefaults());
     }
 
     /** Explicit bounded budget for offline tests with injected mock model responses. */
@@ -177,7 +179,8 @@ public class AfterSalesIntakeService {
             long timeoutMs,
             String apiKey,
             int maxLlmCalls) {
-        this(chatClientBuilder, objectMapper, mode, timeoutMs, apiKey, true, maxLlmCalls);
+        this(chatClientBuilder, objectMapper, mode, timeoutMs, apiKey, true, maxLlmCalls,
+                AfterSalesLlmExecutorProperties.intakeDefaults());
     }
 
     @org.springframework.beans.factory.annotation.Autowired
@@ -187,8 +190,10 @@ public class AfterSalesIntakeService {
             @Value("$" + "{agent.aftersales.intake.mode:RULES}") String mode,
             @Value("$" + "{agent.aftersales.intake.timeout-ms:4000}") long timeoutMs,
             @Value("$" + "{spring.ai.openai.api-key:}") String apiKey,
-            @Value("$" + "{agent.aftersales.intake.live-enabled:false}") boolean liveEnabled) {
-        this(chatClientBuilder, objectMapper, mode, timeoutMs, apiKey, liveEnabled, 0);
+            @Value("$" + "{agent.aftersales.intake.live-enabled:false}") boolean liveEnabled,
+            AfterSalesLlmExecutorProperties executorProperties) {
+        this(chatClientBuilder, objectMapper, mode, timeoutMs, apiKey, liveEnabled, 0,
+                executorProperties.getIntake());
     }
 
     private AfterSalesIntakeService(
@@ -198,7 +203,8 @@ public class AfterSalesIntakeService {
             long timeoutMs,
             String apiKey,
             boolean liveEnabled,
-            int maxLlmCalls) {
+            int maxLlmCalls,
+            AfterSalesLlmExecutorProperties.Pool executorPool) {
         this.chatClient = chatClientBuilder.build();
         this.objectMapper = objectMapper;
         this.mode = normalizeMode(mode);
@@ -206,12 +212,14 @@ public class AfterSalesIntakeService {
         this.apiKey = apiKey == null ? "" : apiKey;
         this.liveEnabled = liveEnabled;
         this.standaloneBudget = new LlmCallBudget(Math.max(0, maxLlmCalls));
-        // 独立有界执行器：见类注释「资源边界」。核心 1 / 最大 2 / 队列 4，守护线程。
+        // 独立有界执行器：见类注释「资源边界」。容量由配置控制，守护线程。
         this.llmExecutor = new ThreadPoolExecutor(
-                1, 2, 30L, TimeUnit.SECONDS,
-                new ArrayBlockingQueue<>(4),
+                executorPool.getCoreSize(), executorPool.getMaxSize(),
+                executorPool.getKeepAliveSeconds(), TimeUnit.SECONDS,
+                new ArrayBlockingQueue<>(executorPool.getQueueCapacity()),
                 r -> {
-                    Thread thread = new Thread(r, "aftersales-intake-llm-" + POOL_SEQ.incrementAndGet());
+                    Thread thread = new Thread(r,
+                            executorPool.getThreadNamePrefix() + POOL_SEQ.incrementAndGet());
                     thread.setDaemon(true);
                     return thread;
                 },

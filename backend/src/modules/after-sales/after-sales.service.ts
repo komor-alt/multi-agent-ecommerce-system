@@ -2,12 +2,14 @@ import {
   BadGatewayException,
   HttpException,
   Injectable,
-  InternalServerErrorException,
+  UnauthorizedException,
   MessageEvent,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Observable } from "rxjs";
 import { CreateAfterSalesTicketDto, ReviewAfterSalesProposalDto } from "./dto/after-sales.dto";
+import type { AuthPrincipal } from "../auth/auth.types";
+import { internalServiceHeaders } from "../../infrastructure/agent-client/internal-service-auth";
 
 type SseFrame = {
   event: string;
@@ -23,13 +25,8 @@ export class AfterSalesService {
 
   constructor(private readonly config: ConfigService) {}
 
-  /**
-   * 当前 Gateway 可信审批人（只读，供前端展示「当前审批人」）。
-   * 注意：这是 Demo 的可信 Gateway Header 方案，不构成生产认证 —— 生产环境必须由认证中间件
-   * 从登录会话/Token 生成身份，清洗验证后强制覆盖该 Header，本配置只用于本地演示。
-   */
-  getOperatorContext(): { operatorId: string } {
-    return { operatorId: this.trustedOperatorId() };
+  getOperatorContext(principal: AuthPrincipal): { operatorId: string } {
+    return { operatorId: this.trustedOperatorId(principal) };
   }
 
   listTickets() {
@@ -62,20 +59,20 @@ export class AfterSalesService {
     });
   }
 
-  approveProposal(proposalId: string, dto: ReviewAfterSalesProposalDto) {
+  approveProposal(proposalId: string, dto: ReviewAfterSalesProposalDto, principal: AuthPrincipal) {
     return this.request<Record<string, unknown>>(`/proposals/${encodeURIComponent(proposalId)}/approve`, {
       method: "POST",
-      headers: this.operatorIdentityHeaders(),
+      headers: this.operatorIdentityHeaders(principal),
       // 重建 body 而非透传 dto：即使客户端附带 operatorId（ValidationPipe whitelist 已剥离），
       // 转发 payload 也不可能携带任何身份字段。
       body: JSON.stringify({ comment: dto.comment }),
     });
   }
 
-  rejectProposal(proposalId: string, dto: ReviewAfterSalesProposalDto) {
+  rejectProposal(proposalId: string, dto: ReviewAfterSalesProposalDto, principal: AuthPrincipal) {
     return this.request<Record<string, unknown>>(`/proposals/${encodeURIComponent(proposalId)}/reject`, {
       method: "POST",
-      headers: this.operatorIdentityHeaders(),
+      headers: this.operatorIdentityHeaders(principal),
       body: JSON.stringify({ comment: dto.comment }),
     });
   }
@@ -102,7 +99,7 @@ export class AfterSalesService {
     signal: AbortSignal,
     subscriber: { next(value: MessageEvent): void; complete(): void },
   ) {
-    const headers: Record<string, string> = { Accept: "text/event-stream" };
+    const headers: Record<string, string> = { Accept: "text/event-stream", ...internalServiceHeaders(this.config) };
     if (lastEventId) headers["Last-Event-ID"] = lastEventId;
 
     const response = await fetch(
@@ -153,22 +150,14 @@ export class AfterSalesService {
     };
   }
 
-  /**
-   * 强制设置可信审批人 Header（客户端传入的同名 Header/body 字段绝不透传——本方法总是重建请求头，
-   * 不使用客户端任何输入）。Demo 默认 operator-vn-01，可用环境变量 AFTER_SALES_OPERATOR_ID 覆盖；
-   * 生产环境必须由认证中间件生成并清洗覆盖，此配置不构成生产认证。
-   */
-  private operatorIdentityHeaders(): Record<string, string> {
-    return { [AfterSalesService.OPERATOR_HEADER_NAME]: this.trustedOperatorId() };
+  private operatorIdentityHeaders(principal: AuthPrincipal): Record<string, string> {
+    return { [AfterSalesService.OPERATOR_HEADER_NAME]: this.trustedOperatorId(principal) };
   }
 
-  private trustedOperatorId(): string {
-    const raw = this.config.get<string>("AFTER_SALES_OPERATOR_ID") || "operator-vn-01";
-    const id = raw.trim();
-    if (!AfterSalesService.OPERATOR_ID_PATTERN.test(id)) {
-      throw new InternalServerErrorException(
-        `AFTER_SALES_OPERATOR_ID "${raw}" is not a valid operator id (^[A-Za-z0-9._-]{2,64}$)`,
-      );
+  private trustedOperatorId(principal: AuthPrincipal): string {
+    const id = principal?.sub;
+    if (typeof id !== "string" || !AfterSalesService.OPERATOR_ID_PATTERN.test(id)) {
+      throw new UnauthorizedException("Authenticated operator required");
     }
     return id;
   }
@@ -180,6 +169,7 @@ export class AfterSalesService {
         "Content-Type": "application/json",
         Accept: "application/json",
         ...init?.headers,
+        ...internalServiceHeaders(this.config),
       },
     });
     const payload = await response.json().catch(() => null);

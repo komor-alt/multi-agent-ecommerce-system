@@ -56,6 +56,10 @@ class Tau3AgentState(BaseModel):
         description="The conversation history (official tau2 Message objects).",
     )
     turn: int = Field(default=0, description="Current conversation turn counter.")
+    task_id: Optional[str] = Field(
+        default=None,
+        description="Official tau3 task id for concurrency-safe event attribution.",
+    )
 
     # --- Authentication / user binding (requirements §13) ---
     authenticated_user_id: Optional[str] = Field(

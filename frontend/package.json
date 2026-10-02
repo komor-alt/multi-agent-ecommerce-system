@@ -19,6 +19,11 @@
     "typescript": "^5.8.0",
     "vite": "^6.0.7"
   },
+  "overrides": {
+    "@ant-design/pro-layout": {
+      "path-to-regexp": "8.4.0"
+    }
+  },
   "devDependencies": {
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3"

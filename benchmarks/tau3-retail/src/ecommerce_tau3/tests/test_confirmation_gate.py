@@ -126,6 +126,70 @@ def test_non_affirmative_message_does_not_accept_confirmation():
     assert agent._confirm_if_matches(state) is False
     assert state.pending_action.confirmation_received is False
 
+def test_affirmative_with_changed_details_does_not_accept_stale_confirmation():
+    agent = _agent()
+    state = _state_with_confirmed_pending(agent)
+    state.pending_action.confirmation_received = False
+    state.messages.append(
+        UserMessage(role="user", content="Yes, but change it to Suite 999 instead.")
+    )
+
+    assert agent._confirm_if_matches(state) is False
+    assert state.pending_action.confirmation_received is False
+
+
+def test_natural_exact_confirmation_is_accepted():
+    agent = _agent()
+    state = _state_with_confirmed_pending(agent)
+    state.pending_action.confirmation_received = False
+    state.messages.append(
+        UserMessage(role="user", content="Yes, I confirm the exact action you described.")
+    )
+
+    assert agent._confirm_if_matches(state) is True
+
+
+
+def test_natural_action_restatements_are_accepted():
+    agent = _agent()
+    messages = [
+        "Yes, I confirm. Please go ahead with that change.",
+        "Yes, I confirm. Please cancel order #W1.",
+        "Yes, I confirm. Please cancel the charger order.",
+        "Yes, that's confirmed--please go ahead and make the change!",
+        "Yes, I confirm. Please proceed with the address change for the order.",
+    ]
+
+    for content in messages:
+        state = _state_with_confirmed_pending(agent)
+        state.pending_action.confirmation_received = False
+        state.messages.append(UserMessage(role="user", content=content))
+        assert agent._confirm_if_matches(state) is True, content
+
+
+def test_confirmation_referencing_different_entity_is_rejected():
+    agent = _agent()
+    state = _state_with_confirmed_pending(agent)
+    state.pending_action.confirmation_received = False
+    state.messages.append(
+        UserMessage(role="user", content="Yes, please cancel order #W2.")
+    )
+
+    assert agent._confirm_if_matches(state) is False
+    assert state.pending_action.confirmation_received is False
+
+
+def test_confirmation_with_unmarked_parameter_edit_is_rejected():
+    agent = _agent()
+    state = _state_with_confirmed_pending(agent)
+    state.pending_action.confirmation_received = False
+    state.messages.append(
+        UserMessage(role="user", content="Yes, change it to Suite 999.")
+    )
+
+    assert agent._confirm_if_matches(state) is False
+    assert state.pending_action.confirmation_received is False
+
 
 def test_no_pending_action_means_no_confirmation():
     agent = _agent()

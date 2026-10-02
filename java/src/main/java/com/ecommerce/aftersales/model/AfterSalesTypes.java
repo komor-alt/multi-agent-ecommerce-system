@@ -41,6 +41,7 @@ public final class AfterSalesTypes {
         RUNNING,
         RETRY_WAIT,
         SUCCEEDED,
+        CANCELLED,
         DEAD_LETTER
     }
 
@@ -55,8 +56,32 @@ public final class AfterSalesTypes {
             boolean paid,
             String fulfillmentStatus,
             int promisedDeliveryDays,
-            String trackingNumber
+            String trackingNumber,
+            String refundStatus
     ) {
+        public OrderSnapshot(
+                String orderId,
+                String userId,
+                String platform,
+                String country,
+                String currency,
+                String warehouseRegion,
+                BigDecimal paidAmount,
+                boolean paid,
+                String fulfillmentStatus,
+                int promisedDeliveryDays,
+                String trackingNumber) {
+            this(orderId, userId, platform, country, currency, warehouseRegion, paidAmount, paid,
+                    fulfillmentStatus, promisedDeliveryDays, trackingNumber, "NONE");
+        }
+
+        public OrderSnapshot {
+            refundStatus = refundStatus == null || refundStatus.isBlank() ? "NONE" : refundStatus;
+        }
+
+        public boolean fullyRefunded() {
+            return "REFUNDED".equalsIgnoreCase(refundStatus);
+        }
     }
 
     public record ShipmentCheckpoint(Instant occurredAt, String status, String location, String description) {
