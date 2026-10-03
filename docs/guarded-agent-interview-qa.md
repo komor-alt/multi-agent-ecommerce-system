@@ -6,6 +6,8 @@
 
 ## 0. 回答前必须统一的项目事实
 
+发布收尾状态（2026-10-03）以[逐题公开归档](../benchmarks/tau3-retail/published/retail-base-single-trial/README.md)为准。历史 106 对评分保留；补跑 task 106 遇到 API Key 无效，仍缺 106–113。历史 runner HEAD 不包含未提交源码指纹，不能据此断言当前源码与历史源码完全一致。本文历史安全实验与 Java 离线实验、Python 公开任务实验不得混用；当前 Java V2 主场景为物流延迟、丢件和破损的可信补偿执行。
+
 面试中需要把下面三层内容明确区分：
 
 1. **原多 Agent 电商项目**：推荐主链采用 Supervisor 中心编排，由用户画像、商品推荐、库存履约、营销文案等专门模块协作。Agent 之间不进行自由文本聊天，而是由 Supervisor 按依赖关系调度，通过结构化参数和 AgentResult 传递结果。
@@ -22,7 +24,7 @@
 - 同时被两种 Agent 成功评测的 106 个公开任务中，官方 LLMAgent 为 89/106，即 83.96%；Guarded Agent 为 95/106，即 89.62%，单次配对观察相差 5.66 个百分点。
 - Guarded Agent 最后 8 次仿真因 DeepSeek 返回 Insufficient Balance 而没有产生模型消息，不能算成任务失败，也不能据此宣称已经获得完整 114 题成绩。
 - RetailGuardBench 三轮评测中，官方 LLMAgent 攻击成功率为 20.0%，Guarded Agent 为 0.0%；两者正常对照任务成功率均为 100%。
-- 当前离线测试为 120 项全部通过。
+- 原适配器离线测试为 120 项；发布收尾增加结果完整性回归，最新数量以公开 Offline CI 为准。
 
 ---
 
@@ -312,7 +314,7 @@ PendingAction 不是一个全局 confirmed 布尔值，而是包含 tool_name、
 
 两者都有，但用途不同。
 
-任务完成能力使用公开的 sierra-research/tau2-bench，锁定到指定 commit，选择 Retail base split 的 114 个任务。官方任务、政策、工具、数据库、用户模拟器、执行协议和评测器都保持不变。
+任务完成能力使用公开的 sierra-research/tau2-bench，锁定到指定 commit，选择 Retail base split 的 114 个任务。官方任务、政策、工具、数据库、用户模拟器逻辑、执行协议和评测器逻辑保持不变；NL assertion judge 的模型从上游默认 GPT-4.1 配置为 DeepSeek，不能称为官方默认 judge 一致。
 
 安全能力使用项目自建的 RetailGuardBench。它复用公开 Retail 环境，但把用户替换为固定脚本，以便同一攻击可以稳定地发送给官方 LLMAgent 和 Guarded Agent。题目和安全指标是自建的，因此不能说成“公开安全榜单成绩”。
 
@@ -373,7 +375,7 @@ PendingAction 不是一个全局 confirmed 布尔值，而是包含 tool_name、
 - Guarded Agent：95/106，89.62%；
 - 相差 6 个成功任务，即 5.66 个百分点。
 
-所以面试时应该优先引用这组严格配对数据，同时补充“仍需充值后完成最后 8 题，才能获得完整 114 题结果”。
+所以面试时应该优先引用这组同题配对数据，同时补充“仍需修复凭据和确认余额后完成最后 8 题，才能获得完整 114 题结果”。2026-10-03 的 task 106 补跑返回 API Key 无效，零消息、无评分，已保留失败尝试且停止继续调用。
 
 ### 27. 5.66 个百分点的提升有统计显著性吗？
 
@@ -397,20 +399,20 @@ PendingAction 不是一个全局 confirmed 布尔值，而是包含 tool_name、
 
 目前没有证据表明它们是 Agent 能力失败。它们的共同特征是消息数为零，模型 API 明确返回余额不足，reward 缺失。所以我把它们归为基础设施错误，不计入 evaluated-only 模型成绩。
 
-但也不能假设这 8 题最终一定通过。充值后必须使用相同配置只重试这 8 个仿真，再与已有结果合并。补跑之前，89.62% 只能称为 106 题中间结果。
+但也不能假设这 8 题最终一定通过。修复凭据并确认余额后，只能以相同配置重试这 8 个仿真，不能替换任何已有有效失败。续跑跨日期且历史源码指纹不完整，合并结果必须披露来源差异。补跑之前，89.62% 只能称为 106 题中间结果。
 
 ### 29. 为什么 Guarded Agent 的工具调用数和对话轮数更高？
 
 **参考回答：**
 
-在当前有效样本中，官方 LLMAgent 平均每题约 5.03 次工具调用、27.32 条消息；Guarded Agent 分别约为 7.84 次和 33.89 条。主要增加来自：
+旧报告把官方 LLMAgent 的“含工具调用的消息数”5.03 误写成了调用数。按每条消息中 tool_calls 的元素逐个计数，实际为 Baseline 8.01 次、Guarded 7.84 次；消息数仍分别约 27.32、33.89。两组有效样本分母不同，不能从这两组平均值推导调用更少或成本更高。Guard 的额外交互机制包括：
 
 - 强制先完成身份认证；
 - 先读取用户详情建立订单和支付方式证据；
 - 高风险写操作需要展示完整动作并等待确认；
 - 被 Guard 拦截后，Planner 需要重新收集证据或重新规划。
 
-这体现了安全和效率的权衡。Guard 的价值不能只看成功率，还要同时观察攻击成功率、误拒率、调用成本和延迟。当前数据说明它提高了安全性和单次配对任务通过率，但交互与工具成本也明显增加。进一步优化方向是减少重复读取、缓存会话内已验证证据，并让确认提示更清晰，降低无效轮次。
+这是需要评估的安全和效率权衡，不能直接当成已证明的成本变化。当前只报告单次同题成功率与独立安全集结果，不声称真实费用、延迟或稳定性已改善。本轮停止新增功能，仅补齐缺失结果、归档和离线验证。
 
 ---
 
@@ -722,7 +724,7 @@ Guarded Agent 会记录结构化 GuardEvent，主要字段包括：
 
 在售后场景里，我进一步关注了 Agent 工具调用的安全边界。因为取消、改地址、退换货都会修改数据库，只靠 Prompt 无法稳定保证认证、订单归属和用户确认，所以我实现了 Guarded Agent：LLM 只提出候选调用，ToolGuard 和 PolicyGuard 根据成功工具观察建立身份与实体证据，并把确认绑定到完整的 tool name 和 arguments，执行后立即消费。
 
-评测方面，我用公开 τ³-bench Retail 和官方 LLMAgent 做相同配置的配对实验。当前双方都完成的 106 题中，Baseline 为 83.96%，Guarded 为 89.62%；最后 8 题因 DeepSeek 余额不足尚未补跑。安全方面我自建了 20 个攻击和 4 个正常对照案例，三轮中攻击成功率从官方 Agent 的 20% 降到 0%，正常任务两边都是 100%。我也定位并修复过自然语言确认导致的 16 个 max_steps 死循环，因此这个项目的重点是可控执行、可验证安全和真实失败分析，而不只是多 Agent 功能展示。
+评测方面，我用公开 τ³-bench Retail 和官方 LLMAgent 做同题实验。双方有效的 106 题中，Baseline 为 83.96%，Guarded 为 89.62%；最后 8 题历史上余额不足，2026-10-03 尝试补跑又遇到无效 API Key，尚无完整 114 对结果。逐题评分、来源指纹和实验限制已入库，不能把 Python adapter 分数冒充 Java 端到端成绩。安全方面还有独立的自建 20 个攻击和 4 个正常对照案例；这些历史结果不代表普遍安全性。项目重点是可控执行、可核对证据和真实失败分析。
 
 ## 八、容易被质疑的表述与正确说法
 
@@ -749,5 +751,5 @@ Guarded Agent 会记录结构化 GuardEvent，主要字段包括：
 - Agent 状态：benchmarks/tau3-retail/src/ecommerce_tau3/agent_state.py
 - 安全案例：benchmarks/tau3-retail/security_cases.json
 - 安全分析器：benchmarks/tau3-retail/src/ecommerce_tau3/security_bench.py
-- 公开任务配对报告：benchmarks/tau3-retail/results/retail114-deepseek-v4-flash-confirmation-fix-v2/comparison.md
+- 公开任务逐题结果与 metadata：[发布归档](../benchmarks/tau3-retail/published/retail-base-single-trial/README.md)
 - 三轮安全报告：benchmarks/tau3-retail/results/retailguardbench24x3-deepseek-v4-flash-v1/security-comparison.md

@@ -1,0 +1,36 @@
+{
+  "totalTasks": 114,
+  "pairedEvaluated": 106,
+  "missingGuardedTaskIds": [
+    "106",
+    "107",
+    "108",
+    "109",
+    "110",
+    "111",
+    "112",
+    "113"
+  ],
+  "baseline": {
+    "evaluated": 114,
+    "successes": 96,
+    "successRate": 0.8421052631578947,
+    "pairedSuccesses": 89,
+    "pairedSuccessRate": 0.839622641509434,
+    "meanToolCallsEvaluated": 8.008771929824562
+  },
+  "guarded": {
+    "evaluated": 106,
+    "successes": 95,
+    "successRate": 0.8962264150943396,
+    "pairedSuccesses": 95,
+    "pairedSuccessRate": 0.8962264150943396,
+    "meanToolCallsEvaluated": 7.839622641509434
+  },
+  "pairedOutcomes": {
+    "bothPass": 83,
+    "bothFail": 5,
+    "guardedOnlyPass": 12,
+    "baselineOnlyPass": 6
+  }
+}

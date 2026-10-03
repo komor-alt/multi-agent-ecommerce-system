@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "generatedUtc": "2026-10-03T03:44:07.046806+00:00",
+  "benchmark": "sierra-research/tau2-bench",
+  "benchmarkCommit": "79975ac5741e23fbb1d2ac44262d62398a6d87bd",
+  "domain": "retail",
+  "split": "base",
+  "expectedTaskCount": 114,
+  "completePaired": false,
+  "runSeed": 300,
+  "trials": 1,
+  "maxSteps": 200,
+  "maxErrors": 10,
+  "agentModel": "openai/deepseek-v4-flash",
+  "userModel": "openai/deepseek-v4-flash",
+  "llmArgs": {
+    "api_base": "https://api.deepseek.com",
+    "temperature": 0.0,
+    "extra_body": {
+      "thinking": {
+        "type": "disabled"
+      }
+    }
+  },
+  "nlAssertionJudge": {
+    "llm": "openai/deepseek-v4-flash",
+    "llmArgs": {
+      "api_base": "https://api.deepseek.com",
+      "extra_body": {
+        "thinking": {
+          "type": "disabled"
+        }
+      },
+      "temperature": 0.0
+    }
+  },
+  "configSha256": "f6ce015894b8297c8818d584701f717d8909775dc72539197e8847b5b9ce8de6",
+  "sources": {
+    "historical-baseline": {
+      "rawFileSha256": "2762ae6f92e5b7fdb11f581a24667b3eec48b54d3a96a589a15636abb883ec3f",
+      "rawFileName": "results.json",
+      "runnerGitCommit": "aa78d2df1eb8697f6c7a437b05e5ec3451107a46",
+      "runName": "official-baseline",
+      "simulationCount": 114,
+      "configurationSignature": "71818e303d05cbd66e3fb88d9611933fcf083b83404c09afb5b352adac5cc4b1"
+    },
+    "historical-guarded": {
+      "rawFileSha256": "e5554ab0573f3a2bc4e5354422a734c468563e75187c173811e32e2123350f87",
+      "rawFileName": "results.json",
+      "runnerGitCommit": "aa78d2df1eb8697f6c7a437b05e5ec3451107a46",
+      "runName": "guarded-agent",
+      "simulationCount": 114,
+      "configurationSignature": "71818e303d05cbd66e3fb88d9611933fcf083b83404c09afb5b352adac5cc4b1"
+    },
+    "unscored-attempt-0": {
+      "rawFileSha256": "151b87d906be6f06b96809650757caf8f85ac2258a5974bd1de1e17fc1a6f9fc",
+      "rawFileName": "results.json",
+      "runnerGitCommit": "e7c5aaa476d7ded9603e88676263e09544c3a631",
+      "runName": "guarded-closeout-20261003-106",
+      "simulationCount": 1,
+      "configurationSignature": "71818e303d05cbd66e3fb88d9611933fcf083b83404c09afb5b352adac5cc4b1"
+    }
+  },
+  "unscoredResumeAttempts": [
+    {
+      "taskId": "106",
+      "trial": 0,
+      "seed": 626729,
+      "source": "unscored-attempt-0",
+      "simulationId": "a051aa4e-b929-409e-9781-930c1268a595",
+      "simulationSha256": "311cedb724fc2691e9e6ecb07b76a631177cb53286d45ac8c205d24ea3a1a966",
+      "reward": null,
+      "rewardBreakdown": null,
+      "terminationReason": "infrastructure_error",
+      "errorCategory": "authentication_failed",
+      "startTime": "2026-10-03T11:26:49.565001",
+      "endTime": "2026-10-03T11:26:49.565001",
+      "durationSeconds": 0.0,
+      "messageCount": 0,
+      "toolCalls": 0
+    }
+  ],
+  "casesSha256": "e214d6a66f446ff64a4136f23b3c50d7dfbb2693a0a256998f187f2bccef28a6",
+  "textHashNormalization": "cases and adapter source: UTF-8, normalized LF; raw result/config hashes: original bytes",
+  "adapterSourceHashes": {
+    "src/ecommerce_tau3/__init__.py": "dc96fb9e9119abe1c81fefff60bcd792a917c09b5f420eb161a77c061bd33168",
+    "src/ecommerce_tau3/agent.py": "7987e76c670037dd6c297e9154c9da64a513afa83b81eb89d3f49435359e2a80",
+    "src/ecommerce_tau3/agent_state.py": "4991523a4a43d34cca319bff56e97690b11d36f69a0c2b22fc028cc87ce44500",
+    "src/ecommerce_tau3/factory.py": "f419826020886068cf0d94845b7a56576558520698c2b9806a0173ec10f0d0c0",
+    "src/ecommerce_tau3/metrics.py": "3083d6030cababa3b9256c44f5982a8fb073829b2afacaf6bc123bdf19b6dc24",
+    "src/ecommerce_tau3/planner.py": "696971b64b8b75af09a2fb7da7ab3884d1b5601f4585f2b85b8e458ac08e076f",
+    "src/ecommerce_tau3/policy_guard.py": "e5b80c081b6c2b59f4c282df935fd23cf7075afded1490cca995b978bb368456",
+    "src/ecommerce_tau3/run.py": "c23e99edb3c994bffcaafe6c375f337b8354637c95292d4c2b0e86d238247864",
+    "src/ecommerce_tau3/run_pair.py": "e4421c1ca1e1e56318f6bd40f70cc31087179c1294d0fa7e9469b3ab1dd84d9b",
+    "src/ecommerce_tau3/runconfig.py": "b783634f29a4d1fe56a951a61299c1b10d92d620e642c289484781b6dfc38e0b",
+    "src/ecommerce_tau3/security_bench.py": "b6dd085cb94d21a3760ea26e1566b5c5894cc52c57cb70960af60174ad41e82e",
+    "src/ecommerce_tau3/security_run_pair.py": "9c9e1519762596c1bbc7303e56830ab9bbcd4b7090dfab74ac91d7e0715fd657",
+    "src/ecommerce_tau3/tool_guard.py": "f02ee9f588b93c02edc04dfedca09aef6692ce9e1bad72175be27909cf80f46f"
+  },
+  "limitations": [
+    "Python benchmark adapter, not the Java service or a public leaderboard submission.",
+    "Historical runner HEAD does not capture uncommitted adapter source. Exact historical source parity is unverified.",
+    "Resume is on a later date. A hosted model alias can change despite matching model names and configuration.",
+    "One trial only; no claim of statistical significance or multi-agent architectural superiority.",
+    "Official evaluator logic is retained; NL assertion judge is configured to DeepSeek, not the upstream default.",
+    "Compact export omits conversations, task instructions and tool arguments. Hashes are not a substitute for full trajectory review."
+  ]
+}

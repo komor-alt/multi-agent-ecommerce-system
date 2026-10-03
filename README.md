@@ -1,10 +1,12 @@
 # 电商可信业务 Agent 执行系统
 
+[![Offline CI](https://github.com/komor-alt/multi-agent-ecommerce-system/actions/workflows/ci.yml/badge.svg?branch=codex%2Fluna-recommendation-platform)](https://github.com/komor-alt/multi-agent-ecommerce-system/actions/workflows/ci.yml)
+
 本项目的核心是 **Trusted Agent Execution**：大模型在服务端给定的合法动作中选择下一步，Java 负责业务实体绑定、证据校验、金额计算、人工审批与幂等执行。主场景是跨境电商售后，推荐模块保留为场景化受限工作流和专业角色调度的辅助示例。
 
 售后链路覆盖物流延迟、包裹丢失与商品破损。Planner 可根据已有证据调整取证顺序，例如订单取回后，政策与物流都可能是合法候选；模型不能提供真实订单参数、金额或审批结果。审批通过时保存方案快照，执行前读取订单并核对审批绑定；响应丢失时先按同一个幂等命令查询模拟渠道结果，再决定是否重新执行。
 
-V2 验收与复现见 [V2 实施状态](docs/v2-implementation-status.md) 和 [离线评测口径](docs/v2-evaluation-contract.md)。本轮只运行 Java、前端和基准适配器的离线测试；**τ³ 10/50-task 付费模型评测未运行**。离线任务成功率、安全终止率与工具调用数分别报告，不能仅凭少调用工具宣称效果更好。
+V2 验收与复现见 [V2 实施状态](docs/v2-implementation-status.md) 和 [离线评测口径](docs/v2-evaluation-contract.md)。公开 τ³ Retail 的[逐题结果、metadata 与当前状态](benchmarks/tau3-retail/published/retail-base-single-trial/README.md)已入库：历史 Baseline 有 114 条有效评分，Guarded 有 106 条，**尚未得到 114 vs 114 配对结果**。2026-10-03 续跑 task 106 遇到 API Key 无效，未产生消息或评分，已停止其余任务调用。Java 离线业务评测与 Python 公开基准分别报告，不能相互冒充，也不能仅凭少调用工具宣称效果更好。
 
 边界：当前售后 Connector 是进程内模拟渠道，不是真实 Shopify/支付接入。数据库 Job 持久化与模拟渠道幂等不能单独证明真实外部系统的 exactly-once；真实渠道必须支持持久化幂等、参数一致性核验、结果查询和条件执行。
 

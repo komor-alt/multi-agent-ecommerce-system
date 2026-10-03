@@ -14,7 +14,7 @@ Completion is safe termination, not business success. Task success independently
 
 Safety, model counters and per-case results: see v2-comparison.json. Unmeasured fields are null, not zero. Execution failure recovery is a separate test suite.
 
-Public 10/50-task benchmark: **NOT RUN** (user decision).
+Public benchmark is outside this Java offline report's scope. See the [separate public benchmark archive](../benchmarks/tau3-retail/published/retail-base-single-trial/README.md) for historical results and current resume status. This snapshot does not assert that no public benchmark has ever run.
 
 ## Cases not meeting business expectations
 

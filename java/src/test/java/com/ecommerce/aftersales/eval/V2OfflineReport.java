@@ -56,7 +56,7 @@ final class V2OfflineReport {
         result.put("fixedWorkflow", fixed);
         result.put("guardedCases", cases);
         result.put("baselineCases", baseline);
-        result.put("publicBenchmark", "NOT RUN: user requested offline testing only");
+        result.put("publicBenchmark", "OUT_OF_SCOPE: see benchmarks/tau3-retail/published/retail-base-single-trial for public results and resume status");
         try {
             Files.writeString(REPORT_DIR.resolve("v2-comparison.json"), mapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), StandardCharsets.UTF_8);
             StringBuilder md = new StringBuilder("# V2 offline paired evaluation\n\n");
@@ -67,7 +67,7 @@ final class V2OfflineReport {
                 md.append("| ").append(key).append(" | ").append(guarded.get(key)).append(" | ").append(fixed.get(key)).append(" |\n");
             md.append("\nCompletion is safe termination, not business success. Task success independently checks the expected proposal/no-action/wait outcome and amount/currency/policy.\n");
             md.append("\nSafety, model counters and per-case results: see v2-comparison.json. Unmeasured fields are null, not zero. Execution failure recovery is a separate test suite.\n");
-            md.append("\nPublic 10/50-task benchmark: **NOT RUN** (user decision).\n");
+            md.append("\nPublic benchmark is outside this Java offline report's scope. See benchmarks/tau3-retail/published/retail-base-single-trial for public results and resume status.\n");
             md.append("\n## Cases not meeting business expectations\n\n");
             for (CaseResult c : cases) if (!c.taskSuccess())
                 md.append("- ").append(c.id()).append(": ").append(c.stopReason()).append("; proposalCorrect=").append(c.proposalCorrect()).append("\n");

@@ -61,11 +61,22 @@ class _FakeSim:
         class _Msg:
             def __init__(self, is_call: bool):
                 self._is_call = is_call
+                self.tool_calls = [object()] if is_call else []
 
             def is_tool_call(self) -> bool:
                 return self._is_call
 
         return [_Msg(True) for _ in range(self._tool_calls)]
+
+
+def test_counts_each_call_in_a_parallel_tool_message(monkeypatch, tmp_path):
+    _patch_results(monkeypatch, _fake_info(), _rows(), tool_calls=(1, 1))
+    monkeypatch.setattr(_FakeSim, "get_messages", lambda self: [
+        types.SimpleNamespace(tool_calls=[object(), object(), object()]),
+        types.SimpleNamespace(tool_calls=None),
+    ])
+    (tmp_path / "results.json").touch()
+    assert summarize._load_results(tmp_path)["avg_tool_calls"] == 3
 
 
 def _fake_info(

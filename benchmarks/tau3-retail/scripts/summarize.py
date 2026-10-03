@@ -64,9 +64,8 @@ def _load_results(run_dir: Path) -> dict:
     tool_calls: list[int] = []
     for sim in results.simulations:
         n = sum(
-            1
+            len(getattr(m, "tool_calls", None) or [])
             for m in sim.get_messages()
-            if getattr(m, "is_tool_call", lambda: False)()
         )
         tool_calls.append(n)
 

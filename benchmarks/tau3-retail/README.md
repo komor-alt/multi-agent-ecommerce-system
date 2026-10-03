@@ -31,15 +31,18 @@ taskSplit:  base
 
 ## Status
 
-V2 (2026-10-02): the user explicitly authorized **code and offline tests only**.
-The offline adapter tests were run; paid 10-task and 50-task comparisons were
-**NOT RUN**. Java V2 reports under java/target/after-sales-eval/ are synthetic
-local evaluations, not τ³ scores. Existing dry-run or historical artifacts must
-not be presented as this revision's live-model results.
+Release closeout (2026-10-03): no more features. The user authorized only the
+eight missing historical Retail tasks (106–113). A probe of task 106 failed
+with an invalid DeepSeek API key, zero messages and no reward; the other
+seven were not called. **114 vs 114 scored pairs is still incomplete.**
+The [checked-in compact archive](published/retail-base-single-trial/README.md)
+is the canonical public-result status, including per-case scores, source
+hashes, resume attempts and provenance limitations. Java V2 reports under
+java/target/after-sales-eval/ are synthetic local evaluations, not τ³ scores.
 
 Current verified status:
 
-- Offline suite: 120 tests pass, including natural-language confirmation,
+- Offline suite: guard tests plus compact-result integrity tests, including natural-language confirmation,
   stale-action, entity-binding, and infrastructure-error metric regressions.
 - Real DeepSeek V4 Flash paired smoke completed: baseline 10/10, guarded 10/10.
 - The confirmation fix eliminated all 16 prior max_steps loops in a targeted
@@ -55,16 +58,6 @@ Current verified status:
   0.0%; benign success 100.0% for both. A post-fix one-trial regression kept
   the same 20.0% vs 0.0% attack result and 100.0% benign success.
 
-<!-- Outdated pre-run status retained for history:
-Delivered: pinned config, committed `uv.lock`, offline guard tests, official
-registration path, bounded LLM planning via the official `generate` API, and
-run scripts. **No benchmark has been run** — running requires real LLM API
-keys (agent + user simulator); both scripts stop with
-`PUBLIC_BENCHMARK_NOT_RUN_NO_API_KEY` before any model call when
-`OPENAI_API_KEY` is absent. Results will be reported only from actual runs;
-nothing is fabricated or estimated.
--->
-
 - ✅ Official interfaces confirmed from the pinned source (CLI, agent
   factory, HalfDuplexAgent, retail domain/splits, result structure)
 - ✅ Guard chain implemented and unit-tested offline (auth binding,
@@ -76,13 +69,13 @@ nothing is fabricated or estimated.
 - ✅ Smoke config: 10 real tasks from the official retail `base` split,
   1 trial
 - ✅ `uv.lock` committed; setup uses `uv sync --frozen` (strict Python 3.12)
-- ⏳ Retry the 8 balance-blocked full-run tasks, then run repeated full-base trials.
+- ⏳ Only retry the 8 missing full-run tasks after credentials are repaired; no additional paid trials are authorized.
 
 ## Install
 
 Requires Python 3.12 and [uv](https://docs.astral.sh/uv/). This benchmark
 environment is fully isolated from the rest of the repo (no `python/`
-deps, no main CI).
+deps). The main Offline CI includes this adapter's tests, without API keys.
 
 ```bash
 bash scripts/setup_tau3.sh     # clone pinned checkout + frozen sync + verify
@@ -419,7 +412,7 @@ Command:
 | Evaluated / total simulations | 114 / 114 | 106 / 114 |
 | Official reward / success (evaluated only) | 84.21% | 89.62% |
 | Infrastructure errors | 0 | 8 |
-| Average tool calls / evaluated task | 5.03 | 7.84 |
+| Average individual tool calls / evaluated task | 8.01 | 7.84 |
 | Average turns / evaluated task | 27.32 | 33.89 |
 
 On the 106 task/trial pairs evaluated by both agents, Official LLMAgent
@@ -430,5 +423,15 @@ single-trial observation, not a statistical significance claim.
 The eight Guarded infrastructure errors contain zero messages and occurred
 after the API returned Insufficient Balance; they are not counted as task
 failures in evaluated-only metrics. Consequently 89.62% is an interim
-106-sample result, not a completed 114-task score. The report is at
-results/retail114-deepseek-v4-flash-confirmation-fix-v2/comparison.md.
+106-sample result, not a completed 114-task score. The 2026-10-03 resume attempt
+was blocked by invalid credentials rather than balance. The checked-in report
+is [here](published/retail-base-single-trial/README.md). Historical runner HEAD
+does not prove the exact uncommitted adapter source; resumed model aliases can
+also drift across dates. These are paired task observations, not strict
+same-source/same-time replication.
+
+Counting correction: the old 5.03 baseline value counted messages containing
+tool calls, not individual calls. A message can contain several calls. The
+compact export counts every `tool_calls` entry: baseline 8.01, guarded 7.84.
+These averages use different evaluated subsets and do not establish an
+efficiency advantage. Scores and original raw results are unchanged.
