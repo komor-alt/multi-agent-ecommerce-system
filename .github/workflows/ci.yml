@@ -7,25 +7,39 @@
 # stand-ins and fails if any safety gate (unauthorized action, model-supplied
 # amount, model-supplied tool arguments) is breached.
 #
-# There is deliberately no Python job: the Python recommendation-agent module
-# has a long history of broken/missing dependency pins and its test setup is
-# not currently stable. See the "Limitations" section of the root README.
-# Adding Python CI back should be done as a separate, dedicated effort once
-# its dependency and test setup is reproducible.
+# The Python job covers only the pinned tau3 adapter, not the legacy service.
+# No job receives model secrets or runs a paid benchmark.
 
-name: CI
+name: Offline CI
 
 on:
   push:
     branches:
       - main
       - feature/agent-platform-workbench
+      - codex/luna-recommendation-platform
+      - codex/tau-bench-retail-eval
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: offline-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  OPENAI_API_KEY: ''
+  ANTHROPIC_API_KEY: ''
+  ECOM_EMBEDDING_LIVE_ENABLED: 'false'
+  ECOM_EMBEDDING_MAX_CALLS: '0'
 
 jobs:
   java:
     name: Java (after-sales + eval)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -42,15 +56,19 @@ jobs:
         run: mvn -B test
 
       - name: Upload after-sales eval reports
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: after-sales-eval-reports
-          path: java/target/after-sales-eval/
-          if-no-files-found: error
+          path: |
+            java/target/after-sales-eval/
+            java/target/surefire-reports/
+          if-no-files-found: warn
 
   gateway:
     name: Gateway (NestJS)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -85,6 +103,7 @@ jobs:
   frontend:
     name: Frontend (React)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -107,3 +126,31 @@ jobs:
       - name: Build
         working-directory: frontend
         run: npm run build
+
+  tau3-adapter:
+    name: tau3 adapter (offline, no model calls)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: benchmarks/tau3-retail
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.22'
+          enable-cache: true
+          cache-dependency-glob: benchmarks/tau3-retail/uv.lock
+      - name: Install locked Python 3.12 environment and official data
+        run: bash scripts/setup_tau3.sh
+      - name: Test adapter contracts (offline only)
+        env:
+          TAU2_DATA_DIR: ${{ github.workspace }}/benchmarks/tau3-retail/env/tau2-bench/data
+        run: uv run --frozen pytest -m 'not live' --junitxml=offline-tests.xml
+      - name: Upload adapter test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tau3-adapter-offline-tests
+          path: benchmarks/tau3-retail/offline-tests.xml
+          if-no-files-found: warn
