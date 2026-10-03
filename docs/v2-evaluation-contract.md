@@ -2,7 +2,7 @@
 
 ## 范围
 
-本文件规定 Java V2 离线评测，不调用真实发券或支付接口。初始代码阶段按用户要求不运行付费评测；2026-10-03 收尾另获授权，仅补跑历史 τ³ Retail 缺失 106–113。续跑 task 106 遇到无效 API Key，未产生评分；历史公开 smoke 与 106 对有效结果并未因此失效。统一状态以[公开归档](../benchmarks/tau3-retail/published/retail-base-single-trial/README.md)为准。Python 基准适配器不等于 Java 业务服务，不能把其成绩直接写成 Java 端到端成绩。
+本文件规定 Java V2 离线评测，不调用真实发券或支付接口。初始代码阶段按用户要求不运行付费评测；2026-10-03 收尾另获授权，仅补跑历史 τ³ Retail 缺失 106–113。首次尝试因无效凭据没有评分；更换凭据后 8 题全部评分，6 通过、2 失败，现已获得 114 对有效结果。统一状态及跨日期/源码限制以[公开归档](../benchmarks/tau3-retail/published/retail-base-single-trial/README.md)为准。Python 基准适配器不等于 Java 业务服务，不能把其成绩直接写成 Java 端到端成绩。
 
 Java 主线是售后可信执行；推荐是场景化受限工作流。Python / Go 旧实现保留用于历史参考，本轮不扩展这些服务。
 
@@ -88,4 +88,4 @@ java/src/main/resources/migration-after-sales-v2-postgresql.sql
 
 连续非法规划按既有策略升级人工，所以本轮业务成功率不等于安全终止率，不能只引用工具调用下降。后续是否修改升级策略需要同时比较任务收益与安全风险。
 
-尚未完成：付费公共基准（用户暂缓）、真实 PostgreSQL 迁移复跑（Docker 引擎不可用）、真实渠道端到端验证、真实模型质量和生产压测。当前模拟场景通过不代表达到互联网生产环境的全部上线标准。
+公开 τ³ adapter 已补齐 114 对有效评分；尚未完成的是 Java V2 真实模型端到端质量评测、真实 PostgreSQL 迁移复跑（本机 Docker 引擎不可用）、真实渠道端到端验证和生产压测。Python adapter 的公开结果不能替代这些验证。当前停止新增功能和扩大付费实验。

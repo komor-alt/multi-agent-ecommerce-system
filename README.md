@@ -6,7 +6,7 @@
 
 售后链路覆盖物流延迟、包裹丢失与商品破损。Planner 可根据已有证据调整取证顺序，例如订单取回后，政策与物流都可能是合法候选；模型不能提供真实订单参数、金额或审批结果。审批通过时保存方案快照，执行前读取订单并核对审批绑定；响应丢失时先按同一个幂等命令查询模拟渠道结果，再决定是否重新执行。
 
-V2 验收与复现见 [V2 实施状态](docs/v2-implementation-status.md) 和 [离线评测口径](docs/v2-evaluation-contract.md)。公开 τ³ Retail 的[逐题结果、metadata 与当前状态](benchmarks/tau3-retail/published/retail-base-single-trial/README.md)已入库：历史 Baseline 有 114 条有效评分，Guarded 有 106 条，**尚未得到 114 vs 114 配对结果**。2026-10-03 续跑 task 106 遇到 API Key 无效，未产生消息或评分，已停止其余任务调用。Java 离线业务评测与 Python 公开基准分别报告，不能相互冒充，也不能仅凭少调用工具宣称效果更好。
+V2 验收与复现见 [V2 实施状态](docs/v2-implementation-status.md) 和 [离线评测口径](docs/v2-evaluation-contract.md)。公开 τ³ Retail 的[逐题结果、metadata 与实验限制](benchmarks/tau3-retail/published/retail-base-single-trial/README.md)已入库：**114 vs 114 有效配对已补齐**，Official LLMAgent 为 **96/114（84.21%）**，Guarded adapter 为 **101/114（88.60%）**，单次观察相差 4.39 个百分点。2026-10-03 仅补跑原先未评分的 8 题，6 通过、2 失败，既有有效结果未替换。结果来自跨日期续跑合并，历史源码指纹不完整，不能宣称严格同源码复现或统计显著。Java 离线业务评测与 Python 公开基准分别报告，不能相互冒充。
 
 边界：当前售后 Connector 是进程内模拟渠道，不是真实 Shopify/支付接入。数据库 Job 持久化与模拟渠道幂等不能单独证明真实外部系统的 exactly-once；真实渠道必须支持持久化幂等、参数一致性核验、结果查询和条件执行。
 

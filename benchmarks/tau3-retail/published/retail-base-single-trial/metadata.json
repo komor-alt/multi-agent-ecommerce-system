@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "generatedUtc": "2026-10-03T03:44:07.046806+00:00",
+  "generatedUtc": "2026-10-03T04:06:59.125641+00:00",
   "benchmark": "sierra-research/tau2-bench",
   "benchmarkCommit": "79975ac5741e23fbb1d2ac44262d62398a6d87bd",
   "domain": "retail",
   "split": "base",
   "expectedTaskCount": 114,
-  "completePaired": false,
+  "completePaired": true,
   "runSeed": 300,
   "trials": 1,
   "maxSteps": 200,
@@ -52,6 +52,22 @@
       "simulationCount": 114,
       "configurationSignature": "71818e303d05cbd66e3fb88d9611933fcf083b83404c09afb5b352adac5cc4b1"
     },
+    "resume-0": {
+      "rawFileSha256": "c74d5edd2cb0877267c39f8b090a9f8b951c0c8bbbcbe7d383effa97009c4f66",
+      "rawFileName": "results.json",
+      "runnerGitCommit": "06fa232f74eac797b8f23e3cc7015a1dba80a0f7",
+      "runName": "guarded-closeout-20261003-resume-106",
+      "simulationCount": 1,
+      "configurationSignature": "71818e303d05cbd66e3fb88d9611933fcf083b83404c09afb5b352adac5cc4b1"
+    },
+    "resume-1": {
+      "rawFileSha256": "67583433c80ac4e5b97bcf2479ec7fb338453cf4646374d1f4ec4faebcc1ce6b",
+      "rawFileName": "results.json",
+      "runnerGitCommit": "06fa232f74eac797b8f23e3cc7015a1dba80a0f7",
+      "runName": "guarded-closeout-20261003-resume-107-113",
+      "simulationCount": 7,
+      "configurationSignature": "71818e303d05cbd66e3fb88d9611933fcf083b83404c09afb5b352adac5cc4b1"
+    },
     "unscored-attempt-0": {
       "rawFileSha256": "151b87d906be6f06b96809650757caf8f85ac2258a5974bd1de1e17fc1a6f9fc",
       "rawFileName": "results.json",
@@ -80,7 +96,7 @@
       "toolCalls": 0
     }
   ],
-  "casesSha256": "e214d6a66f446ff64a4136f23b3c50d7dfbb2693a0a256998f187f2bccef28a6",
+  "casesSha256": "7b931ef791fa5f855520b7f7e617ebb355d71b815c09b3bf1f409bd504c179a1",
   "textHashNormalization": "cases and adapter source: UTF-8, normalized LF; raw result/config hashes: original bytes",
   "adapterSourceHashes": {
     "src/ecommerce_tau3/__init__.py": "dc96fb9e9119abe1c81fefff60bcd792a917c09b5f420eb161a77c061bd33168",

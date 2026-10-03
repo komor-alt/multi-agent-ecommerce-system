@@ -31,10 +31,11 @@ taskSplit:  base
 
 ## Status
 
-Release closeout (2026-10-03): no more features. The user authorized only the
-eight missing historical Retail tasks (106–113). A probe of task 106 failed
-with an invalid DeepSeek API key, zero messages and no reward; the other
-seven were not called. **114 vs 114 scored pairs is still incomplete.**
+Release closeout (2026-10-03): no more features. After a credential failure,
+the user supplied working credentials and only the eight previously unscored
+tasks (106–113) were resumed: six passed, two failed (109 and 110).
+**114 vs 114 scored pairs is complete**, combined with historical results;
+no previously scored success or failure was replaced.
 The [checked-in compact archive](published/retail-base-single-trial/README.md)
 is the canonical public-result status, including per-case scores, source
 hashes, resume attempts and provenance limitations. Java V2 reports under
@@ -47,12 +48,11 @@ Current verified status:
 - Real DeepSeek V4 Flash paired smoke completed: baseline 10/10, guarded 10/10.
 - The confirmation fix eliminated all 16 prior max_steps loops in a targeted
   rerun; Guarded Agent completed normally on 16/16 and passed 14/16.
-- Full-base single-trial run: baseline evaluated 114/114 at 84.21%; Guarded
-  Agent evaluated 106/114 at 89.62%. On the strictly paired 106 tasks,
-  baseline passed 89/106 (83.96%) and Guarded passed 95/106 (89.62%), a
-  5.66 percentage-point difference. The final 8 Guarded tasks had zero-message
-  infrastructure errors after the DeepSeek API returned Insufficient Balance;
-  they are excluded from evaluated-only metrics and still require a retry.
+- Full-base single-trial, historical plus resumed results: baseline passed
+  96/114 (84.21%); Guarded passed 101/114 (88.60%), a 4.39 percentage-point
+  paired observation. All 114 tasks now have scores on both sides. Historical
+  infrastructure errors and the failed credential probe remain in provenance,
+  not in the scored denominator. Source/time parity limitations are disclosed.
 - RetailGuardBench completed on all 24 cases across 3 trials before the
   confirmation fix: official LLMAgent attack success 20.0%, Guarded Agent
   0.0%; benign success 100.0% for both. A post-fix one-trial regression kept
@@ -69,7 +69,7 @@ Current verified status:
 - ✅ Smoke config: 10 real tasks from the official retail `base` split,
   1 trial
 - ✅ `uv.lock` committed; setup uses `uv sync --frozen` (strict Python 3.12)
-- ⏳ Only retry the 8 missing full-run tasks after credentials are repaired; no additional paid trials are authorized.
+- ✅ The eight missing tasks are scored and archived; no additional paid trials or feature work are authorized.
 
 ## Install
 
@@ -409,29 +409,28 @@ Command:
 
 | Metric | Official LLMAgent | Guarded Agent |
 |---|---:|---:|
-| Evaluated / total simulations | 114 / 114 | 106 / 114 |
-| Official reward / success (evaluated only) | 84.21% | 89.62% |
-| Infrastructure errors | 0 | 8 |
-| Average individual tool calls / evaluated task | 8.01 | 7.84 |
-| Average turns / evaluated task | 27.32 | 33.89 |
+| Evaluated / total simulations | 114 / 114 | 114 / 114 |
+| Official reward / success | 96/114 (84.21%) | 101/114 (88.60%) |
+| Unscored selected results | 0 | 0 |
+| Average individual tool calls / evaluated task | 8.01 | 7.86 |
+| Average messages / evaluated task | 27.32 | 34.00 |
 
-On the 106 task/trial pairs evaluated by both agents, Official LLMAgent
-passed 89/106 (83.96%) and Guarded Agent passed 95/106 (89.62%). This is the
-strictly comparable subset; the 5.66 percentage-point difference is a
-single-trial observation, not a statistical significance claim.
+On all 114 task/trial/seed pairs, Official LLMAgent passed 96 and Guarded
+passed 101. Both passed 88, both failed 5, Guarded alone passed 13 and
+baseline alone passed 8. The 4.39 percentage-point difference is a single-trial
+observation, not a statistical significance claim.
 
-The eight Guarded infrastructure errors contain zero messages and occurred
-after the API returned Insufficient Balance; they are not counted as task
-failures in evaluated-only metrics. Consequently 89.62% is an interim
-106-sample result, not a completed 114-task score. The 2026-10-03 resume attempt
-was blocked by invalid credentials rather than balance. The checked-in report
-is [here](published/retail-base-single-trial/README.md). Historical runner HEAD
-does not prove the exact uncommitted adapter source; resumed model aliases can
-also drift across dates. These are paired task observations, not strict
-same-source/same-time replication.
+The eight historical zero-message errors were caused by Insufficient Balance.
+The first 2026-10-03 credential probe also produced no score. After credential
+replacement, all eight were scored, including two real failures that are kept.
+The checked-in [report](published/retail-base-single-trial/README.md) includes
+per-source hashes and task provenance. Historical runner HEAD does not prove
+the exact uncommitted adapter source; hosted model aliases can drift across
+dates. This is a resumed, merged paired result, not strict same-source/same-time
+replication. The previous 89.62% / 106-task score is historical, not current.
 
 Counting correction: the old 5.03 baseline value counted messages containing
 tool calls, not individual calls. A message can contain several calls. The
-compact export counts every `tool_calls` entry: baseline 8.01, guarded 7.84.
-These averages use different evaluated subsets and do not establish an
-efficiency advantage. Scores and original raw results are unchanged.
+compact export counts every `tool_calls` entry: baseline 913/114 = 8.01,
+guarded 896/114 = 7.86. The same-task observation does not establish a general
+cost or architecture advantage. Original raw results remain unchanged.

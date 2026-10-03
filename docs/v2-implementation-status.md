@@ -20,7 +20,7 @@ Java 全量测试与打包：562 项，540 通过，22 跳过，0 失败、0 错
 
 前端 typecheck、build 通过；构建仍有大 chunk 提示。V2 代码阶段 τ³ 适配器离线 pytest 为 120 通过；收尾增加结果归档完整性测试，当前数量由公开 Offline CI 报告给出。Java、Frontend、Gateway 与 τ³ adapter 的首轮[公开离线 CI](https://github.com/komor-alt/multi-agent-ecommerce-system/actions/runs/37093357931)全部通过；CI 不配置模型密钥，不执行付费评测。
 
-公开模型评测与上述离线测试分开：历史 Baseline 114 条、Guarded 106 条有效评分。收尾尝试 task 106，API 返回 Authentication Fails，仍无有效评分。只授权补齐 106–113，不新开 10/50-task 或多 seed 实验。最新逐题结果、来源和限制见[公开基准归档](../benchmarks/tau3-retail/published/retail-base-single-trial/README.md)。
+公开模型评测与上述离线测试分开：2026-10-03 更换凭据后仅补跑 106–113，6 题通过，109、110 两题失败，全部产生有效评分。合并后 Baseline 96/114（84.21%），Guarded 101/114（88.60%），114 对均有效；不替换原先任何有效成功或失败。首次凭据失败记录保留，不新开 10/50-task 或多 seed 实验。逐题来源、历史源码不完整与跨日期模型漂移限制见[公开基准归档](../benchmarks/tau3-retail/published/retail-base-single-trial/README.md)。
 
 ## 结果应如何解释
 
@@ -38,7 +38,7 @@ Java 全量测试与打包：562 项，540 通过，22 跳过，0 失败、0 错
 
 ## 明确未完成 / 未执行
 
-- τ³ Retail 完整 114 对：尚未完成；缺失 106–113，当前阻塞为无效 DeepSeek API Key。历史 10-task smoke 已完成，不等于 Java V2 端到端评测；不再启动新的 50-task 实验。
+- Java V2 真实模型端到端评测尚未执行。Python τ³ Retail 114 对续跑合并结果和历史 10-task smoke 已完成，但不能冒充 Java 成绩；不再启动新的 50-task 实验。
 - 真实 PostgreSQL V2 迁移及多实例复跑：Docker 引擎未运行；迁移文件已提供，未对用户数据库执行。
 - 真实业务连接器：未接入，尚无外部持久化幂等、条件写及对账验证。
 - 生产性能/真实模型质量：本轮没有测量，不能宣称达到大厂上线指标。
