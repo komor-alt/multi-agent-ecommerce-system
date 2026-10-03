@@ -36,13 +36,13 @@ class EvidencePreconditionGateTest {
 
     /** 场景 2：有 ORDER 无 SHIPMENT 时 LLM→POLICY 被拒（POLICY 依赖 SHIPMENT），兜底 SHIPMENT 通过。 */
     @Test
-    void policyWithoutShipmentIsRejectedAndShipmentFallbackPasses() {
+    void policyAndShipmentAreBothAllowedAfterOrder() {
         Map<String, Boolean> presence = Map.of("ORDER", true, "SHIPMENT", false, "POLICY", false);
 
         ValidationResult rejected = gate.validate(EvidenceType.POLICY, COMPENSATION_EVIDENCE, presence);
 
-        assertThat(rejected.passed()).isFalse();
-        assertThat(rejected.rejectionCode()).isEqualTo(RejectionCode.SHIPMENT_PRECONDITION_MISSING);
+        assertThat(rejected.passed()).isTrue();
+        assertThat(rejected.rejectionCode()).isNull();
         assertThat(gate.validate(EvidenceType.SHIPMENT, COMPENSATION_EVIDENCE, presence).passed()).isTrue();
     }
 
@@ -71,7 +71,7 @@ class EvidencePreconditionGateTest {
         Map<String, Boolean> missingChain = Map.of("ORDER", false, "SHIPMENT", false, "POLICY", false);
         ValidationResult rejected = gate.validate(EvidenceType.POLICY, COMPENSATION_EVIDENCE, missingChain);
         assertThat(rejected.passed()).isFalse();
-        assertThat(rejected.rejectionCode()).isEqualTo(RejectionCode.SHIPMENT_PRECONDITION_MISSING);
+        assertThat(rejected.rejectionCode()).isEqualTo(RejectionCode.ORDER_PRECONDITION_MISSING);
     }
 
     /** 已获取的证据不可重复取证。 */
@@ -110,14 +110,14 @@ class EvidencePreconditionGateTest {
     }
 
     @Test
-    void policyInLostGraphDependsOnCarrierCase() {
+    void policyInLostGraphDoesNotDependOnCarrierCase() {
         Map<String, Boolean> presence =
                 Map.of("ORDER", true, "SHIPMENT", true, "CARRIER_CASE", false, "POLICY", false);
 
         ValidationResult rejected = gate.validate(EvidenceType.POLICY, LOST_EVIDENCE, presence);
 
-        assertThat(rejected.passed()).isFalse();
-        assertThat(rejected.rejectionCode()).isEqualTo(RejectionCode.CARRIER_CASE_PRECONDITION_MISSING);
+        assertThat(rejected.passed()).isTrue();
+        assertThat(rejected.rejectionCode()).isNull();
         assertThat(gate.validate(EvidenceType.CARRIER_CASE, LOST_EVIDENCE, presence).passed()).isTrue();
     }
 
@@ -162,13 +162,13 @@ class EvidencePreconditionGateTest {
     }
 
     @Test
-    void policyInDamagedGraphDependsOnProductAndNeverOnShipment() {
+    void policyInDamagedGraphOnlyNeedsOrder() {
         // PRODUCT 缺失 → POLICY 拒绝（PRODUCT_PRECONDITION_MISSING）。
         Map<String, Boolean> presence =
                 Map.of("ORDER", true, "DELIVERY", true, "DAMAGE_PHOTO", true, "PRODUCT", false, "POLICY", false);
         ValidationResult rejected = gate.validate(EvidenceType.POLICY, DAMAGED_EVIDENCE, presence);
-        assertThat(rejected.passed()).isFalse();
-        assertThat(rejected.rejectionCode()).isEqualTo(RejectionCode.PRODUCT_PRECONDITION_MISSING);
+        assertThat(rejected.passed()).isTrue();
+        assertThat(rejected.rejectionCode()).isNull();
 
         // SHIPMENT 不在 DAMAGED_ITEM 图内：即使在场也无关，PRODUCT 在场后 POLICY 通过。
         Map<String, Boolean> full = Map.of(

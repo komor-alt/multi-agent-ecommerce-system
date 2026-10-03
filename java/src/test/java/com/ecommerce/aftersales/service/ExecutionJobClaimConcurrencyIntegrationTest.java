@@ -77,7 +77,8 @@ class ExecutionJobClaimConcurrencyIntegrationTest {
                 new ObjectMapper(),
                 new TransactionTemplate(transactionManager),
                 properties,
-                ignored -> submitted.incrementAndGet()
+                ignored -> submitted.incrementAndGet(),
+                mock(ExecutionApprovalValidator.class)
         );
 
         int callers = 24;

@@ -1,6 +1,6 @@
 package com.ecommerce.aftersales.service;
 
-import com.ecommerce.aftersales.connector.MockShopifyAfterSalesConnector;
+import com.ecommerce.aftersales.connector.AfterSalesConnector;
 import com.ecommerce.aftersales.entity.AfterSalesTicketEntity;
 import com.ecommerce.aftersales.entity.ExecutionJobEntity;
 import com.ecommerce.aftersales.model.AfterSalesTypes;
@@ -31,24 +31,26 @@ public class ExecutionService {
 
     private final ExecutionJobRepository executionJobRepository;
     private final AfterSalesTicketRepository ticketRepository;
-    private final MockShopifyAfterSalesConnector connector;
+    private final AfterSalesConnector connector;
     private final ExecutionPreconditionGate preconditionGate;
     private final AfterSalesRunEventService eventService;
     private final ObjectMapper objectMapper;
     private final TransactionTemplate transactionTemplate;
     private final AfterSalesExecutionProperties properties;
     private final Executor executionExecutor;
+    private final ExecutionApprovalValidator approvalValidator;
 
     public ExecutionService(
             ExecutionJobRepository executionJobRepository,
             AfterSalesTicketRepository ticketRepository,
-            MockShopifyAfterSalesConnector connector,
+            AfterSalesConnector connector,
             ExecutionPreconditionGate preconditionGate,
             AfterSalesRunEventService eventService,
             ObjectMapper objectMapper,
             TransactionTemplate transactionTemplate,
             AfterSalesExecutionProperties properties,
-            @Qualifier("afterSalesExecutionExecutor") Executor executionExecutor) {
+            @Qualifier("afterSalesExecutionExecutor") Executor executionExecutor,
+            ExecutionApprovalValidator approvalValidator) {
         this.executionJobRepository = executionJobRepository;
         this.ticketRepository = ticketRepository;
         this.connector = connector;
@@ -58,6 +60,7 @@ public class ExecutionService {
         this.transactionTemplate = transactionTemplate;
         this.properties = properties;
         this.executionExecutor = executionExecutor;
+        this.approvalValidator = approvalValidator;
     }
 
     /**
@@ -133,27 +136,46 @@ public class ExecutionService {
             AfterSalesTicketEntity ticket = ticketRepository.findById(job.getTicketId()).orElseThrow();
             return new ExecutionContext(job.getId(), job.getTicketId(), ticket.getCurrentRunId(),
                     ticket.getOrderId(), job.getIdempotencyKey(), job.getAmount(), job.getCurrency(),
-                    job.getAttemptCount(), properties.getWorkerId());
+                    job.getAttemptCount(), properties.getWorkerId(), job.getActionType(), job.getApprovalId());
         });
     }
 
     private void executeClaimed(ExecutionContext context) {
         try {
-            eventService.append(context.runId(), "execution_started", "执行延迟补偿", "running",
+            eventService.append(context.runId(), "execution_started", "执行售后补偿", "running",
                     "审批已通过，服务端正在执行幂等补偿命令。", Map.of(
-                            "summary", "正在发放延迟补偿券。",
+                            "summary", "正在执行已审批的售后命令。",
                             "jobId", context.jobId(),
+                            "executionJobId", context.jobId(),
+                            "approvalId", context.approvalId() == null ? "" : context.approvalId(),
                             "attempt", context.attempt()
                     ));
 
-            AfterSalesTypes.OrderSnapshot order = connector.getOrder(context.orderId());
-            ExecutionPreconditionGate.ValidationResult validation = preconditionGate.validate(order);
-            if (!validation.allowed()) {
-                cancelForStaleBusinessState(context, validation.reasonCode());
-                return;
+            AfterSalesConnector.ExecutionCommand command = new AfterSalesConnector.ExecutionCommand(
+                    context.idempotencyKey(), context.orderId(), context.actionType(), context.amount(), context.currency());
+            // A lost response is reconciled before checking mutable order state: an already committed
+            // effect must be acknowledged even if the order has since been refunded.
+            AfterSalesTypes.ExecutionResult result = connector.findExecution(command).orElse(null);
+            if (result == null) {
+                AfterSalesTypes.OrderSnapshot order = connector.getOrder(context.orderId());
+                ExecutionPreconditionGate.ValidationResult validation = preconditionGate.validate(order);
+                if (!validation.allowed()) {
+                    cancelForStaleBusinessState(context, validation.reasonCode());
+                    return;
+                }
+                String approvalRejection = transactionTemplate.execute(status -> {
+                    ExecutionJobEntity current = executionJobRepository.findByIdForUpdate(context.jobId()).orElseThrow();
+                    if (!ownsAttempt(current, context) || current.getLeaseUntil() == null
+                            || !current.getLeaseUntil().isAfter(Instant.now())) return "EXECUTION_LEASE_LOST";
+                    AfterSalesTicketEntity ticket = ticketRepository.findById(context.ticketId()).orElseThrow();
+                    return approvalValidator.rejection(current, ticket, order);
+                });
+                if (approvalRejection != null) {
+                    cancelForStaleBusinessState(context, approvalRejection);
+                    return;
+                }
+                result = connector.execute(order, command);
             }
-            AfterSalesTypes.ExecutionResult result =
-                    connector.issueDelayCoupon(order, context.amount(), context.idempotencyKey());
             String resultJson = objectMapper.writeValueAsString(result);
 
             Boolean committed = transactionTemplate.execute(status -> {
@@ -178,7 +200,7 @@ public class ExecutionService {
             }
 
             eventService.append(context.runId(), "execution_completed", "补偿执行成功", "success",
-                    "延迟补偿券已发放，执行结果已写入审计链路。", Map.of(
+                    "已审批的售后命令已执行，结果已写入审计链路。", Map.of(
                             "summary", "补偿执行成功，外部引用号 " + result.externalReference() + "。",
                             "jobId", context.jobId(),
                             "externalReference", result.externalReference(),
@@ -188,7 +210,9 @@ public class ExecutionService {
             eventService.complete(context.runId());
 
         } catch (Exception error) {
-            AfterSalesTypes.ExecutionStatus nextStatus = context.attempt() >= properties.getMaxAttempts()
+            boolean terminal = error instanceof com.ecommerce.aftersales.connector.ConnectorException ce
+                    && ce.category() == com.ecommerce.aftersales.connector.ConnectorException.Category.TERMINAL;
+            AfterSalesTypes.ExecutionStatus nextStatus = terminal || context.attempt() >= properties.getMaxAttempts()
                     ? AfterSalesTypes.ExecutionStatus.DEAD_LETTER
                     : AfterSalesTypes.ExecutionStatus.RETRY_WAIT;
             Boolean committed = transactionTemplate.execute(status -> {
@@ -197,7 +221,7 @@ public class ExecutionService {
                     return false;
                 }
                 job.setStatus(nextStatus);
-                job.setLastError(error.getMessage());
+                job.setLastError("CONNECTOR_EXECUTION_FAILED");
                 job.setNextRetryAt(nextStatus == AfterSalesTypes.ExecutionStatus.RETRY_WAIT
                         ? Instant.now().plusMillis(properties.getRetryDelayMs())
                         : null);
@@ -209,7 +233,7 @@ public class ExecutionService {
                 return;
             }
             eventService.append(context.runId(), "execution_failed", "补偿执行失败", "failed",
-                    error.getMessage(), Map.of(
+                    "CONNECTOR_EXECUTION_FAILED", Map.of(
                             "summary", nextStatus == AfterSalesTypes.ExecutionStatus.DEAD_LETTER
                                     ? "执行超过最大重试次数，已进入死信状态。"
                                     : "执行失败，已进入重试时间窗。",
@@ -245,7 +269,8 @@ public class ExecutionService {
                 reasonCode, Map.of(
                         "summary", "订单状态已变化，执行前校验未通过，补偿任务已终止。",
                         "jobId", context.jobId(),
-                        "reasonCode", reasonCode
+                        "reasonCode", reasonCode,
+                        "guardCode", reasonCode
                 ));
         eventService.complete(context.runId());
     }
@@ -331,7 +356,9 @@ public class ExecutionService {
             java.math.BigDecimal amount,
             String currency,
             int attempt,
-            String leaseOwner
+            String leaseOwner,
+            String actionType,
+            String approvalId
     ) {
     }
 

@@ -1,8 +1,18 @@
-# 跨境电商推荐多 Agent 运营工作台
+# 电商可信业务 Agent 执行系统
+
+本项目的核心是 **Trusted Agent Execution**：大模型在服务端给定的合法动作中选择下一步，Java 负责业务实体绑定、证据校验、金额计算、人工审批与幂等执行。主场景是跨境电商售后，推荐模块保留为场景化受限工作流和专业角色调度的辅助示例。
+
+售后链路覆盖物流延迟、包裹丢失与商品破损。Planner 可根据已有证据调整取证顺序，例如订单取回后，政策与物流都可能是合法候选；模型不能提供真实订单参数、金额或审批结果。审批通过时保存方案快照，执行前读取订单并核对审批绑定；响应丢失时先按同一个幂等命令查询模拟渠道结果，再决定是否重新执行。
+
+V2 验收与复现见 [V2 实施状态](docs/v2-implementation-status.md) 和 [离线评测口径](docs/v2-evaluation-contract.md)。本轮只运行 Java、前端和基准适配器的离线测试；**τ³ 10/50-task 付费模型评测未运行**。离线任务成功率、安全终止率与工具调用数分别报告，不能仅凭少调用工具宣称效果更好。
+
+边界：当前售后 Connector 是进程内模拟渠道，不是真实 Shopify/支付接入。数据库 Job 持久化与模拟渠道幂等不能单独证明真实外部系统的 exactly-once；真实渠道必须支持持久化幂等、参数一致性核验、结果查询和条件执行。
 
 生产化加固、配置、SLO 目标与验收方式见 [生产化验收手册](docs/production-readiness.md)。目标阈值不等于已达到的生产容量；真实平台和多实例恢复的未完成项在手册中明确列出。
 
-这是一个以**商品推荐为主业务**的跨境电商运营工作台。运营人员创建 `homepage`、`campaign` 或 `retention` 推荐任务，Java Root/Supervisor Agent 在运行时创建带父子关系和依赖边的专业子 Agent 任务；当前能力目录包含 Profile、Product、Inventory、Copy 四类角色。每次委派都会生成新的 Agent 实例、不可变规划上下文和独立有界 Plan-Act-Observe Loop，结果以版本化 Artifact 返回，由 Root 验证并合并为 `RecommendationPlan`。
+## 辅助场景：推荐受限工作流
+
+运营人员创建 homepage、campaign 或 retention 推荐任务，Java Root/Supervisor 在服务端定义的场景路径和角色目录内调度带依赖关系的专业任务。Profile、Product、Inventory、Copy 使用独立有界 Loop，结果以版本化 Artifact 返回并合并为 RecommendationPlan。这是 scene-aware bounded workflow / specialist routing，不是自由多 Agent 规划的证明。
 
 ```text
 运营人员创建 homepage / campaign / retention 任务
@@ -19,7 +29,7 @@ RecommendationPlan
 SSE Trace → Run 持久化 → 历史回放 / Dashboard
 ```
 
-推荐默认入口现在是 **Root/Supervisor + 动态 Sub-Agent Tasks**，不是 `SupervisorOrchestrator` 固定工作流。Root 根据服务端声明的状态读写集合，把无数据依赖、无写冲突的任务作为同一批兄弟节点并行执行；后续任务显式依赖上一批 Artifact。子 Agent 使用创建时的不可变上下文做规划，业务结果通过带 `candidateVersion` 的 `CandidateStatePatch` 合并，旧版本结果和越权字段会被拒绝。Inventory 可以 VETO，Root 会向 Product 发出 REQUEST_REVISION、清理旧候选派生状态并动态创建重新召回任务。
+推荐默认入口是 **Root/Supervisor + 受限 Sub-Agent Tasks**。Root 根据服务端声明的状态读写集合，把无数据依赖、无写冲突的任务作为同一批兄弟节点并行执行；后续任务显式依赖上一批 Artifact。子 Agent 使用创建时的不可变上下文做规划，业务结果通过带 candidateVersion 的 CandidateStatePatch 合并，旧版本结果和越权字段会被拒绝。Inventory 可以 VETO，Root 按既定修订策略清理旧候选派生状态并重新召回。可并行和可重试不意味着模型能够自由改变业务流程。
 
 每次运行的 `llmMetrics` 会返回 `subAgentTasks`、`subAgentArtifacts` 和 `subAgentTaskCount`，可查看任务的父节点、依赖、上下文版本、生命周期、工具范围和交付物。当前执行器仍是单 JVM Runtime，角色能力目录固定为四类，尚未提供代码沙箱、Git worktree、未完成任务的跨进程续跑或任意层级子 Agent 创建；这些边界不会包装成已经完成的能力。
 
@@ -53,7 +63,7 @@ PostgreSQL 生产迁移位于 `java/src/main/resources/migration-recommendation-
 | `campaign` | `[load_campaign_constraints ∥ search_products] → check_fulfillment → [check_inventory ∥ rerank] → merge → generate_localized_copy → RecommendationPlan` | 活动约束、履约检查和本地化活动文案 |
 | `retention` | `get_user_profile → get_recent_orders → search_products → [check_inventory ∥ rerank] → merge → generate_retention_copy → RecommendationPlan` | 基于用户与近期订单的 win-back 推荐 |
 
-`∥` 表示实际提交到独立协调线程池并发执行，`merge` 表示 Supervisor 屏障后的确定性合并。上表是依赖关系而不是硬编码的逐工具执行器；不同 Scene 只开放当前可执行的 Agent/工具，服务端会拒绝越权调用和不满足前置条件的委派。推荐链路中的用户、商品、库存、订单和 user events 使用 Java 数据服务连接 PostgreSQL/Redis；售后是第二业务场景，不改变推荐主链。详细边界见 `docs/multi-agent-architecture.md`。
+`∥` 表示实际提交到独立协调线程池并发执行，`merge` 表示 Supervisor 屏障后的确定性合并。上表是依赖关系而不是硬编码的逐工具执行器；不同 Scene 只开放当前可执行的 Agent/工具，服务端会拒绝越权调用和不满足前置条件的委派。推荐链路中的用户、商品、库存、订单和 user events 使用 Java 数据服务连接 PostgreSQL/Redis；V2 主线是售后可信执行，推荐运行时保持兼容。详细边界见 `docs/multi-agent-architecture.md`。
 
 并行度、协调线程池和是否允许推测式重排均由 `agent.orchestration` 配置控制；可通过 `ECOM_AGENT_PARALLEL_ENABLED`、`ECOM_AGENT_MAX_PARALLEL_SPECIALISTS`、`ECOM_AGENT_ORCHESTRATION_CORE_SIZE`、`ECOM_AGENT_ORCHESTRATION_MAX_SIZE`、`ECOM_AGENT_ORCHESTRATION_QUEUE_CAPACITY` 与 `ECOM_AGENT_SPECULATIVE_RERANK_ENABLED` 覆盖。协调线程池与业务工具线程池隔离，队列饱和时采用调用线程执行形成反压，不无限创建任务。
 

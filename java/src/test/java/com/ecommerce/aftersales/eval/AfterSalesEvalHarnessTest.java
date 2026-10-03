@@ -47,6 +47,11 @@ class AfterSalesEvalHarnessTest {
         assertThat(metrics.completionRate()).isGreaterThan(0.9);
         assertThat(metrics.noActionCorrectRate()).isEqualTo(1.0);
         assertThat(metrics.proposalPrecision()).isEqualTo(1.0);
+        assertThat(report.cases().stream().mapToInt(c -> c.llmCallCount()).sum())
+                .as("scripted model outputs must actually execute; zero-budget evaluation is invalid")
+                .isPositive();
+        assertThat(report.cases()).allSatisfy(c -> assertThat(c.wrongEntity()).isFalse());
+        assertThat(AfterSalesEvalHarness.REPORT_DIR.resolve("v2-comparison.json")).exists();
 
         // Every expected proposal carries the rule-computed trusted amount:
         // no model-supplied or tampered amount ever reached a proposal.

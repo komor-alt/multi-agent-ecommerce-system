@@ -16,7 +16,48 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @Component
-public class MockShopifyAfterSalesConnector {
+public class MockShopifyAfterSalesConnector implements AfterSalesConnector {
+    // Process-local simulator, NOT a durable external payment ledger.
+    private final java.util.concurrent.ConcurrentMap<String, CommittedExecution> executions =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private record CommittedExecution(ExecutionCommand command, AfterSalesTypes.ExecutionResult result) {}
+
+    @Override
+    public java.util.Optional<AfterSalesTypes.ExecutionResult> findExecution(ExecutionCommand command) {
+        CommittedExecution entry = executions.get(command.idempotencyKey());
+        if (entry == null) return java.util.Optional.empty();
+        if (!entry.command().equals(command)) {
+            throw new ConnectorException(ConnectorException.Category.TERMINAL, "IDEMPOTENCY_PAYLOAD_MISMATCH");
+        }
+        return java.util.Optional.of(entry.result());
+    }
+
+    @Override
+    public AfterSalesTypes.ExecutionResult execute(AfterSalesTypes.OrderSnapshot order, ExecutionCommand command) {
+        return executions.compute(command.idempotencyKey(), (key, existing) -> {
+            if (existing != null) {
+                if (!existing.command().equals(command)) {
+                    throw new ConnectorException(ConnectorException.Category.TERMINAL, "IDEMPOTENCY_PAYLOAD_MISMATCH");
+                }
+                return existing;
+            }
+            if (order == null || !command.orderId().equals(order.orderId())
+                    || !command.currency().equals(order.currency())
+                    || order.fullyRefunded() || !order.paid()) {
+                throw new ConnectorException(ConnectorException.Category.TERMINAL, "ORDER_NOT_EXECUTABLE");
+            }
+            String prefix = switch (command.actionType()) {
+                case "DELAY_COMPENSATION_COUPON", "DAMAGE_COMPENSATION_COUPON" -> "CPN-";
+                case "LOST_PARCEL_REFUND" -> "RFD-";
+                default -> throw new ConnectorException(ConnectorException.Category.TERMINAL, "ACTION_NOT_SUPPORTED");
+            };
+            String reference = prefix + java.util.UUID.nameUUIDFromBytes(key.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return new CommittedExecution(command, new AfterSalesTypes.ExecutionResult(
+                    reference, "LOST_PARCEL_REFUND".equals(command.actionType()) ? "REFUNDED" : "ISSUED", Instant.now()));
+        }).result();
+    }
+
+    public int committedEffectCount() { return executions.size(); }
 
     /** 可信订单号格式：O-<国家>-<数字>，国家为两位大写代码。 */
     private static final Pattern TRUSTED_ORDER_ID_PATTERN = Pattern.compile("^O-([A-Z]{2})-(\\d+)$");
@@ -256,7 +297,7 @@ public class MockShopifyAfterSalesConnector {
         if (!order.paid()) {
             throw new IllegalStateException("ORDER_NOT_PAID");
         }
-        String reference = "CPN-" + idempotencyKey.substring(0, 12).toUpperCase();
-        return new AfterSalesTypes.ExecutionResult(reference, "ISSUED", Instant.now());
+        return execute(order, new ExecutionCommand(idempotencyKey, order.orderId(),
+                "DELAY_COMPENSATION_COUPON", amount, order.currency()));
     }
 }

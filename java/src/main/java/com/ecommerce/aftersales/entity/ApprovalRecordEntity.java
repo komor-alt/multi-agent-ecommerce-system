@@ -30,6 +30,19 @@ public class ApprovalRecordEntity {
 
     private Instant createdAt;
 
+    // Approval-time values, never reconstructed from a subsequently edited proposal.
+    private String runId;
+    private String orderId;
+    private String userId;
+    private String actionType;
+    private String currency;
+    private String policyVersion;
+    private String proposalVersion;
+    private java.math.BigDecimal amount;
+    private java.math.BigDecimal paidAmount;
+    @Lob
+    private String evidenceIdsJson;
+
     @PrePersist
     void beforeCreate() {
         createdAt = createdAt == null ? Instant.now() : createdAt;

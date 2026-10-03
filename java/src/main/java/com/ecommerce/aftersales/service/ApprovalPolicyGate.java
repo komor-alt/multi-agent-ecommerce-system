@@ -71,17 +71,28 @@ public class ApprovalPolicyGate {
         requireTicketState(ticket);
         AfterSalesRunEntity run = loadRun(ticket);
         requireRunState(run, proposal);
-        FinalAnswer finalAnswer = parseFinalAnswer(run);
-        requireTrustedEvidenceComplete(finalAnswer.evidenceIds);
+        FinalAnswer finalAnswer = parseFinalAnswer(run, ticket.getIssueType());
+        if (!java.util.Objects.equals(ticket.getOrderId(), finalAnswer.order.orderId())
+                || (ticket.getUserId() != null && !ticket.getUserId().equals(finalAnswer.order.userId()))) {
+            throw invalidFinalAnswer();
+        }
+        requireTrustedEvidenceComplete(finalAnswer.evidenceIds, ticket.getIssueType());
         requireSnapshotEquality(proposal, finalAnswer.evidenceIds);
         requirePolicyVersion(proposal, finalAnswer.policy);
         requirePolicyContext(finalAnswer.policy, finalAnswer.order, ticket);
         requireRelookupVersion(proposal, finalAnswer.order, ticket);
-        AfterSalesTypes.CompensationResult recomputed = compensationRuleService.calculate(
-                finalAnswer.order, finalAnswer.shipment, finalAnswer.policy);
+        AfterSalesTypes.CompensationResult recomputed = switch (ticket.getIssueType()) {
+            case "SHIPMENT_DELAY" -> compensationRuleService.calculate(
+                    finalAnswer.order, finalAnswer.shipment, finalAnswer.policy);
+            case "LOST_IN_TRANSIT" -> compensationRuleService.calculateLost(
+                    finalAnswer.order, finalAnswer.shipment, finalAnswer.carrierCase, finalAnswer.policy);
+            case "DAMAGED_ITEM" -> compensationRuleService.calculateDamage(
+                    finalAnswer.order, finalAnswer.delivery, finalAnswer.damagePhoto, finalAnswer.product, finalAnswer.policy);
+            default -> throw invalidFinalAnswer();
+        };
         requireCompensation(proposal, recomputed);
         return new ApprovalValidationResult(
-                proposal.getId(), finalAnswer.order, finalAnswer.shipment, finalAnswer.policy, recomputed);
+                proposal.getId(), run.getId(), finalAnswer.order, finalAnswer.shipment, finalAnswer.policy, recomputed);
     }
 
     private static void requirePending(ActionProposalEntity proposal) {
@@ -146,8 +157,14 @@ public class ApprovalPolicyGate {
     }
 
     /** 可信 Run 最终答复中的证据必须覆盖四类前缀；缺失 → APPROVAL_EVIDENCE_INCOMPLETE。 */
-    private static void requireTrustedEvidenceComplete(List<String> trustedEvidenceIds) {
-        for (String prefix : REQUIRED_EVIDENCE_PREFIXES) {
+    private static void requireTrustedEvidenceComplete(List<String> trustedEvidenceIds, String issueType) {
+        List<String> prefixes = switch (issueType) {
+            case "SHIPMENT_DELAY" -> REQUIRED_EVIDENCE_PREFIXES;
+            case "LOST_IN_TRANSIT" -> List.of("order:", "shipment:", "carrier-case:", "policy:", "calculation:");
+            case "DAMAGED_ITEM" -> List.of("order:", "delivery:", "damage-photo:", "product:", "policy:", "calculation:");
+            default -> throw invalidFinalAnswer();
+        };
+        for (String prefix : prefixes) {
             if (trustedEvidenceIds.stream().noneMatch(id -> id.startsWith(prefix))) {
                 throw new ApprovalPolicyViolationException(
                         ApprovalPolicyViolationException.APPROVAL_EVIDENCE_INCOMPLETE,
@@ -206,7 +223,7 @@ public class ApprovalPolicyGate {
     }
 
     /** 解析最终答复中的可信快照；缺失或不可解析 → FINAL_ANSWER_INVALID。 */
-    private FinalAnswer parseFinalAnswer(AfterSalesRunEntity run) {
+    private FinalAnswer parseFinalAnswer(AfterSalesRunEntity run, String issueType) {
         if (run.getFinalAnswerJson() == null || run.getFinalAnswerJson().isBlank()) {
             throw invalidFinalAnswer();
         }
@@ -219,8 +236,12 @@ public class ApprovalPolicyGate {
             }
             return new FinalAnswer(
                     parseSnapshot(finalAnswer, "order", AfterSalesTypes.OrderSnapshot.class),
-                    parseSnapshot(finalAnswer, "shipment", AfterSalesTypes.ShipmentSnapshot.class),
+                    "DAMAGED_ITEM".equals(issueType) ? null : parseSnapshot(finalAnswer, "shipment", AfterSalesTypes.ShipmentSnapshot.class),
                     parseSnapshot(finalAnswer, "policy", AfterSalesTypes.PolicyEvidence.class),
+                    "LOST_IN_TRANSIT".equals(issueType) ? parseSnapshot(finalAnswer, "carrierCase", AfterSalesTypes.CarrierCaseSnapshot.class) : null,
+                    "DAMAGED_ITEM".equals(issueType) ? parseSnapshot(finalAnswer, "delivery", AfterSalesTypes.DeliverySnapshot.class) : null,
+                    "DAMAGED_ITEM".equals(issueType) ? parseSnapshot(finalAnswer, "damagePhoto", AfterSalesTypes.DamagePhotoSnapshot.class) : null,
+                    "DAMAGED_ITEM".equals(issueType) ? parseSnapshot(finalAnswer, "product", AfterSalesTypes.ProductSnapshot.class) : null,
                     parseEvidenceIds(finalAnswer));
         } catch (ApprovalPolicyViolationException error) {
             throw error;
@@ -356,6 +377,10 @@ public class ApprovalPolicyGate {
             AfterSalesTypes.OrderSnapshot order,
             AfterSalesTypes.ShipmentSnapshot shipment,
             AfterSalesTypes.PolicyEvidence policy,
+            AfterSalesTypes.CarrierCaseSnapshot carrierCase,
+            AfterSalesTypes.DeliverySnapshot delivery,
+            AfterSalesTypes.DamagePhotoSnapshot damagePhoto,
+            AfterSalesTypes.ProductSnapshot product,
             List<String> evidenceIds) {
     }
 }

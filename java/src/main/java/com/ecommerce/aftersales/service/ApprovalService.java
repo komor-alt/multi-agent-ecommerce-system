@@ -52,20 +52,29 @@ public class ApprovalService {
 
         // 服务端可审批性复核（Gate 不重新锁 Proposal）：失败抛 ApprovalPolicyViolationException，
         // 事务整体回滚 —— 绝不创建 ApprovalRecord 或 ExecutionJob，proposal 保持 PENDING。
-        approvalPolicyGate.validate(proposal);
+        ApprovalValidationResult validated = approvalPolicyGate.validate(proposal);
 
         proposal.setStatus(AfterSalesTypes.ProposalStatus.APPROVED);
         proposal.setReviewedBy(operatorId);
         proposal.setReviewComment(comment);
         proposal.setReviewedAt(Instant.now());
         proposalRepository.save(proposal);
-        saveApprovalRecord(proposalId, "APPROVED", operatorId, comment);
+        ApprovalRecordEntity approval = ApprovalRecordEntity.builder()
+                .id(UUID.randomUUID().toString()).proposalId(proposalId).decision("APPROVED")
+                .operatorId(operatorId).comment(comment).runId(validated.runId())
+                .orderId(validated.order().orderId()).userId(validated.order().userId())
+                .paidAmount(validated.order().paidAmount()).actionType(proposal.getActionType())
+                .amount(proposal.getAmount()).currency(proposal.getCurrency())
+                .policyVersion(proposal.getPolicyVersion()).proposalVersion(proposal.getProposalVersion())
+                .evidenceIdsJson(proposal.getEvidenceIdsJson()).build();
+        approvalRecordRepository.save(approval);
 
         String key = idempotencyKey(proposal);
         ExecutionJobEntity job = executionJobRepository.findByIdempotencyKey(key)
                 .orElseGet(() -> executionJobRepository.save(ExecutionJobEntity.builder()
                         .id(UUID.randomUUID().toString())
                         .proposalId(proposal.getId())
+                        .approvalId(approval.getId())
                         .ticketId(proposal.getTicketId())
                         .idempotencyKey(key)
                         .actionType(proposal.getActionType())
@@ -109,7 +118,7 @@ public class ApprovalService {
     public record ApprovalOutcome(ExecutionJobEntity job, boolean newlyApproved) {
     }
 
-    private String idempotencyKey(ActionProposalEntity proposal) {
+    static String idempotencyKey(ActionProposalEntity proposal) {
         try {
             String source = proposal.getId() + ":" + proposal.getActionType() + ":" + proposal.getProposalVersion();
             byte[] digest = MessageDigest.getInstance("SHA-256")

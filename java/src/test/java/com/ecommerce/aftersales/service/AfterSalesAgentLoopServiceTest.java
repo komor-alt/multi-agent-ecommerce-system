@@ -558,8 +558,8 @@ class AfterSalesAgentLoopServiceTest {
     }
 
     @Test
-    void consecutiveInvalidPolicyPlansEscalateBeforeSecondTool() {
-        // 连续降级升级：LLM 始终规划 POLICY（业务前置不满足）→ 第一次兜底 ORDER 并执行
+    void consecutiveCrossGraphPlansEscalateBeforeSecondTool() {
+        // 连续跨图规划必须升级：延迟工单不能请求 CARRIER_CASE。
         // GET_ORDER_DETAIL；第二次连续 LLM_INVALID_PLAN 兜底 SHIPMENT，但升级先于执行 ——
         // 绝不执行物流/政策/补偿/方案工具。
         AfterSalesRunRepository runRepository = mock(AfterSalesRunRepository.class);
@@ -577,7 +577,7 @@ class AfterSalesAgentLoopServiceTest {
         }).when(eventService).append(anyString(), anyString(), anyString(), anyString(), anyString(), any());
         AfterSalesAgentLoopService service = new AfterSalesAgentLoopService(
                 toolExecutor, eventService, runRepository, ticketRepository, ticketContextService, attachmentRepository,
-                intakeService, llmPlannerService("{\"nextEvidence\":\"POLICY\",\"reasonCode\":\"POLICY_REQUIRED\"}"),
+                intakeService, llmPlannerService("{\"nextEvidence\":\"CARRIER_CASE\",\"reasonCode\":\"CARRIER_CASE_REQUIRED\"}"),
                 routeResolver(), new AfterSalesEscalationPolicyService(), objectMapper, 0L, 9);
 
         when(runRepository.findById("run-1")).thenReturn(Optional.of(run()));
@@ -626,6 +626,57 @@ class AfterSalesAgentLoopServiceTest {
         assertThat(ticketCaptor.getAllValues()).anyMatch(
                 item -> AfterSalesTypes.TicketStatus.ESCALATED.equals(item.getStatus()));
         verify(eventService).complete("run-1");
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {true, false})
+    void bothLegalModelEvidenceOrdersCompleteTheSameTask(boolean policyFirst) {
+        var runs = mock(AfterSalesRunRepository.class);
+        var tickets = mock(AfterSalesTicketRepository.class);
+        var contexts = mock(AfterSalesTicketContextService.class);
+        var tools = mock(AfterSalesToolExecutor.class);
+        var events = mock(AfterSalesRunEventService.class);
+        var intake = mock(AfterSalesIntakeService.class);
+        when(intake.classify(anyString())).thenReturn(refundIntake());
+        var builder = mock(ChatClient.Builder.class);
+        when(builder.build()).thenReturn(mock(ChatClient.class));
+        List<String> sequence = policyFirst ? List.of("ORDER", "POLICY", "SHIPMENT", "READY_FOR_DECISION")
+                : List.of("ORDER", "SHIPMENT", "POLICY", "READY_FOR_DECISION");
+        var index = new java.util.concurrent.atomic.AtomicInteger();
+        var planner = new AfterSalesEvidencePlannerService(builder, objectMapper, "LLM", 4000, "test-key", 9) {
+            @Override protected String callModel(String prompt) {
+                String evidence = sequence.get(index.getAndIncrement());
+                String reason = switch (evidence) {
+                    case "ORDER" -> "ORDER_CONTEXT_REQUIRED";
+                    case "SHIPMENT" -> "SHIPMENT_STATUS_REQUIRED";
+                    case "POLICY" -> "POLICY_REQUIRED";
+                    default -> "EVIDENCE_COMPLETE";
+                };
+                assertThat(prompt).contains("AVAILABLE EVIDENCE", "TRUSTED OBSERVATIONS");
+                return "{\"nextEvidence\":\"" + evidence + "\",\"reasonCode\":\"" + reason + "\"}";
+            }
+        };
+        AfterSalesRunEntity execution = run();
+        var ticket = ticket();
+        when(runs.findById("run-1")).thenReturn(Optional.of(execution));
+        when(contexts.load("ticket-1")).thenReturn(
+                new AfterSalesTicketContextService.TicketContext(ticket, ticket.getCustomerMessage()));
+        when(tools.trustedArguments(anyString(), any())).thenReturn(Map.of());
+        stubToolExecutor(tools);
+        try {
+            new AfterSalesAgentLoopService(tools, events, runs, tickets, contexts,
+                    mock(TicketAttachmentRepository.class), intake, planner, routeResolver(),
+                    new AfterSalesEscalationPolicyService(), objectMapper, 0L, 9).run("run-1", "ticket-1");
+            assertThat(execution.getStatus()).isEqualTo("COMPLETED");
+            assertThat(execution.getStopReason()).isEqualTo("ACTION_PROPOSAL_CREATED");
+            var ordering = inOrder(tools);
+            ordering.verify(tools).execute(eq(AfterSalesToolExecutor.GET_ORDER_DETAIL), any());
+            ordering.verify(tools).execute(eq(policyFirst ? AfterSalesToolExecutor.SEARCH_POLICY
+                    : AfterSalesToolExecutor.GET_SHIPMENT_TRACE), any());
+            ordering.verify(tools).execute(eq(policyFirst ? AfterSalesToolExecutor.GET_SHIPMENT_TRACE
+                    : AfterSalesToolExecutor.SEARCH_POLICY), any());
+            assertThat(index.get()).isEqualTo(4);
+        } finally { planner.shutdown(); }
     }
 
     @Test

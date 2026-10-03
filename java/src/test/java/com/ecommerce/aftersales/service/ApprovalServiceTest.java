@@ -53,7 +53,13 @@ class ApprovalServiceTest {
         ArgumentCaptor<ExecutionJobEntity> captor = ArgumentCaptor.forClass(ExecutionJobEntity.class);
         verify(harness.executionRepository, times(1)).save(captor.capture());
         assertThat(captor.getValue().getIdempotencyKey()).hasSize(64);
-        verify(harness.approvalRepository, times(1)).save(any());
+        ArgumentCaptor<com.ecommerce.aftersales.entity.ApprovalRecordEntity> approvalCaptor =
+                ArgumentCaptor.forClass(com.ecommerce.aftersales.entity.ApprovalRecordEntity.class);
+        verify(harness.approvalRepository, times(1)).save(approvalCaptor.capture());
+        assertThat(approvalCaptor.getValue().getId()).isEqualTo(outcome.job().getApprovalId());
+        assertThat(approvalCaptor.getValue().getAmount()).isEqualByComparingTo("150000.00");
+        assertThat(approvalCaptor.getValue().getOrderId()).isEqualTo("O-VN-5002");
+        assertThat(approvalCaptor.getValue().getRunId()).isEqualTo("run-1");
     }
 
     @Test

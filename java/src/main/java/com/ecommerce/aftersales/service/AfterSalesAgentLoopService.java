@@ -580,21 +580,36 @@ public class AfterSalesAgentLoopService {
             AfterSalesAgentState state,
             int step) {
         Map<String, Boolean> presence = evidencePresence(state);
+        Map<String, Object> observations = new LinkedHashMap<>();
+        if (state.getOrder() != null) { observations.put("order", state.getOrder()); }
+        if (state.getShipment() != null) { observations.put("shipment", state.getShipment()); }
+        if (state.getCarrierCase() != null) { observations.put("carrierCase", state.getCarrierCase()); }
+        if (state.getDelivery() != null) { observations.put("delivery", state.getDelivery()); }
+        if (state.getDamagePhoto() != null) { observations.put("damagePhoto", state.getDamagePhoto()); }
+        if (state.getProduct() != null) { observations.put("product", state.getProduct()); }
+        if (state.getPolicy() != null) { observations.put("policy", state.getPolicy()); }
+        PlanningInput input = new PlanningInput(state.getIntake(), presence, observations);
         eventService.append(run.getId(), "planning_started", "规划下一步取证", "running",
                 "基于已获取证据规划下一个取证步骤。", Map.of(
                         "summary", "基于已获取证据规划下一个取证步骤。",
                         "step", step,
                         "evidencePresence", presence,
-                        "requiredEvidence", state.getIntake().requiredEvidence()
+                        "requiredEvidence", state.getIntake().requiredEvidence(),
+                        "allowedActions", input.availableEvidence()
                 ));
         long plannedAt = System.nanoTime();
-        PlanningInput input = new PlanningInput(state.getIntake(), presence);
         AfterSalesTypes.PlanningResult plan = plannerService.plan(input);
         String rejectReason = null;
         if ("LLM".equals(plan.source()) && !passesGate(plan, state, presence)) {
             // LLM 规划形式合法但业务前置不满足（非必需/已存在/依赖缺失/READY 证据不齐）：
             // 拒绝（LLM_INVALID_PLAN）并规则兜底，不重复调用模型。
             rejectReason = "LLM_INVALID_PLAN";
+            var rejection = preconditionGate.validate(plan.nextEvidence(), state.getIntake().requiredEvidence(), presence);
+            eventService.append(run.getId(), "planning_rejected", "规划被阻止", "warning",
+                    "模型动作不满足业务前置条件。", Map.of(
+                            "selectedAction", plan.nextEvidence().name(), "allowedActions", input.availableEvidence(),
+                            "plannerSource", plan.source(), "rejectionReason", rejection.rejectionCode().name(),
+                            "guardCode", rejection.rejectionCode().name(), "step", step));
             plan = plannerService.deterministicPlan(input, rejectReason);
         }
         if (plan.invalidInput()) {
@@ -616,7 +631,10 @@ public class AfterSalesAgentLoopService {
                         "reasonCode", plan.reasonCode(),
                         "source", plan.source(),
                         "step", step,
-                        "latencyMs", latencyMs
+                        "latencyMs", latencyMs,
+                        "allowedActions", input.availableEvidence(),
+                        "selectedAction", plan.nextEvidence().name(),
+                        "plannerSource", plan.source()
                 ));
         return plan;
     }

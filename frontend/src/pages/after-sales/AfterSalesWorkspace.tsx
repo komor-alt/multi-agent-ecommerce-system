@@ -790,11 +790,16 @@ function PlannerTraceSummary({ event }: { event: AfterSalesEvent }) {
   const reasonCode = typeof event.data.reasonCode === "string" ? event.data.reasonCode : undefined;
   const fallbackReason = typeof event.data.fallbackReason === "string" ? event.data.fallbackReason : undefined;
   const source = typeof event.data.source === "string" ? event.data.source : undefined;
+  const guardCode = typeof event.data.guardCode === "string" ? event.data.guardCode : undefined;
+  const allowedActions = Array.isArray(event.data.allowedActions)
+    ? event.data.allowedActions.filter((item): item is string => typeof item === "string") : [];
   return (
     <Space wrap size={4}>
       {evidence ? <Tag color="blue">{evidenceTypeLabel(evidence)}</Tag> : null}
       {reasonCode ? <Typography.Text type="secondary">{plannerReasonLabel(reasonCode)}</Typography.Text> : null}
       {fallbackReason ? <Tag color="orange">{plannerReasonLabel(fallbackReason)}</Tag> : null}
+        {guardCode ? <Tag color="red">阻止原因：{guardCode}</Tag> : null}
+        {allowedActions.length ? <Tooltip title={allowedActions.join(", ")}><Tag>合法动作 {allowedActions.length}</Tag></Tooltip> : null}
       <Tag className="planner-source-tag">{plannerSourceLabel(source)}</Tag>
     </Space>
   );

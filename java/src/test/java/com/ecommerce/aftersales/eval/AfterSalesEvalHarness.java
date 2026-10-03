@@ -122,7 +122,9 @@ public final class AfterSalesEvalHarness {
             String injectedAmount,
             String injectedTool,
             List<String> injectedArgumentValues,
-            String ticketCreatedAt
+            String ticketCreatedAt,
+            String expectedStopReason,
+            Boolean photoPresent
     ) {
 
         public static EvalCase from(JsonNode node) {
@@ -148,7 +150,9 @@ public final class AfterSalesEvalHarness {
                     textOrNull(node, "injectedAmount"),
                     textOrNull(node, "injectedTool"),
                     strings(node, "injectedArgumentValues"),
-                    textOrNull(node, "ticketCreatedAt"));
+                    textOrNull(node, "ticketCreatedAt"),
+                    textOrNull(node, "expectedStopReason"),
+                    boolOrNull(node, "photoPresent"));
         }
 
         public boolean expectProposalOrDefault() {
@@ -209,8 +213,21 @@ public final class AfterSalesEvalHarness {
             boolean noActionExpected,
             boolean noActionCorrect,
             boolean completionCorrect,
-            boolean forbiddenEvidenceCollected
+            boolean forbiddenEvidenceCollected,
+            boolean stopReasonCorrect,
+            boolean wrongEntity,
+            int llmCallCount,
+            int handlingSteps,
+            int rejectedPlans,
+            int invalidToolCalls
     ) {
+        @com.fasterxml.jackson.annotation.JsonProperty
+        public boolean taskSuccess() {
+            return completionCorrect && routeCorrect && intentCorrect && proposalCorrect && amountCorrect
+                    && currencyCorrect && policyVersionCorrect && noActionCorrect && stopReasonCorrect
+                    && !wrongEntity && !unauthorizedAction && !trustedAmountMismatch && !forbiddenEvidenceCollected
+                    && !modelAmountAccepted && !modelToolArgsAccepted;
+        }
     }
 
     // ------------------------------------------------------------------
@@ -279,6 +296,7 @@ public final class AfterSalesEvalHarness {
                 categoryBreakdown(results),
                 results);
         writeReports(report);
+        V2OfflineReport.write(report, cases.stream().map(this::runBaselineCase).toList(), mapper);
         printSummary(report);
         return report;
     }
@@ -296,6 +314,13 @@ public final class AfterSalesEvalHarness {
         EvalRepositories repos = new EvalRepositories();
         AfterSalesTicketEntity ticket = createTicket(c, repos.tickets());
         createRun(c, ticket, repos.runs());
+        if (Boolean.TRUE.equals(c.photoPresent())) {
+            repos.attachments().save(com.ecommerce.aftersales.entity.TicketAttachmentEntity.builder()
+                    .id("photo-" + c.id()).ticketId(ticket.getId()).messageId("message-" + c.id())
+                    .fileName("damage.jpg").contentType("image/jpeg").storageKey("offline/" + c.id())
+                    .metadataJson("{\"reviewStatus\":\"VERIFIED\",\"reviewSummary\":\"Offline fixture reviewed\"}")
+                    .createdAt(ticket.getCreatedAt()).build());
+        }
 
         AfterSalesToolExecutor toolExecutor = new AfterSalesToolExecutor(
                 new MockShopifyAfterSalesConnector(),
@@ -306,18 +331,27 @@ public final class AfterSalesEvalHarness {
                 mapper);
         AfterSalesRunEventService eventService = new AfterSalesRunEventService(repos.events(), repos.runs(), mapper);
         AfterSalesTicketContextService contextService = new AfterSalesTicketContextService(repos.tickets());
+        AfterSalesIntakeService intake = intakeService(c);
+        AfterSalesEvidencePlannerService planner = plannerService(c);
         AfterSalesAgentLoopService loop = new AfterSalesAgentLoopService(
                 toolExecutor, eventService, repos.runs(), repos.tickets(), contextService,
-                repos.attachments(), intakeService(c), plannerService(c), new DecisionRouteResolver(),
-                new AfterSalesEscalationPolicyService(), mapper, 0L);
+                repos.attachments(), intake, planner, new DecisionRouteResolver(),
+                new AfterSalesEscalationPolicyService(), mapper, 0L, 32);
 
         String runId = "run-" + c.id();
         long startedNanos = System.nanoTime();
-        loop.run(runId, ticket.getId());
+        try { loop.run(runId, ticket.getId()); }
+        finally { intake.shutdown(); planner.shutdown(); }
         long latencyMs = (System.nanoTime() - startedNanos) / 1_000_000;
 
         AfterSalesRunEntity run = repos.runs().findById(runId).orElseThrow();
         List<Map<String, Object>> events = eventService.history(run.getId());
+        try {
+            if (!c.id().matches("[A-Za-z0-9_-]+")) throw new IllegalArgumentException("INVALID_EVAL_CASE_ID");
+            Files.createDirectories(REPORT_DIR.resolve("trajectories"));
+            Files.writeString(REPORT_DIR.resolve("trajectories").resolve(c.id() + ".json"),
+                    mapper.writerWithDefaultPrettyPrinter().writeValueAsString(events), StandardCharsets.UTF_8);
+        } catch (IOException error) { throw new IllegalStateException("EVAL_TRACE_WRITE_FAILED", error); }
         Optional<ActionProposalEntity> proposal =
                 repos.proposals().findTopByTicketIdOrderByCreatedAtDesc(ticket.getId());
 
@@ -326,7 +360,7 @@ public final class AfterSalesEvalHarness {
         List<String> planSequence = eventData(events, "planning_completed", "nextEvidence");
         List<String> fallbackReasons = eventData(events, "planning_fallback", "fallbackReason");
         List<String> toolActions = events.stream()
-                .filter(e -> isToolEvent(e))
+                .filter(e -> "tool_started".equals(e.get("type")))
                 .map(e -> stringValue(e.get("data"), "action"))
                 .filter(v -> v != null)
                 .toList();
@@ -381,14 +415,62 @@ public final class AfterSalesEvalHarness {
                 c.expectNoActionOrDefault(),
                 !c.expectNoActionOrDefault() || !proposal.isPresent(),
                 c.expectCompletionOrDefault() == completed,
-                forbiddenEvidenceCollected);
+                forbiddenEvidenceCollected,
+                c.expectedStopReason() == null || c.expectedStopReason().equals(run.getStopReason()),
+                events.stream().anyMatch(e -> {
+                    if (!(e.get("data") instanceof Map<?, ?> d) || !(d.get("arguments") instanceof Map<?, ?> args)) return false;
+                    return args.get("orderId") != null && !c.orderId().equals(args.get("orderId"));
+                }),
+                llmCalls(run),
+                2 + toolActions.size(),
+                (int) events.stream().filter(e -> "planning_rejected".equals(e.get("type"))).count(),
+                (int) toolActions.stream().filter(a -> !Set.of(
+                        AfterSalesToolExecutor.GET_ORDER_DETAIL, AfterSalesToolExecutor.GET_SHIPMENT_TRACE,
+                        AfterSalesToolExecutor.GET_CARRIER_CASE, AfterSalesToolExecutor.GET_DELIVERY_PROOF,
+                        AfterSalesToolExecutor.GET_DAMAGE_PHOTO, AfterSalesToolExecutor.GET_PRODUCT,
+                        AfterSalesToolExecutor.SEARCH_POLICY, AfterSalesToolExecutor.CALCULATE_COMPENSATION,
+                        AfterSalesToolExecutor.CREATE_ACTION_PROPOSAL).contains(a)).count());
+    }
+
+    private V2OfflineReport.BaselineCase runBaselineCase(EvalCase c) {
+        EvalRepositories repos = new EvalRepositories();
+        AfterSalesToolExecutor tools = new AfterSalesToolExecutor(new MockShopifyAfterSalesConnector(),
+                new DemoAfterSalesPolicyCatalogService(), new CompensationRuleService(),
+                repos.proposals(), repos.attachments(), mapper);
+        AfterSalesIntakeService intake = intakeService(c);
+        var baseline = new com.ecommerce.aftersales.eval.business.FixedWorkflowBaseline(intake,
+                new DecisionRouteResolver(), tools, new AfterSalesEscalationPolicyService(), repos.attachments(), mapper);
+        long started = System.nanoTime();
+        try {
+            var r = baseline.run(c.id(), c.orderId(), c.message(), Boolean.TRUE.equals(c.photoPresent()),
+                    c.ticketCreatedAt() == null ? Instant.parse("2026-08-01T00:00:00Z") : Instant.parse(c.ticketCreatedAt()));
+            Optional<ActionProposalEntity> p = repos.proposals().findTopByTicketIdOrderByCreatedAtDesc("bs-" + c.id() + "-baseline");
+            boolean correct = !r.scenarioFailed() && !r.policyViolation()
+                    && r.proposalCreated() == c.expectProposalOrDefault()
+                    && (c.expectedStopReason() == null || c.expectedStopReason().equals(r.stopReason()))
+                    && (c.expectedAmount() == null || p.map(x -> x.getAmount().compareTo(new BigDecimal(c.expectedAmount())) == 0).orElse(false))
+                    && (c.expectedCurrency() == null || p.map(x -> c.expectedCurrency().equals(x.getCurrency())).orElse(false))
+                    && (c.expectedPolicyVersion() == null || p.map(x -> c.expectedPolicyVersion().equals(x.getPolicyVersion())).orElse(false));
+            return new V2OfflineReport.BaselineCase(c.id(), correct, r.stopReason(), r.toolCallCount(),
+                    r.handlingSteps(), (System.nanoTime() - started) / 1_000_000, r.policyViolation());
+        } catch (RuntimeException failure) {
+            return new V2OfflineReport.BaselineCase(c.id(), false, "BASELINE_FAILED_" + failure.getClass().getSimpleName(),
+                    null, null, (System.nanoTime() - started) / 1_000_000, null);
+        } finally {
+            intake.shutdown();
+        }
+    }
+
+    private int llmCalls(AfterSalesRunEntity run) {
+        try { return mapper.readTree(run.getFinalAnswerJson()).path("llmMetrics").path("llmCallCount").asInt(); }
+        catch (Exception error) { throw new IllegalStateException("EVAL_USAGE_UNREADABLE", error); }
     }
 
     private AfterSalesIntakeService intakeService(EvalCase c) {
         ChatClient.Builder builder = chatBuilder();
         if (c.intakeLlmOutput() != null) {
             String output = c.intakeLlmOutput();
-            return new AfterSalesIntakeService(builder, mapper, "LLM", 1000, EVAL_KEY) {
+            return new AfterSalesIntakeService(builder, mapper, "LLM", 1000, EVAL_KEY, 32) {
                 @Override
                 protected String callModel(String customerMessage) {
                     return output;
@@ -431,7 +513,7 @@ public final class AfterSalesEvalHarness {
                             "\n\nSERVER EVIDENCE PRESENCE");
                     String presenceJson = between(prompt,
                             "SERVER EVIDENCE PRESENCE (authoritative, server-built):\n",
-                            "\n\nRespond with exactly one JSON object");
+                            "\n\nAVAILABLE EVIDENCE");
                     JsonNode intake = mapper.readTree(intakeJson);
                     JsonNode presence = mapper.readTree(presenceJson);
                     List<String> required = new ArrayList<>();
@@ -767,9 +849,9 @@ public final class AfterSalesEvalHarness {
     private Metrics computeMetrics(List<CaseResult> results) {
         int n = results.size();
         long routeExpected = results.stream().filter(CaseResult::routeExpected).count();
-        long routeCorrect = results.stream().filter(CaseResult::routeCorrect).count();
+        long routeCorrect = results.stream().filter(r -> r.routeExpected() && r.routeCorrect()).count();
         long intentExpected = results.stream().filter(CaseResult::intentExpected).count();
-        long intentCorrect = results.stream().filter(CaseResult::intentCorrect).count();
+        long intentCorrect = results.stream().filter(r -> r.intentExpected() && r.intentCorrect()).count();
         double precision = results.stream().mapToDouble(CaseResult::evidencePrecision).average().orElse(1.0);
         double recall = results.stream().mapToDouble(CaseResult::evidenceRecall).average().orElse(1.0);
         long cycles = results.stream().mapToLong(r -> r.planSequence().size()).sum();
@@ -878,7 +960,7 @@ public final class AfterSalesEvalHarness {
         StringBuilder md = new StringBuilder();
         md.append("# After-Sales Agent Evaluation Report\n\n");
         md.append("- Generated at: `").append(report.generatedAt()).append("`\n");
-        md.append("- Mode: offline (no external API, no API key, no model calls)\n");
+        md.append("- Mode: offline (scripted model responses / RULES; no provider API calls)\n");
         md.append("- Cases: ").append(report.caseCount()).append("\n");
         md.append("- Artifacts: `java/target/after-sales-eval/after-sales-eval-report.json` (machine-readable)\n\n");
 
@@ -1056,11 +1138,17 @@ public final class AfterSalesEvalHarness {
         private final Map<String, ActionProposalEntity> proposals = new ConcurrentHashMap<>();
         private final Map<String, ApprovalRecordEntity> approvals = new ConcurrentHashMap<>();
         private final Map<String, ExecutionJobEntity> jobs = new ConcurrentHashMap<>();
+        private final Map<String, com.ecommerce.aftersales.entity.TicketAttachmentEntity> attachmentRows = new ConcurrentHashMap<>();
 
         TicketAttachmentRepository attachments() {
-            // 评测用例不触发 DAMAGE_PHOTO 规划：附件仓库返回空（生产行为：无附件 → REQUEST_MORE_INFO）。
             TicketAttachmentRepository repo = mock(TicketAttachmentRepository.class);
-            when(repo.findByTicketIdOrderByCreatedAtDesc(anyString())).thenReturn(List.of());
+            when(repo.save(any())).thenAnswer(inv -> {
+                com.ecommerce.aftersales.entity.TicketAttachmentEntity row = inv.getArgument(0);
+                attachmentRows.put(row.getId(), row);
+                return row;
+            });
+            when(repo.findByTicketIdOrderByCreatedAtDesc(anyString())).thenAnswer(inv ->
+                    attachmentRows.values().stream().filter(a -> a.getTicketId().equals(inv.getArgument(0))).toList());
             when(repo.findByMessageIdOrderByCreatedAtAsc(anyString())).thenReturn(List.of());
             return repo;
         }

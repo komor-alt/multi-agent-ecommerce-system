@@ -33,6 +33,8 @@ public class ExecutionJobEntity {
     @Column(name = "proposal_id", nullable = false)
     private String proposalId;
 
+    private String approvalId;
+
     @Column(name = "ticket_id", nullable = false)
     private String ticketId;
 

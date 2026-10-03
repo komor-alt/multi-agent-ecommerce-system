@@ -120,6 +120,11 @@ public final class FixedWorkflowBaseline {
             String orderId,
             String customerMessage,
             boolean photoPresent) {
+        return run(scenarioId, orderId, customerMessage, photoPresent, Instant.now());
+    }
+
+    public BaselineRunResult run(String scenarioId, String orderId, String customerMessage,
+                                 boolean photoPresent, Instant occurredAt) {
         String ticketId = "bs-" + scenarioId + "-baseline";
         AfterSalesTicketEntity ticket = AfterSalesTicketEntity.builder()
                 .id(ticketId)
@@ -128,7 +133,7 @@ public final class FixedWorkflowBaseline {
                 .issueType(AfterSalesTypes.IntakeResult.SHIPMENT_DELAY)
                 .customerMessage(customerMessage)
                 .status(AfterSalesTypes.TicketStatus.OPEN)
-                .createdAt(Instant.now())
+                .createdAt(occurredAt)
                 .build();
         if (photoPresent) {
             saveVerifiedPhotoAttachment(ticketId, scenarioId);

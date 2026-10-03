@@ -99,7 +99,8 @@ class ExecutionServiceTest {
                 new ObjectMapper(),
                 transactionTemplate,
                 properties,
-                Runnable::run
+                Runnable::run,
+                mock(ExecutionApprovalValidator.class)
         );
 
         service.executeAsync("job-1");
@@ -247,7 +248,8 @@ class ExecutionServiceTest {
                     new ObjectMapper(),
                     transactionTemplate,
                     properties,
-                    executor
+                    executor,
+                    mock(ExecutionApprovalValidator.class)
             );
         }
     }

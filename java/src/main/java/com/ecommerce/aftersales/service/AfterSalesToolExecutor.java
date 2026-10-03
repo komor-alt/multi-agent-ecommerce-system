@@ -1,6 +1,6 @@
 package com.ecommerce.aftersales.service;
 
-import com.ecommerce.aftersales.connector.MockShopifyAfterSalesConnector;
+import com.ecommerce.aftersales.connector.AfterSalesConnector;
 import com.ecommerce.aftersales.entity.ActionProposalEntity;
 import com.ecommerce.aftersales.entity.TicketAttachmentEntity;
 import com.ecommerce.aftersales.model.AfterSalesAgentState;
@@ -29,7 +29,7 @@ public class AfterSalesToolExecutor {
     public static final String CALCULATE_COMPENSATION = "calculate_compensation";
     public static final String CREATE_ACTION_PROPOSAL = "create_action_proposal";
 
-    private final MockShopifyAfterSalesConnector connector;
+    private final AfterSalesConnector connector;
     private final DemoAfterSalesPolicyCatalogService policyCatalog;
     private final CompensationRuleService compensationRuleService;
     private final ActionProposalRepository proposalRepository;
@@ -37,7 +37,7 @@ public class AfterSalesToolExecutor {
     private final ObjectMapper objectMapper;
 
     public AfterSalesToolExecutor(
-            MockShopifyAfterSalesConnector connector,
+            AfterSalesConnector connector,
             DemoAfterSalesPolicyCatalogService policyCatalog,
             CompensationRuleService compensationRuleService,
             ActionProposalRepository proposalRepository,
@@ -132,6 +132,11 @@ public class AfterSalesToolExecutor {
 
     private AfterSalesTypes.ToolResult getOrderDetail(AfterSalesAgentState state) {
         AfterSalesTypes.OrderSnapshot order = connector.getOrder(state.getTicket().getOrderId());
+        if (order == null || !state.getTicket().getOrderId().equals(order.orderId())
+                || (state.getTicket().getUserId() != null
+                    && !state.getTicket().getUserId().equals(order.userId()))) {
+            throw new IllegalStateException("ORDER_ENTITY_MISMATCH");
+        }
         state.setOrder(order);
         state.getTicket().setUserId(order.userId());
         String evidenceId = "order:" + order.orderId() + ":v1";

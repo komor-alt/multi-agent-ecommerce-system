@@ -374,7 +374,9 @@ class ApprovalPolicyGateTest {
         ActionProposalEntity proposal = ApprovalTestSupport.proposal();
         proposal.setPolicyVersion("v1");
 
-        assertRejected(proposal, ApprovalTestSupport.ticket(), run, APPROVAL_POLICY_VERSION_MISMATCH);
+        AfterSalesTicketEntity ticket = ApprovalTestSupport.ticket();
+        ticket.setOrderId(sgOrder.orderId());
+        assertRejected(proposal, ticket, run, APPROVAL_POLICY_VERSION_MISMATCH);
     }
 
     @Test

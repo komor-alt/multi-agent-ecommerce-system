@@ -9,6 +9,7 @@ import com.ecommerce.aftersales.model.AfterSalesTypes;
  */
 public record ApprovalValidationResult(
         String proposalId,
+        String runId,
         AfterSalesTypes.OrderSnapshot order,
         AfterSalesTypes.ShipmentSnapshot shipment,
         AfterSalesTypes.PolicyEvidence policy,

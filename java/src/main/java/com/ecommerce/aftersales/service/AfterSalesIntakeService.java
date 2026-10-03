@@ -232,7 +232,7 @@ public class AfterSalesIntakeService {
      * 保证测试/应用重启时不留执行器线程。
      */
     @PreDestroy
-    void shutdown() {
+    public void shutdown() {
         llmExecutor.shutdownNow();
     }
 

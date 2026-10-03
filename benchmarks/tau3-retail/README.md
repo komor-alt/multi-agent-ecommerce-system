@@ -31,6 +31,12 @@ taskSplit:  base
 
 ## Status
 
+V2 (2026-10-02): the user explicitly authorized **code and offline tests only**.
+The offline adapter tests were run; paid 10-task and 50-task comparisons were
+**NOT RUN**. Java V2 reports under java/target/after-sales-eval/ are synthetic
+local evaluations, not τ³ scores. Existing dry-run or historical artifacts must
+not be presented as this revision's live-model results.
+
 Current verified status:
 
 - Offline suite: 120 tests pass, including natural-language confirmation,
