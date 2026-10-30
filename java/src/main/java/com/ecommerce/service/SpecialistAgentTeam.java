@@ -120,7 +120,8 @@ public class SpecialistAgentTeam {
             for (int localStep = 1; localStep <= limit; localStep++) {
                 blackboard.checkActive();
                 List<String> candidates = plannedAction == null
-                        ? scenePathEnforcer.executableTools(id, blackboard.getRequest().getScene(), blackboard)
+                        ? scenePathEnforcer.executableTools(id, blackboard.getRequest().getScene(), blackboard,
+                                task.pathGuardEnabled())
                         : localStep == 1 ? List.of(plannedAction) : List.of();
                 if (candidates.isEmpty()) {
                     return SpecialistRun.completed(id, "handoff", thoughts, calls, observations, evidences);
@@ -266,9 +267,15 @@ public class SpecialistAgentTeam {
             String goal,
             int startSequence,
             int maxToolSteps,
-            DynamicSubAgentRuntime.ContextSnapshot contextSnapshot) {
+            DynamicSubAgentRuntime.ContextSnapshot contextSnapshot,
+            boolean pathGuardEnabled) {
         public AgentTask(String taskId, AgentId agent, String goal, int startSequence, int maxToolSteps) {
-            this(taskId, agent, goal, startSequence, maxToolSteps, null);
+            this(taskId, agent, goal, startSequence, maxToolSteps, null, true);
+        }
+
+        public AgentTask(String taskId, AgentId agent, String goal, int startSequence, int maxToolSteps,
+                         DynamicSubAgentRuntime.ContextSnapshot contextSnapshot) {
+            this(taskId, agent, goal, startSequence, maxToolSteps, contextSnapshot, true);
         }
     }
 

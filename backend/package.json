@@ -28,7 +28,11 @@
   "overrides": {
     "@prisma/config": {
       "deepmerge-ts": "8.0.0"
-    }
+    },
+    "body-parser": "2.4.0",
+    "multer": "2.5.0",
+    "proxy-addr": "2.0.8",
+    "qs": "6.17.1"
   },
   "devDependencies": {
     "@nestjs/cli": "^11.0.0",

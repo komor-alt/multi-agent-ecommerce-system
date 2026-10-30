@@ -323,6 +323,7 @@ public class AutonomousAgentLoopService {
                 : loopRequest.getRequest();
         validateRequest(request);
         ToolLoopConfig config = normalizeConfig(loopRequest == null ? null : loopRequest.getConfig());
+        AgentEvaluationProfile.Settings evaluation = AgentEvaluationProfile.current();
         String callerRunId = loopRequest == null ? null : loopRequest.getRunId();
         RecommendationPipelineState context = new RecommendationPipelineState(
                 callerRunId == null || callerRunId.isBlank() ? UUID.randomUUID().toString() : callerRunId, request);
@@ -390,7 +391,9 @@ public class AutonomousAgentLoopService {
             context.checkActive();
             int remaining = config.getMaxSteps() - toolCalls.size();
             List<SpecialistParallelPlanner.PlannedSpecialistAction> parallelActions =
-                    modeResolver.llmEnabled() ? List.of()
+                    modeResolver.llmEnabled()
+                            || evaluation.topology() == AgentEvaluationProfile.Topology.SINGLE
+                            || !evaluation.pathGuardEnabled() ? List.of()
                             : parallelPlanner.plan(context, config.getToolWhitelist(), remaining);
             if (!parallelActions.isEmpty()) {
                 parallelBatchCount.incrementAndGet();
@@ -398,7 +401,7 @@ public class AutonomousAgentLoopService {
                 MergeOutcome outcome = runParallelBatch(
                         parallelActions, step, context, config, fingerprints, safeEventSink,
                         eventSequence, start, thoughts, toolCalls, observations, evidences,
-                        subAgentRuntime, lease);
+                        subAgentRuntime, lease, evaluation.vetoEnabled());
                 pipelineExecutor.finalizeProductsIfReady(context);
                 if (!outcome.success()) {
                     status = outcome.status();
@@ -408,7 +411,64 @@ public class AutonomousAgentLoopService {
                 continue;
             }
 
-            AgentId assigned = planAgent(context, observations, evidences, step);
+            if (evaluation.topology() == AgentEvaluationProfile.Topology.SINGLE) {
+                AgentActionDecision decision = planSingleAgentAction(
+                        context, observations, evidences, config, evaluation, step);
+                String action = scenePathEnforcer.canonicalTool(decision.getAction());
+                if (RecommendationPipelineExecutor.FINAL_ACTION.equals(action)) {
+                    ToolCallRecord finalRecord = handleFinalAnswer(
+                            toolCalls.size() + 1, decision, context, evidences);
+                    toolCalls.add(finalRecord);
+                    status = "success".equals(finalRecord.getStatus()) ? "completed" : "blocked";
+                    stopReason = "success".equals(finalRecord.getStatus())
+                            ? "final_answer" : finalRecord.getErrorMessage();
+                    break;
+                }
+                if (!config.getToolWhitelist().contains(action)) {
+                    toolCalls.add(blockedCall(toolCalls.size() + 1, action, "tool is not in whitelist"));
+                    status = "blocked";
+                    stopReason = "tool_not_whitelisted";
+                    break;
+                }
+                Map<String, Object> arguments = pipelineExecutor.trustedArguments(action, context);
+                String fingerprint = action + ":" + arguments;
+                if (!fingerprints.add(fingerprint)) {
+                    toolCalls.add(blockedCall(toolCalls.size() + 1, action, "duplicate_tool_call"));
+                    status = "blocked";
+                    stopReason = "duplicate_tool_call";
+                    break;
+                }
+                thoughts.add(decision.getThought());
+                emit(safeEventSink, context, eventSequence, "model_completed", "planner.decision", "success",
+                        decision.getThought(), Map.of("step", step, "topology", "single", "tool", action), start);
+                emit(safeEventSink, context, eventSequence, "tool_started", "tool.started", "running",
+                        "Single Agent executing " + action,
+                        Map.of("step", step, "topology", "single", "tool", action), start);
+                ToolExecution execution = executeTool(toolCalls.size() + 1, action, arguments, context);
+                toolCalls.add(execution.record());
+                if (execution.observation() == null) {
+                    emit(safeEventSink, context, eventSequence, "tool_completed", "tool.completed", "failed",
+                            "Single Agent tool failed", Map.of("step", step, "tool", action), start);
+                    status = "failed";
+                    stopReason = "tool_failed";
+                    break;
+                }
+                emit(safeEventSink, context, eventSequence, "tool_completed", "tool.completed", "success",
+                        execution.observation().getSummary(),
+                        Map.of("step", step, "topology", "single", "tool", action,
+                                "evidenceIds", execution.observation().getEvidenceIds()), start);
+                observations.add(execution.observation());
+                execution.evidences().forEach(evidence -> evidences.put(evidence.getEvidenceId(), evidence));
+                if (!evaluation.vetoEnabled()
+                        && RecommendationPipelineExecutor.CHECK_INVENTORY.equals(action)) {
+                    context.markVetoesHandled();
+                }
+                pipelineExecutor.finalizeProductsIfReady(context);
+                continue;
+            }
+
+            AgentId assigned = planAgent(context, observations, evidences, step,
+                    evaluation.pathGuardEnabled());
             context.checkActive();
             String supervisorThought = "Supervisor delegated the next bounded task to " + assigned;
             thoughts.add(supervisorThought);
@@ -441,7 +501,7 @@ public class AutonomousAgentLoopService {
             String goal = "Produce the missing evidence for "
                     + scenePathEnforcer.describeScene(request.getScene());
             List<String> toolScopes = scenePathEnforcer.executableTools(
-                    assigned, request.getScene(), context);
+                    assigned, request.getScene(), context, evaluation.pathGuardEnabled());
             DynamicSubAgentRuntime.TaskHandle taskHandle = subAgentRuntime.spawn(
                     new DynamicSubAgentRuntime.SubAgentSpec(
                             assigned.name(), assigned, goal, toolScopes, remaining, null),
@@ -467,7 +527,8 @@ public class AutonomousAgentLoopService {
             persistRuntime(subAgentRuntime, lease);
             SpecialistAgentTeam.SpecialistRun specialistRun = specialistAgentTeam.run(
                     new SpecialistAgentTeam.AgentTask(taskId, assigned,
-                            goal, toolCalls.size() + 1, remaining, taskHandle.context()),
+                            goal, toolCalls.size() + 1, remaining, taskHandle.context(),
+                            evaluation.pathGuardEnabled()),
                     context, config.getToolWhitelist(), fingerprints,
                     specialistListener(safeEventSink, context, eventSequence, start));
             subAgentRuntime.finish(taskHandle, specialistRun.success(), specialistRun.stopReason(),
@@ -476,7 +537,7 @@ public class AutonomousAgentLoopService {
             MergeOutcome outcome = mergeSpecialistRun(
                     assigned, taskId, specialistRun, step, context, safeEventSink, eventSequence,
                     start, thoughts, toolCalls, observations, evidences,
-                    subAgentRuntime.artifactIds(taskId));
+                    subAgentRuntime.artifactIds(taskId), evaluation.vetoEnabled());
             pipelineExecutor.finalizeProductsIfReady(context);
             if (!outcome.success()) {
                 status = outcome.status();
@@ -629,7 +690,8 @@ public class AutonomousAgentLoopService {
             List<ToolCallRecord> toolCalls,
             List<ToolObservation> observations,
             Map<String, EvidenceRecord> evidences,
-            DynamicSubAgentRuntime subAgentRuntime, RecommendationExecutionLease lease) {
+            DynamicSubAgentRuntime subAgentRuntime, RecommendationExecutionLease lease,
+            boolean vetoEnabled) {
         List<DynamicSubAgentRuntime.SubAgentSpec> specs = actions.stream()
                 .map(action -> new DynamicSubAgentRuntime.SubAgentSpec(
                         action.agent().name(),
@@ -711,7 +773,7 @@ public class AutonomousAgentLoopService {
                     invocation.action().agent(), invocation.task().taskId(), specialistRun, step,
                     context, eventSink, eventSequence, start,
                     thoughts, toolCalls, observations, evidences,
-                    subAgentRuntime.artifactIds(invocation.task().taskId()));
+                    subAgentRuntime.artifactIds(invocation.task().taskId()), vetoEnabled);
             if (firstFailure.success() && !outcome.success()) {
                 firstFailure = outcome;
             }
@@ -782,7 +844,7 @@ public class AutonomousAgentLoopService {
             Map<String, EvidenceRecord> evidences) {
         return mergeSpecialistRun(assigned, taskId, specialistRun, step, context,
                 eventSink, eventSequence, start, thoughts, toolCalls, observations,
-                evidences, List.of());
+                evidences, List.of(), true);
     }
 
     private MergeOutcome mergeSpecialistRun(
@@ -798,7 +860,8 @@ public class AutonomousAgentLoopService {
             List<ToolCallRecord> toolCalls,
             List<ToolObservation> observations,
             Map<String, EvidenceRecord> evidences,
-            List<String> artifactIds) {
+            List<String> artifactIds,
+            boolean vetoEnabled) {
         thoughts.addAll(specialistRun.thoughts());
         toolCalls.addAll(specialistRun.toolCalls());
         observations.addAll(specialistRun.observations());
@@ -807,7 +870,9 @@ public class AutonomousAgentLoopService {
                     ? List.of() : observation.getData().getOrDefault("vetoedProductIds", List.of());
             if (vetoed instanceof List<?> vetoedIds && !vetoedIds.isEmpty()) {
                 boolean revisionRequested = Boolean.TRUE.equals(
-                        observation.getData().get("revisionRequested")) && context.hasUnhandledVeto();
+                        observation.getData().get("revisionRequested")) && context.hasUnhandledVeto()
+                        && vetoEnabled;
+                if (!vetoEnabled) context.markVetoesHandled();
                 context.addMessage(AgentMessage.builder()
                         .type(AgentMessageType.VETO)
                         .from(AgentId.INVENTORY)
@@ -969,9 +1034,11 @@ public class AutonomousAgentLoopService {
             RecommendationPipelineState context,
             List<ToolObservation> observations,
             Map<String, EvidenceRecord> evidences,
-            int step) {
+            int step,
+            boolean pathGuardEnabled) {
         AgentId fallbackAgent = scenePathEnforcer.expectedNextAgent(context.getRequest().getScene(), context);
-        List<AgentId> allowed = scenePathEnforcer.allowedAgents(context.getRequest().getScene(), context);
+        List<AgentId> allowed = scenePathEnforcer.allowedAgents(
+                context.getRequest().getScene(), context, pathGuardEnabled);
         if (allowed.isEmpty()) return fallbackAgent;
         if (!allowed.contains(fallbackAgent)) fallbackAgent = allowed.get(0);
         if (!modeResolver.llmEnabled()) {
@@ -1002,6 +1069,59 @@ public class AutonomousAgentLoopService {
         } catch (TracedRecommendationLlmClient.TracedLlmException failure) {
             context.recordInvalidAgentSelection(proposedAgent.get(), fallbackAgent, failure.reason());
             return fallbackAgent;
+        }
+    }
+
+    private AgentActionDecision planSingleAgentAction(
+            RecommendationPipelineState context,
+            List<ToolObservation> observations,
+            Map<String, EvidenceRecord> evidences,
+            ToolLoopConfig config,
+            AgentEvaluationProfile.Settings evaluation,
+            int step) {
+        if (scenePathEnforcer.isPathComplete(context.getRequest().getScene(), context)) {
+            return AgentActionDecision.builder().thought("Required evidence is complete.")
+                    .action(RecommendationPipelineExecutor.FINAL_ACTION)
+                    .finalAnswer("Recommendation plan is ready.")
+                    .evidenceIds(context.evidenceIds()).build();
+        }
+        List<String> candidates = List.of(AgentId.PROFILE, AgentId.PRODUCT, AgentId.INVENTORY, AgentId.COPY)
+                .stream()
+                .flatMap(agent -> scenePathEnforcer.executableTools(agent,
+                        context.getRequest().getScene(), context, evaluation.pathGuardEnabled()).stream())
+                .filter(config.getToolWhitelist()::contains)
+                .distinct()
+                .toList();
+        String expected = scenePathEnforcer.expectedNextStep(context.getRequest().getScene(), context);
+        String fallback = candidates.contains(expected) ? expected
+                : candidates.stream().findFirst().orElse(RecommendationPipelineExecutor.FINAL_ACTION);
+        if (!modeResolver.llmEnabled() || candidates.isEmpty()) {
+            return decision("Single Agent selected a state-valid tool: " + fallback, fallback);
+        }
+        try {
+            String state = objectMapper.writeValueAsString(Map.of(
+                    "scene", scenePathEnforcer.normalizeScene(context.getRequest().getScene()),
+                    "market", pipelineExecutor.crossBorderState(context.getRequest()),
+                    "candidateTools", candidates,
+                    "observations", observations,
+                    "knownEvidenceIds", evidences.keySet(),
+                    "pathGuardEnabled", evaluation.pathGuardEnabled()));
+            return tracedLlmClient.complete("single_agent",
+                    "You are one bounded ecommerce recommendation agent. Choose exactly one tool from candidateTools. "
+                            + "Return JSON only: {\"thought\":\"brief reason\",\"action\":\"tool\"}. "
+                            + "Do not invent arguments; the server rebuilds trusted arguments.",
+                    state, context.getLlmBudget(), context.getRunId() + ":single:" + step, raw -> {
+                        AgentActionDecision parsed = parseDecision(raw);
+                        String action = scenePathEnforcer.canonicalTool(parsed.getAction());
+                        if (!candidates.contains(action)) {
+                            throw new TracedRecommendationLlmClient.OutputValidationException(
+                                    "tool_outside_candidate_set");
+                        }
+                        parsed.setAction(action);
+                        return parsed;
+                    });
+        } catch (Exception error) {
+            return decision("Single Agent fallback selected a state-valid tool: " + fallback, fallback);
         }
     }
 
@@ -1128,6 +1248,8 @@ public class AutonomousAgentLoopService {
                     .latencyMs((System.nanoTime() - start) / 1_000_000.0)
                     .build();
             return new ToolExecution(record, observation, pipelineExecutor.evidenceRecords(observation));
+        } catch (RunDeadlineExceededException timeout) {
+            throw timeout;
         } catch (Exception e) {
             ToolCallRecord record = ToolCallRecord.builder()
                     .sequence(sequence)
@@ -1227,8 +1349,13 @@ public class AutonomousAgentLoopService {
                 .map(product -> product.getProductId() + " ships from " + product.getWarehouseRegion()
                         + " with deliveryDays=" + product.getDeliveryDays()).toList();
         Map<String, Object> strategy = new LinkedHashMap<>();
-        strategy.put("mode", "supervisor_multi_agent_loop");
-        strategy.put("agentTeam", List.of("PROFILE", "PRODUCT", "INVENTORY", "COPY"));
+        AgentEvaluationProfile.Settings evaluation = AgentEvaluationProfile.current();
+        strategy.put("mode", evaluation.topology() == AgentEvaluationProfile.Topology.SINGLE
+                ? "single_agent_loop" : "supervisor_multi_agent_loop");
+        strategy.put("agentTeam", evaluation.topology() == AgentEvaluationProfile.Topology.SINGLE
+                ? List.of("SINGLE") : List.of("PROFILE", "PRODUCT", "INVENTORY", "COPY"));
+        strategy.put("vetoEnabled", evaluation.vetoEnabled());
+        strategy.put("pathGuardEnabled", evaluation.pathGuardEnabled());
         strategy.put("scenePath", scenePathEnforcer.pathFor(request.getScene()));
         strategy.put("requiredCapabilities", scenePathEnforcer.requiredCapabilities(request.getScene()));
         strategy.put("optionalCapabilities", scenePathEnforcer.optionalCapabilities(request.getScene()));

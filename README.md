@@ -149,7 +149,7 @@ The manual, cost-incurring PostgreSQL E2E procedure and preflight requirements a
 
 ## Java Agent Benchmark and Ablations
 
-The reproducible benchmark contract, Java recommendation E2E dataset, supported-variant matrix, and paid-run instructions are documented in [Java Agent Benchmark](java/docs/agent-benchmark.md). Default tests validate the framework offline only; they do not call a model. Unsupported Single-Agent and guard-ablation arms fail closed, and the τ³ Python adapter remains an external reference rather than a Java score.
+The reproducible benchmark contract, 66-case Java recommendation dataset, five-arm Single/Multi-Agent and VETO/path-guard matrix, and paid-run instructions are documented in [Java Agent Benchmark](java/docs/agent-benchmark.md). Default tests execute the complete matrix in deterministic RULES mode with zero model budget. In reports, `taskSuccessRate` means expected-behavior match (including correctly handled injected failures), while `completionRate` separately measures completed output paths. Live runs remain fail-closed, require an exact `cases * arms * callsPerCase` budget, and interleave arms per case to reduce provider time-drift bias. The Python tau3 adapter remains an external reference rather than a Java score.
 
 该报告是离线 demo simulation，不是生产收益、质量或延迟承诺。
 

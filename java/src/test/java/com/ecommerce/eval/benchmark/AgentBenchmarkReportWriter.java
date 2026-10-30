@@ -37,20 +37,25 @@ public final class AgentBenchmarkReportWriter {
                 .append(report.controls().model()).append("`\n");
         md.append("- Dataset SHA-256: `").append(report.controls().datasetHash()).append("`\n");
         md.append("- Toolset SHA-256: `").append(report.controls().toolsetHash()).append("`\n");
+        md.append("- Fault-plan SHA-256: `").append(report.controls().faultPlanHash()).append("`\n");
         md.append("- Budget: `").append(report.controls().maxCallsPerCase()).append("` LLM calls/case; total ceiling `")
-                .append(report.controls().maxTotalCalls()).append("`; seed `").append(report.controls().seed()).append("`\n");
+                .append(report.controls().maxTotalCalls()).append("`; max steps `")
+                .append(report.controls().maxSteps()).append("`; seed `").append(report.controls().seed()).append("`\n");
         md.append("- Cross-variant comparison available: **").append(report.crossVariantComparisonAvailable())
                 .append("**. ").append(nullSafe(report.comparisonLimitation())).append("\n\n");
+        md.append("`taskSuccessRate` is expected-behavior match rate: an intentionally injected failure counts as a match only when outcome, failure reason, required tools and constraints match the case contract. It is not the rate of product-producing runs; use `completionRate` for that.\n\n");
 
         md.append("## Variant Results\n\n");
-        md.append("| Variant | Status | Execution | Provider Invoked | VETO | Path Constraint | Success | Rule Violation | Tool Calls | P50/P95 ms | Tokens | Cost/task USD |\n");
-        md.append("|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+        md.append("| Variant | Topology | Status | Execution | Provider Invoked | VETO | Path Constraint | Expected-behavior match | Completion | Rule Violation | Tool Calls | P50/P95 ms | Tokens | Cost/task USD |\n");
+        md.append("|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
         for (AgentBenchmark.VariantRun variant : report.variants()) {
             AgentBenchmark.Metrics m = variant.metrics();
-            md.append("| ").append(variant.variantLabel()).append(" | ").append(variant.status())
+            md.append("| ").append(variant.variantLabel()).append(" | ").append(variant.topology())
+                    .append(" | ").append(variant.status())
                     .append(" | ").append(variant.executionKind()).append(" | ").append(variant.providerInvoked())
                     .append(" | ").append(variant.vetoEnabled()).append(" | ").append(variant.pathConstraint())
-                    .append(" | ").append(value(m.taskSuccessRate())).append(" | ").append(value(m.ruleViolationRate()))
+                    .append(" | ").append(value(m.taskSuccessRate())).append(" | ")
+                    .append(value(m.completionRate())).append(" | ").append(value(m.ruleViolationRate()))
                     .append(" | ").append(value(m.averageToolCalls())).append(" | ")
                     .append(value(m.p50LatencyMs())).append("/").append(value(m.p95LatencyMs())).append(" | ")
                     .append(value(m.totalTokens())).append(" | ").append(value(m.costPerTaskUsd())).append(" |\n");
@@ -58,27 +63,39 @@ public final class AgentBenchmarkReportWriter {
         }
 
         md.append("\n## Per-Case Results\n\n");
-        md.append("| Variant | Case | Execution | Provider Invoked | Completed | Success | Rule Violation | Tool Calls | Latency ms | Tokens | Cost USD | Failure |\n");
-        md.append("|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|\n");
+        md.append("| Variant | Case | Category | Expected/Actual | Execution | Provider Invoked | Completed | Expected-behavior match | Rule Violation | Tool Calls | Latency ms | Tokens | Cost USD | Observed failure | Expectation mismatch |\n");
+        md.append("|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|\n");
         for (AgentBenchmark.VariantRun variant : report.variants()) {
             for (AgentBenchmark.CaseObservation item : variant.cases()) {
                 Long tokens = item.totalTokens();
                 md.append("| ").append(variant.variantId()).append(" | ").append(item.caseId())
+                        .append(" | ").append(item.category()).append(" | ")
+                        .append(item.expectedOutcome()).append("/").append(item.actualOutcome())
                         .append(" | ").append(variant.executionKind()).append(" | ").append(item.providerInvoked())
                         .append(" | ").append(item.completed()).append(" | ").append(item.taskSuccess())
                         .append(" | ").append(item.ruleViolation()).append(" | ").append(item.toolCalls())
                         .append(" | ").append(item.latencyMs()).append(" | ").append(value(tokens))
                         .append(" | ").append(value(item.costUsd())).append(" | ")
-                        .append(nullSafe(item.failureReason())).append(" |\n");
+                        .append(nullSafe(item.observedFailureReason())).append(" | ")
+                        .append(nullSafe(item.expectationMismatch())).append(" |\n");
             }
         }
 
         Map<String, Long> failureCounts = report.variants().stream().flatMap(v -> v.cases().stream())
-                .filter(c -> c.failureReason() != null && !c.failureReason().isBlank())
-                .collect(Collectors.groupingBy(AgentBenchmark.CaseObservation::failureReason, LinkedHashMap::new, Collectors.counting()));
+                .filter(c -> c.observedFailureReason() != null && !c.observedFailureReason().isBlank())
+                .collect(Collectors.groupingBy(AgentBenchmark.CaseObservation::observedFailureReason,
+                        LinkedHashMap::new, Collectors.counting()));
         md.append("\n## Failure Analysis\n\n");
-        if (failureCounts.isEmpty()) md.append("No case failures recorded. Unsupported variants are not execution failures and are listed above.\n");
+        if (failureCounts.isEmpty()) md.append("No runtime failure outcomes recorded.\n");
         else failureCounts.forEach((reason, count) -> md.append("- `").append(reason).append("`: ").append(count).append(" case(s)\n"));
+
+        Map<String, Long> mismatchCounts = report.variants().stream().flatMap(v -> v.cases().stream())
+                .filter(c -> c.expectationMismatch() != null && !c.expectationMismatch().isBlank())
+                .collect(Collectors.groupingBy(AgentBenchmark.CaseObservation::expectationMismatch,
+                        LinkedHashMap::new, Collectors.counting()));
+        md.append("\n## Expectation Mismatches\n\n");
+        if (mismatchCounts.isEmpty()) md.append("No expectation mismatches recorded.\n");
+        else mismatchCounts.forEach((reason, count) -> md.append("- `").append(reason).append("`: ").append(count).append(" case(s)\n"));
 
         md.append("\n## Dataset Provenance\n\n");
         md.append("| Dataset | Kind | SHA-256 | Aggregated into Java metrics | Note |\n|---|---|---|---:|---|\n");

@@ -192,14 +192,14 @@ k6 run -e BASE_URL=http://127.0.0.1:8080 -e JAVA_INTERNAL_SERVICE_TOKEN='<test t
 
 | 范围 | 执行结果 | 证据与边界 |
 |---|---|---|
-| Gateway | `npm run test:auth`：12 passed、0 failed；`npm run typecheck`：通过 | 本地 Nest 构建、认证与 SSE 单元/契约测试；Prisma client 在 `npm ci` 后显式生成；不是多实例 HTTP 演练 |
-| Java 离线全量 | `mvn -B test`：600 tests、0 failures、0 errors、22 skipped | H2、Mock、offline 为主；22 个 opt-in PostgreSQL 测试在该命令中跳过，不能计入 PostgreSQL 通过数 |
+| Gateway | `npm run build`、`npm run typecheck` 通过；`npm run test:auth`：14 passed、0 failed | 本地 Nest 构建、认证与 SSE 单元/契约测试；不是多实例 HTTP 演练 |
+| Java 离线全量 | `mvn -B test`：601 tests、0 failures、0 errors、22 skipped | H2、Mock、offline 为主；22 个 opt-in PostgreSQL 测试在该命令中跳过，不能计入 PostgreSQL 通过数 |
 | Java + PostgreSQL | `./deploy/validation/Run-PostgresValidation.ps1`：PostgreSQL 16.14，22 tests、0 failures、0 errors、0 skipped | 隔离临时 Docker Compose 项目；包含 PostgreSQL 持久化/租约并发及双 JVM 恢复契约。脚本清理了本次专属容器与网络；不是正式库、备份恢复或多实例网络分区验收 |
 | SSE 游标 | Gateway SSE 回归包含 cursor header/query 优先级、历史读取期间实时事件竞态去重和终态关闭；Java 现有事件测试纳入全量套件 | 测试覆盖应用层游标和竞态；没有真实浏览器断网、反向代理缓冲或多 Gateway 实例压测 |
 | k6 / Prometheus rules | 未运行 | 本环境 `k6` 与 `promtool` 均未安装；Docker/PostgreSQL 可用且 PostgreSQL 测试已运行。脚本阈值仅为可运行门槛，不是本轮实测数据 |
 | 真实付费/外部写操作 | 未运行 | 未调用真实 LLM/Embedding，未执行 Shopify 写操作；符合本轮安全范围 |
 
-`npm ci` 的 npm 审计摘要报告 10 项依赖漏洞（3 low、2 moderate、4 high、1 critical）；本轮未运行自动升级或 `npm audit fix`，依赖漏洞治理仍待单独评估。未执行 commit/push。
+2026-10-30 使用 `npm audit --omit=dev` 复核并完成低风险修复：Backend 保持 Nest 11.2.6，通过 overrides 升级 `multer 2.5.0`、`body-parser 2.4.0`、`proxy-addr 2.0.8`、`qs 6.17.1`；Frontend 保持 Vite 6.x，实际安装 `vite 6.4.5` 与 `source-map-js 1.2.2`。两端生产依赖审计均为 0。Backend 不带 `--omit=dev` 的完整审计仍报告 5 项开发依赖漏洞（3 low、1 moderate、1 high），未使用 `--force` 或跨 Nest 主版本升级。Frontend build/typecheck、Gateway build/typecheck/14 项测试均通过。未执行 commit/push。
 
 上线顺序：先跑全部离线/权限/真实 PostgreSQL 契约 → 接入测试平台与真实模型的小额预算评测 → 预发布环境容量/故障/恢复演练 → 审核阻断项 → 小流量灰度与回滚演练。每一步保存环境、模型、数据集和原始报告。
 

@@ -3,32 +3,36 @@ package com.ecommerce.eval.live;
 import com.ecommerce.MultiAgentApplication;
 import com.ecommerce.eval.benchmark.AgentBenchmark;
 import com.ecommerce.eval.benchmark.AgentBenchmarkDataset;
+import com.ecommerce.eval.benchmark.AgentBenchmarkEvaluator;
+import com.ecommerce.eval.benchmark.AgentBenchmarkFaultHook;
 import com.ecommerce.eval.benchmark.AgentBenchmarkReportWriter;
 import com.ecommerce.model.AgentLoopResponse;
-import com.ecommerce.model.RecommendationPlan;
+import com.ecommerce.model.AgentRunEvent;
 import com.ecommerce.model.RecommendationRequest;
-import com.ecommerce.model.ToolCallRecord;
 import com.ecommerce.model.ToolLoopConfig;
 import com.ecommerce.model.ToolLoopRequest;
-import com.ecommerce.runtime.persistence.RecommendationRunRepository;
 import com.ecommerce.runtime.persistence.RecommendationRunEventService;
+import com.ecommerce.runtime.persistence.RecommendationRunRepository;
+import com.ecommerce.service.AgentEvaluationProfile;
 import com.ecommerce.service.AutonomousAgentLoopService;
-import com.ecommerce.service.RecommendationPipelineExecutor;
+import com.ecommerce.service.RecommendationPipelineHook;
 import com.ecommerce.service.ScenePathEnforcer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -36,29 +40,31 @@ import static org.assertj.core.api.Assertions.assertThat;
 /** Paid benchmark runner. Default Maven tests exclude this class; use the dedicated opt-in profile. */
 @EnabledIfEnvironmentVariable(named = LiveAgentBenchmarkGuard.RUN_ENV, matches = "(?i)true")
 class LiveAgentBenchmarkRunnerTest {
+    private static final int MAX_STEPS = 20;
 
     @Test
-    void benchmarksOnlyTheSupportedGuardedJavaMainline() throws Exception {
+    void runsTheSameFairMatrixWithoutSamplingOrSharedBudgets() {
         AgentBenchmarkDataset.Loaded dataset = AgentBenchmarkDataset.load();
+        List<AgentBenchmark.Variant> variants = AgentBenchmark.variants().stream()
+                .filter(item -> item.status() == AgentBenchmark.VariantStatus.SUPPORTED).toList();
         LiveAgentBenchmarkGuard.Settings settings = LiveAgentBenchmarkGuard.requireConfiguration(
-                System.getenv(), dataset.cases().size());
+                System.getenv(), dataset.cases().size(), variants.size());
         LiveRecommendationE2EGuard.verifyPostgres(settings.live());
-        AgentBenchmark.Variant variant = AgentBenchmark.variants().stream()
-                .filter(item -> AgentBenchmark.RUNNABLE_VARIANT.equals(item.id())).findFirst().orElseThrow();
-        AgentBenchmark.requireRunnable(variant);
-
         String toolsetHash = AgentBenchmarkDataset.sha256(String.join("\n",
-                ScenePathEnforcer.DEFAULT_WHITELIST.stream().sorted().toList()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                ScenePathEnforcer.DEFAULT_WHITELIST.stream().sorted().toList()).getBytes(StandardCharsets.UTF_8));
         AgentBenchmark.Controls controls = new AgentBenchmark.Controls(settings.provider(), settings.model(),
-                dataset.sha256(), toolsetHash, settings.maxCallsPerCase(), settings.maxTotalCalls(), settings.seed());
-        AgentBenchmark.requireFairControls(List.of(controls));
+                dataset.sha256(), toolsetHash, dataset.faultPlanHash(), settings.maxCallsPerCase(),
+                settings.maxTotalCalls(), MAX_STEPS, settings.seed());
+        AgentBenchmark.requireFairControls(Collections.nCopies(variants.size(), controls));
 
-        List<AgentBenchmark.CaseObservation> observations = new ArrayList<>();
+        System.setProperty(AgentEvaluationProfile.ENABLE_PROPERTY, "true");
+        Map<String, List<AgentBenchmark.CaseObservation>> observationsByVariant = new LinkedHashMap<>();
+        variants.forEach(variant -> observationsByVariant.put(variant.id(), new ArrayList<>()));
         List<AgentBenchmarkDataset.Case> orderedCases = new ArrayList<>(dataset.cases());
-        Collections.shuffle(orderedCases, new java.util.Random(settings.seed()));
-        String runPrefix = "agent-benchmark-" + UUID.randomUUID().toString().replace("-", "");
-
-        try (ConfigurableApplicationContext app = new SpringApplicationBuilder(MultiAgentApplication.class)
+        Collections.shuffle(orderedCases, new Random(settings.seed()));
+        String runPrefix = "live-bench-" + UUID.randomUUID().toString().substring(0, 8);
+        try (ConfigurableApplicationContext app = new SpringApplicationBuilder(
+                MultiAgentApplication.class, FaultConfiguration.class)
                 .web(WebApplicationType.NONE)
                 .properties(Map.of(
                         "agent.recommend.mode", "LLM",
@@ -72,133 +78,110 @@ class LiveAgentBenchmarkRunnerTest {
                 .run()) {
             AutonomousAgentLoopService agent = app.getBean(AutonomousAgentLoopService.class);
             RecommendationRunRepository runs = app.getBean(RecommendationRunRepository.class);
-            RecommendationRunEventService events = app.getBean(RecommendationRunEventService.class);
+            RecommendationRunEventService eventStore = app.getBean(RecommendationRunEventService.class);
             for (AgentBenchmarkDataset.Case testCase : orderedCases) {
-                String runId = runPrefix + "-" + testCase.id();
-                RecommendationRequest request = RecommendationRequest.builder().userId(testCase.userId())
-                        .scene("auto").numItems(testCase.numItems()).country(testCase.country())
-                        .region(testCase.region()).locale(testCase.locale()).currency(testCase.currency())
-                        .platform(testCase.platform()).context(Map.of("intentText", testCase.intentText())).build();
-                long start = System.nanoTime();
-                AgentLoopResponse response = agent.run(ToolLoopRequest.builder().runId(runId).request(request)
-                        .config(ToolLoopConfig.builder().maxSteps(12)
-                                .toolWhitelist(ScenePathEnforcer.DEFAULT_WHITELIST).build()).build());
-                double latencyMs = (System.nanoTime() - start) / 1_000_000.0;
-                Map<String, Object> llm = response.getLlmMetrics() == null ? Map.of() : response.getLlmMetrics();
-                List<Map<String, Object>> runEvents = events.history(runId);
-                TraceAudit trace = audit(runEvents, settings.model());
-                boolean providerInvoked = trace.providerInvoked();
-                boolean noFallback = number(llm.get("fallbackCount")) == 0
-                        && number(llm.get("llmCallCount")) > 0
-                        && number(llm.get("llmCallCount")) == number(llm.get("providerCallCount"))
-                        && trace.everyCallSucceededOnConfiguredModel();
-                boolean violation = hasRuleViolation(response, llm, testCase);
-                boolean persisted = runs.findById(runId).isPresent() && hasPersistedExecutionTrace(runEvents);
-                int toolCalls = response.getToolCalls() == null ? 0 : (int) response.getToolCalls().stream()
-                        .filter(call -> !RecommendationPipelineExecutor.FINAL_ACTION.equals(call.getToolName())).count();
-                RecommendationPlan plan = response.getPlan();
-                boolean completed = "completed".equals(response.getStatus()) && persisted;
-                boolean decisionFromLlm = plan != null && plan.getStrategy() != null
-                        && plan.getStrategy().get("businessDecision") instanceof Map<?, ?> decision
-                        && "llm".equals(decision.get("source"));
-                boolean taskSuccess = completed && decisionFromLlm && providerInvoked && noFallback && !violation
-                        && toolCalls > 0
-                        && plan.getScene() != null && plan.getScene().equals(testCase.expectedScene())
-                        && plan.getMarket() != null && testCase.country().equalsIgnoreCase(plan.getMarket().getCountry())
-                        && plan.getProducts() != null && !plan.getProducts().isEmpty();
-                String failure = failureReason(response, providerInvoked, noFallback, persisted,
-                        plan, testCase, violation, decisionFromLlm);
-                if (failure == null && toolCalls == 0) failure = "no_tool_call_observed";
-                Long promptTokens = longValue(llm.get("promptTokens"));
-                Long completionTokens = longValue(llm.get("completionTokens"));
-                Long totalTokens = longValue(llm.get("totalTokens"));
-                String usageStatus = String.valueOf(llm.getOrDefault("usageStatus", "unavailable"));
-                Double cost = settings.prices().costUsd(promptTokens, completionTokens, usageStatus);
-                observations.add(new AgentBenchmark.CaseObservation(testCase.id(), completed, taskSuccess,
-                        violation, toolCalls, latencyMs, providerInvoked, usageStatus,
-                        promptTokens, completionTokens, totalTokens, cost, failure));
+                List<AgentBenchmark.Variant> armsForCase = new ArrayList<>(variants);
+                Collections.shuffle(armsForCase, new Random(settings.seed() ^ testCase.id().hashCode()));
+                for (AgentBenchmark.Variant variant : armsForCase) {
+                    String variantKey = Integer.toUnsignedString(variant.id().hashCode(), 36);
+                    String runId = (runPrefix + "-" + variantKey + "-" + testCase.id())
+                            .replaceAll("[^A-Za-z0-9_-]", "_");
+                    List<AgentRunEvent> emitted = new ArrayList<>();
+                    AgentLoopResponse response = null;
+                    RuntimeException failure = null;
+                    long start = System.nanoTime();
+                    try {
+                        AgentEvaluationProfile.Settings profile = new AgentEvaluationProfile.Settings(
+                                "single".equals(variant.topology()) ? AgentEvaluationProfile.Topology.SINGLE
+                                        : AgentEvaluationProfile.Topology.MULTI,
+                                variant.vetoEnabled(), variant.pathConstraint(), settings.seed());
+                        response = AgentEvaluationProfile.run(profile, () -> agent.run(
+                                request(runId, testCase), emitted::add));
+                    } catch (RuntimeException error) {
+                        failure = error;
+                    }
+                    double latencyMs = (System.nanoTime() - start) / 1_000_000.0;
+                    List<Map<String, Object>> persisted = eventStore.history(runId);
+                    boolean durable = runs.findById(runId).isPresent()
+                            && hasPersistedExecutionTrace(persisted)
+                            && configuredModelOnly(persisted, settings.model());
+                    observationsByVariant.get(variant.id()).add(AgentBenchmarkEvaluator.evaluate(
+                            testCase, response, failure,
+                            emitted, latencyMs, true, durable, settings.prices()));
+                }
             }
+        } finally {
+            System.clearProperty(AgentEvaluationProfile.ENABLE_PROPERTY);
         }
 
-        AgentBenchmark.Metrics metrics = AgentBenchmark.summarize(observations, settings.prices());
-        AgentBenchmark.VariantRun liveResult = new AgentBenchmark.VariantRun(variant.id(), variant.label(),
-                variant.status(), AgentBenchmark.ExecutionKind.LIVE_LLM,
-                observations.stream().anyMatch(AgentBenchmark.CaseObservation::providerInvoked),
-                settings.provider(), settings.model(), dataset.sha256(), toolsetHash,
-                settings.maxCallsPerCase(), settings.maxTotalCalls(), settings.seed(),
-                variant.pathConstraint(), variant.vetoEnabled(), null, metrics, List.copyOf(observations));
-        List<AgentBenchmark.VariantRun> allVariants = new ArrayList<>(List.of(liveResult));
-        allVariants.addAll(AgentBenchmark.unexecutedVariants(controls));
-        AgentBenchmark.Report report = new AgentBenchmark.Report("java-recommendation-agent-ablation-v1",
-                java.time.Instant.now().toString(), revision(), controls, dataset.references(), List.copyOf(allVariants),
-                false, "Only the current guarded Java Multi-Agent executor is runnable. Unsupported ablations are fail-closed; do not infer causal effects from this single arm.");
+        List<AgentBenchmark.VariantRun> results = variants.stream().map(variant -> {
+            List<AgentBenchmark.CaseObservation> observations = observationsByVariant.get(variant.id());
+            return new AgentBenchmark.VariantRun(variant.id(), variant.label(), variant.status(),
+                    AgentBenchmark.ExecutionKind.LIVE_LLM,
+                    observations.stream().anyMatch(AgentBenchmark.CaseObservation::providerInvoked),
+                    controls.provider(), controls.model(), controls.datasetHash(), controls.toolsetHash(),
+                    controls.faultPlanHash(), controls.maxCallsPerCase(), controls.maxTotalCalls(),
+                    controls.maxSteps(), controls.seed(), variant.topology(), variant.pathConstraint(),
+                    variant.vetoEnabled(), null, AgentBenchmark.summarize(observations, settings.prices()),
+                    List.copyOf(observations));
+        }).toList();
+
+        AgentBenchmark.Report report = new AgentBenchmark.Report("java-recommendation-agent-ablation-v2",
+                java.time.Instant.now().toString(), revision(), controls, dataset.references(),
+                List.copyOf(results), true,
+                "All runnable arms use identical provider/model, dataset, toolset, fault plan, per-case budget, max steps and seed.");
         new AgentBenchmarkReportWriter().write(report,
                 Path.of(System.getProperty("user.dir")).resolve(AgentBenchmarkReportWriter.REPORT_DIR));
-        assertThat(observations).hasSize(dataset.cases().size());
-        assertThat(liveResult.executionKind()).isEqualTo(AgentBenchmark.ExecutionKind.LIVE_LLM);
-        assertThat(liveResult.providerInvoked()).isTrue();
-        assertThat(metrics.caseCount()).isEqualTo(dataset.cases().size());
-        assertThat(observations).allSatisfy(item -> assertThat(item.providerInvoked())
-                .as("provider invocation must be proven for case %s", item.caseId()).isTrue());
+        assertThat(results).hasSize(variants.size()).allSatisfy(result -> {
+            assertThat(result.cases()).hasSize(dataset.cases().size());
+            assertThat(result.cases().stream().map(AgentBenchmark.CaseObservation::caseId).toList())
+                    .containsExactlyElementsOf(orderedCases.stream().map(AgentBenchmarkDataset.Case::id).toList());
+            assertThat(result.cases()).allSatisfy(item -> assertThat(item.providerInvoked())
+                    .as("provider invocation for %s/%s", result.variantId(), item.caseId()).isTrue());
+        });
     }
 
-    private static TraceAudit audit(List<Map<String, Object>> events, String expectedModel) {
-        List<? extends Map<?, ?>> calls = events.stream().filter(event -> "llm.call".equals(event.get("name")))
-                .map(event -> event.get("data")).filter(Map.class::isInstance).map(value -> (Map<?, ?>) value).toList();
-        boolean invoked = calls.stream().anyMatch(data -> Boolean.TRUE.equals(data.get("providerInvoked")));
-        boolean everyCallSucceeded = !calls.isEmpty() && calls.stream().allMatch(data ->
-                Boolean.TRUE.equals(data.get("providerInvoked")) && "success".equals(data.get("status"))
-                        && expectedModel.equals(data.get("model")));
-        return new TraceAudit(invoked, everyCallSucceeded);
+    private ToolLoopRequest request(String runId, AgentBenchmarkDataset.Case testCase) {
+        Map<String, Object> context = new LinkedHashMap<>(testCase.constraints());
+        context.put("intentText", testCase.intentText());
+        context.put("benchmarkCaseId", testCase.id());
+        context.put("benchmarkFaultPlan", Map.of("type", testCase.faultPlan().type(),
+                "tool", testCase.faultPlan().tool(), "triggerCount", testCase.faultPlan().triggerCount()));
+        RecommendationRequest request = RecommendationRequest.builder().userId(testCase.userId())
+                .scene("auto").numItems(testCase.numItems()).country(testCase.country())
+                .region(testCase.region()).locale(testCase.locale()).currency(testCase.currency())
+                .platform(testCase.platform()).context(context).build();
+        return ToolLoopRequest.builder().runId(runId).request(request)
+                .config(ToolLoopConfig.builder().maxSteps(MAX_STEPS)
+                        .toolWhitelist(ScenePathEnforcer.DEFAULT_WHITELIST).build()).build();
     }
 
     private static boolean hasPersistedExecutionTrace(List<Map<String, Object>> events) {
         List<String> names = events.stream().map(event -> String.valueOf(event.get("name"))).toList();
         return names.contains("run.started") && names.contains("tool.started")
-                && names.contains("tool.completed") && names.contains("run.completed");
+                && (names.contains("run.completed") || names.contains("run.failed"));
     }
 
-    private static boolean hasRuleViolation(AgentLoopResponse response, Map<String, Object> metrics,
-                                            AgentBenchmarkDataset.Case testCase) {
-        if (number(metrics.get("invalidAgentSelections")) > 0 || number(metrics.get("deniedBlackboardWrites")) > 0) return true;
-        if (response.getToolCalls() != null && response.getToolCalls().stream().anyMatch(LiveAgentBenchmarkRunnerTest::isGuardRejection)) return true;
-        RecommendationPlan plan = response.getPlan();
-        return plan == null || plan.getMarket() == null
-                || !testCase.country().equalsIgnoreCase(plan.getMarket().getCountry());
+    private static boolean configuredModelOnly(List<Map<String, Object>> events, String expectedModel) {
+        List<? extends Map<?, ?>> calls = events.stream().filter(event -> "llm.call".equals(event.get("name")))
+                .map(event -> event.get("data")).filter(Map.class::isInstance)
+                .map(value -> (Map<?, ?>) value).filter(data -> Boolean.TRUE.equals(data.get("providerInvoked"))).toList();
+        return !calls.isEmpty() && calls.stream().allMatch(data -> expectedModel.equals(data.get("model")));
     }
-
-    private static boolean isGuardRejection(ToolCallRecord call) {
-        return "blocked".equals(call.getStatus()) || "stale_rejected".equals(call.getStatus())
-                || (call.getErrorMessage() != null && (call.getErrorMessage().contains("not_whitelisted")
-                || call.getErrorMessage().contains("scope_violation") || call.getErrorMessage().contains("duplicate_tool_call")));
-    }
-
-    private static String failureReason(AgentLoopResponse response, boolean providerInvoked, boolean noFallback,
-                                        boolean persisted, RecommendationPlan plan,
-                                        AgentBenchmarkDataset.Case testCase, boolean violation, boolean decisionFromLlm) {
-        if (!providerInvoked) return "provider_not_invoked";
-        if (!noFallback) return "llm_fallback_detected";
-        if (!persisted) return "run_not_persisted";
-        if (!"completed".equals(response.getStatus())) return "run_" + safe(response.getStatus());
-        if (!decisionFromLlm) return "final_decision_not_from_llm";
-        if (plan == null || !testCase.expectedScene().equals(plan.getScene())) return "expected_scene_mismatch";
-        if (plan.getMarket() == null || !testCase.country().equalsIgnoreCase(plan.getMarket().getCountry())) return "market_mismatch";
-        if (violation) return "guard_or_market_violation";
-        if (plan.getProducts() == null || plan.getProducts().isEmpty()) return "empty_recommendation";
-        return null;
-    }
-
-    private static long number(Object value) { return value instanceof Number n ? n.longValue() : 0; }
-    private static Long longValue(Object value) { return value instanceof Number n ? n.longValue() : null; }
-    private static String safe(String value) { return value == null ? "unknown" : value.replaceAll("[^a-zA-Z0-9_-]", "_"); }
-
-    private record TraceAudit(boolean providerInvoked, boolean everyCallSucceededOnConfiguredModel) {}
 
     private static String revision() {
         try {
             Process process = new ProcessBuilder("git", "rev-parse", "--short", "HEAD").start();
-            String value = new String(process.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8).trim();
+            String value = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
             return process.waitFor() == 0 && !value.isBlank() ? value : "unknown";
         } catch (Exception ignored) { return "unknown"; }
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    static class FaultConfiguration {
+        @Bean
+        RecommendationPipelineHook benchmarkFaultHook() {
+            return new AgentBenchmarkFaultHook();
+        }
     }
 }

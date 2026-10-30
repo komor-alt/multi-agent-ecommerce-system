@@ -19,7 +19,7 @@ class LiveAgentBenchmarkGuardTest {
         env.put(LiveRecommendationE2EGuard.KEY_ENV, "sk-live-unit-fixture-never-used");
         env.put(LiveRecommendationE2EGuard.BUDGET_ENV, "4");
         env.put(LiveRecommendationE2EGuard.SUPERVISOR_BUDGET_ENV, "4");
-        env.put(LiveAgentBenchmarkGuard.TOTAL_BUDGET_ENV, "24");
+        env.put(LiveAgentBenchmarkGuard.TOTAL_BUDGET_ENV, "120");
         env.put(LiveAgentBenchmarkGuard.SEED_ENV, "20261030");
         env.put("ECOM_LLM_MODEL", "deepseek-flash");
         env.put("ECOM_RECOMMEND_LLM_PROVIDER", "openai-compatible");
@@ -30,21 +30,22 @@ class LiveAgentBenchmarkGuardTest {
 
     @Test
     void requiresBothLiveOptInsFiniteAggregateBudgetSeedAndExplicitModel() {
-        LiveAgentBenchmarkGuard.Settings settings = LiveAgentBenchmarkGuard.requireConfiguration(env(), 6);
+        LiveAgentBenchmarkGuard.Settings settings = LiveAgentBenchmarkGuard.requireConfiguration(env(), 6, 5);
         assertThat(settings.maxCallsPerCase()).isEqualTo(4);
-        assertThat(settings.maxTotalCalls()).isEqualTo(24);
+        assertThat(settings.maxTotalCalls()).isEqualTo(120);
+        assertThat(settings.requiredTotalCalls()).isEqualTo(120);
         assertThat(settings.seed()).isEqualTo(20261030L);
         assertThat(settings.prices().status()).isEqualTo("unavailable_price_not_configured");
         assertThat(settings.toString()).doesNotContain("sk-live-unit-fixture-never-used");
 
         Map<String, String> noOuterOptIn = env();
         noOuterOptIn.put(LiveAgentBenchmarkGuard.RUN_ENV, "false");
-        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(noOuterOptIn, 6))
+        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(noOuterOptIn, 6, 5))
                 .hasMessageContaining(LiveAgentBenchmarkGuard.RUN_ENV);
 
         Map<String, String> insufficient = env();
-        insufficient.put(LiveAgentBenchmarkGuard.TOTAL_BUDGET_ENV, "23");
-        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(insufficient, 6))
+        insufficient.put(LiveAgentBenchmarkGuard.TOTAL_BUDGET_ENV, "119");
+        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(insufficient, 6, 5))
                 .hasMessageContaining(LiveAgentBenchmarkGuard.TOTAL_BUDGET_ENV);
     }
 
@@ -52,22 +53,22 @@ class LiveAgentBenchmarkGuardTest {
     void rejectsUnequalPerRunBudgetsUnboundedTotalsMissingSeedAndPartialPricing() {
         Map<String, String> unequal = env();
         unequal.put(LiveRecommendationE2EGuard.SUPERVISOR_BUDGET_ENV, "3");
-        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(unequal, 6))
+        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(unequal, 6, 5))
                 .hasMessageContaining("must match");
 
-        Map<String, String> tooLarge = env();
-        tooLarge.put(LiveAgentBenchmarkGuard.TOTAL_BUDGET_ENV, "97");
-        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(tooLarge, 6))
-                .hasMessageContaining("at most 96");
+        Map<String, String> surplus = env();
+        surplus.put(LiveAgentBenchmarkGuard.TOTAL_BUDGET_ENV, "121");
+        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(surplus, 6, 5))
+                .hasMessageContaining("must equal");
 
         Map<String, String> noSeed = env();
         noSeed.remove(LiveAgentBenchmarkGuard.SEED_ENV);
-        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(noSeed, 6))
+        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(noSeed, 6, 5))
                 .hasMessageContaining(LiveAgentBenchmarkGuard.SEED_ENV);
 
         Map<String, String> partialPrice = env();
         partialPrice.put(LiveAgentBenchmarkGuard.INPUT_PRICE_ENV, "0.2");
-        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(partialPrice, 6))
+        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(partialPrice, 6, 5))
                 .hasMessageContaining("both input and output token prices");
     }
 
@@ -75,8 +76,8 @@ class LiveAgentBenchmarkGuardTest {
     void checksDatasetBudgetAgainstAllCasesWithoutStartingAnyProvider() {
         int count = AgentBenchmarkDataset.load().cases().size();
         Map<String, String> tooSmall = env();
-        tooSmall.put(LiveAgentBenchmarkGuard.TOTAL_BUDGET_ENV, "20");
-        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(tooSmall, count))
+        tooSmall.put(LiveAgentBenchmarkGuard.TOTAL_BUDGET_ENV, String.valueOf(count * 5 * 4 - 1));
+        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(tooSmall, count, 5))
                 .hasMessageContaining(LiveAgentBenchmarkGuard.TOTAL_BUDGET_ENV);
     }
 }

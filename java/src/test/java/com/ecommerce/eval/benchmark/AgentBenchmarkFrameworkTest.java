@@ -19,9 +19,13 @@ class AgentBenchmarkFrameworkTest {
     void datasetAndExternalReferencesAreHashPinnedAndNeverMixed() {
         AgentBenchmarkDataset.Loaded dataset = AgentBenchmarkDataset.load();
 
-        assertThat(dataset.cases()).hasSize(6).extracting(AgentBenchmarkDataset.Case::expectedScene)
+        assertThat(dataset.cases()).hasSize(66).extracting(AgentBenchmarkDataset.Case::expectedScene)
                 .contains("homepage", "campaign", "retention");
         assertThat(dataset.sha256()).hasSize(64);
+        assertThat(dataset.faultPlanHash())
+                .isEqualTo("13dc50f4fdba833470851ae2e11317c655dadac53232f313411fbc479256c9f9");
+        assertThat(dataset.cases()).extracting(AgentBenchmarkDataset.Case::category)
+                .contains("normal", "constraint", "inventory", "failure");
         assertThat(dataset.references()).filteredOn(ref -> ref.id().startsWith("tau3"))
                 .allSatisfy(ref -> {
                     assertThat(ref.executionKind()).isEqualTo(AgentBenchmark.ExecutionKind.EXTERNAL_REFERENCE);
@@ -42,16 +46,14 @@ class AgentBenchmarkFrameworkTest {
     }
 
     @Test
-    void onlyCurrentBoundedGuardedRuntimeIsAdvertisedAsRunnable() {
+    void advertisesOnlyRealEvaluationProfilesAsRunnable() {
         List<AgentBenchmark.Variant> supported = AgentBenchmark.variants().stream()
                 .filter(variant -> variant.status() == AgentBenchmark.VariantStatus.SUPPORTED).toList();
 
         assertThat(supported).extracting(AgentBenchmark.Variant::id)
-                .containsExactly(AgentBenchmark.RUNNABLE_VARIANT);
-        assertThatThrownBy(() -> AgentBenchmark.requireRunnable(AgentBenchmark.variants().get(0)))
-                .hasMessageContaining("BENCHMARK_VARIANT_UNSUPPORTED");
-        assertThat(AgentBenchmark.variants()).filteredOn(v -> v.id().contains("veto-off") || v.id().contains("path-off"))
-                .allSatisfy(v -> assertThat(v.status()).isEqualTo(AgentBenchmark.VariantStatus.UNSUPPORTED));
+                .containsExactly("java-single-agent-veto-on-path-on", AgentBenchmark.RUNNABLE_VARIANT,
+                        "java-guarded-multi-agent-veto-off", "java-guarded-multi-agent-path-off",
+                        "java-guarded-multi-agent-veto-off-path-off");
     }
 
     @Test
@@ -73,8 +75,9 @@ class AgentBenchmarkFrameworkTest {
         assertThat(metrics.costPerTaskUsd()).isNotNull();
 
         List<AgentBenchmark.CaseObservation> incomplete = List.of(cases.get(0),
-                new AgentBenchmark.CaseObservation("no-usage", true, true, false, 1, 9,
-                        true, "unavailable", null, null, null, null, null));
+                new AgentBenchmark.CaseObservation("no-usage", "normal", "completed", "completed",
+                        true, true, false, 1, 9, true, "unavailable",
+                        null, null, null, null, List.of(), List.of(), null, null));
         AgentBenchmark.Metrics noGuess = AgentBenchmark.summarize(incomplete, prices);
         assertThat(noGuess.totalTokens()).isNull();
         assertThat(noGuess.totalCostUsd()).isNull();
@@ -88,9 +91,9 @@ class AgentBenchmarkFrameworkTest {
         AgentBenchmark.Controls changedModel = controls("model-b", 4);
         AgentBenchmark.Controls changedBudget = controls("model-a", 5);
         AgentBenchmark.Controls changedDataset = new AgentBenchmark.Controls("test-provider", "model-a",
-                "other-dataset", "toolset-hash", 4, 24, 7L);
+                "other-dataset", "toolset-hash", "fault-hash", 4, 24, 12, 7L);
         AgentBenchmark.Controls changedSeed = new AgentBenchmark.Controls("test-provider", "model-a",
-                "dataset-hash", "toolset-hash", 4, 24, 8L);
+                "dataset-hash", "toolset-hash", "fault-hash", 4, 24, 12, 8L);
         assertThatThrownBy(() -> AgentBenchmark.requireFairControls(List.of(baseline, changedModel)))
                 .hasMessageContaining("BENCHMARK_UNFAIR_CONTROLS");
         assertThatThrownBy(() -> AgentBenchmark.requireFairControls(List.of(baseline, changedBudget)))
@@ -107,12 +110,14 @@ class AgentBenchmarkFrameworkTest {
         AgentBenchmark.Controls controls = controls("offline-fixture", 4);
         AgentBenchmark.Variant variant = AgentBenchmark.variants().stream()
                 .filter(v -> AgentBenchmark.RUNNABLE_VARIANT.equals(v.id())).findFirst().orElseThrow();
-        AgentBenchmark.CaseObservation observation = new AgentBenchmark.CaseObservation("fixture", true,
-                false, false, 2, 12, false, "unavailable", null, null, null, null, "offline_only");
+        AgentBenchmark.CaseObservation observation = new AgentBenchmark.CaseObservation("fixture", "normal",
+                "completed", "failed", false, false, false, 2, 12, false, "unavailable",
+                null, null, null, null, List.of(), List.of(), "tool_failed", "offline_only");
         AgentBenchmark.VariantRun offline = new AgentBenchmark.VariantRun(variant.id(), variant.label(),
                 variant.status(), AgentBenchmark.ExecutionKind.OFFLINE_SIMULATION, false,
                 controls.provider(), controls.model(), controls.datasetHash(), controls.toolsetHash(),
-                controls.maxCallsPerCase(), controls.maxTotalCalls(), controls.seed(), true, true,
+                controls.faultPlanHash(), controls.maxCallsPerCase(), controls.maxTotalCalls(),
+                controls.maxSteps(), controls.seed(), variant.topology(), true, true,
                 null, AgentBenchmark.summarize(List.of(observation), null), List.of(observation));
         AgentBenchmark.Report report = new AgentBenchmark.Report("test", "fixed", "test-revision", controls,
                 AgentBenchmarkDataset.load().references(), List.of(offline), false, "No paired live arms.");
@@ -121,7 +126,8 @@ class AgentBenchmarkFrameworkTest {
         String json = Files.readString(temporaryDirectory.resolve("agent-benchmark-report.json"));
         String markdown = Files.readString(temporaryDirectory.resolve("agent-benchmark-report.md"));
         assertThat(json).contains("OFFLINE_SIMULATION", "providerInvoked", "datasetHash", "toolsetHash",
-                "maxCallsPerCase", "maxTotalCalls", "seed", "pathConstraint", "vetoEnabled");
+                "faultPlanHash", "maxCallsPerCase", "maxTotalCalls", "maxSteps", "seed",
+                "topology", "pathConstraint", "vetoEnabled");
         assertThat(markdown).contains("Failure Analysis", "Per-Case Results", "EXTERNAL_REFERENCE", "false")
                 .contains("No paired live arms");
     }
@@ -129,14 +135,14 @@ class AgentBenchmarkFrameworkTest {
     private static AgentBenchmark.CaseObservation observation(String id, boolean success, boolean violation,
                                                               int calls, double latency, long prompt, long completion,
                                                               long total, AgentBenchmark.PriceConfig prices) {
-        return new AgentBenchmark.CaseObservation(id, true, success, violation, calls, latency,
-                true, "available", prompt, completion, total,
-                prices.costUsd(prompt, completion, "available"), null);
+        return new AgentBenchmark.CaseObservation(id, "normal", "completed", "completed",
+                true, success, violation, calls, latency, true, "available", prompt, completion, total,
+                prices.costUsd(prompt, completion, "available"), List.of(), List.of(), null, null);
     }
 
     private static AgentBenchmark.Controls controls(String model, int budget) {
-        return new AgentBenchmark.Controls("test-provider", model, "dataset-hash", "toolset-hash", budget,
-                24, 7L);
+        return new AgentBenchmark.Controls("test-provider", model, "dataset-hash", "toolset-hash",
+                "fault-hash", budget, 24, 12, 7L);
     }
 
 }

@@ -18,18 +18,16 @@ public final class AgentBenchmark {
 
     public static List<Variant> variants() {
         return List.of(
-                new Variant("java-single-agent-live", "Single Agent", "single", false, false, false,
-                        VariantStatus.UNSUPPORTED, "No dynamic Java Single Agent executor; ConstrainedToolLoopService is a fixed sequence."),
-                new Variant("java-multi-agent-unconstrained-live", "Multi-Agent without guard constraints", "multi", false, false, false,
-                        VariantStatus.UNSUPPORTED, "No unguarded dynamic Java Multi-Agent executor; SupervisorOrchestrator is a fixed workflow baseline."),
+                new Variant("java-single-agent-veto-on-path-on", "Single Agent", "single", true, true, true,
+                        VariantStatus.SUPPORTED, null),
                 new Variant(RUNNABLE_VARIANT, "Existing Java Guarded Multi-Agent", "multi", true, true, true,
                         VariantStatus.SUPPORTED, null),
                 new Variant("java-guarded-multi-agent-veto-off", "Guarded Multi-Agent, VETO off", "multi", true, false, true,
-                        VariantStatus.UNSUPPORTED, "VETO cannot currently be disabled independently in the production runtime."),
+                        VariantStatus.SUPPORTED, null),
                 new Variant("java-guarded-multi-agent-path-off", "Guarded Multi-Agent, path constraint off", "multi", true, true, false,
-                        VariantStatus.UNSUPPORTED, "Scene path enforcement cannot currently be disabled independently in the production runtime."),
+                        VariantStatus.SUPPORTED, null),
                 new Variant("java-guarded-multi-agent-veto-off-path-off", "Guarded Multi-Agent, VETO/path off", "multi", true, false, false,
-                        VariantStatus.UNSUPPORTED, "Neither VETO nor scene path enforcement has an isolated production toggle."));
+                        VariantStatus.SUPPORTED, null));
     }
 
     public static void requireRunnable(Variant variant) {
@@ -42,13 +40,15 @@ public final class AgentBenchmark {
 
     /** Controls held constant across paired arms; guard toggles live on Variant. */
     public record Controls(String provider, String model, String datasetHash, String toolsetHash,
-                           int maxCallsPerCase, int maxTotalCalls, long seed) {
+                           String faultPlanHash, int maxCallsPerCase, int maxTotalCalls,
+                           int maxSteps, long seed) {
         public Controls {
             Objects.requireNonNull(provider);
             Objects.requireNonNull(model);
             Objects.requireNonNull(datasetHash);
             Objects.requireNonNull(toolsetHash);
-            if (maxCallsPerCase <= 0 || maxTotalCalls < maxCallsPerCase) {
+            Objects.requireNonNull(faultPlanHash);
+            if (maxCallsPerCase < 0 || maxTotalCalls < maxCallsPerCase || maxSteps <= 0) {
                 throw new IllegalArgumentException("BENCHMARK_BUDGET_INVALID");
             }
         }
@@ -58,13 +58,17 @@ public final class AgentBenchmark {
                           boolean vetoEnabled, boolean pathConstraint, VariantStatus status,
                           String unsupportedReason) {}
 
-    public record CaseObservation(String caseId, boolean completed, boolean taskSuccess,
+    public record CaseObservation(String caseId, String category, String expectedOutcome,
+                                  String actualOutcome, boolean completed, boolean taskSuccess,
                                   boolean ruleViolation, int toolCalls, double latencyMs,
                                   boolean providerInvoked, String usageStatus,
                                   Long promptTokens, Long completionTokens, Long totalTokens,
-                                  Double costUsd, String failureReason) {}
+                                  Double costUsd, List<String> expectedRequiredTools,
+                                  List<String> observedTools, String observedFailureReason,
+                                  String expectationMismatch) {}
 
-    public record Metrics(int caseCount, Double taskSuccessRate, Double ruleViolationRate,
+    public record Metrics(int caseCount, Double taskSuccessRate, Double completionRate,
+                          Double ruleViolationRate,
                           Double averageToolCalls, Double p50LatencyMs, Double p95LatencyMs,
                           Long totalTokens, Double averageTokensPerTask, Double totalCostUsd,
                           Double costPerTaskUsd, String usageStatus, String costStatus) {}
@@ -72,7 +76,8 @@ public final class AgentBenchmark {
     public record VariantRun(String variantId, String variantLabel, VariantStatus status,
                              ExecutionKind executionKind, boolean providerInvoked, String provider,
                              String model, String datasetHash, String toolsetHash,
-                             int maxCallsPerCase, int maxTotalCalls, long seed,
+                             String faultPlanHash, int maxCallsPerCase, int maxTotalCalls,
+                             int maxSteps, long seed, String topology,
                              boolean pathConstraint, boolean vetoEnabled, String unsupportedReason,
                              Metrics metrics, List<CaseObservation> cases) {}
 
@@ -111,11 +116,12 @@ public final class AgentBenchmark {
 
     public static Metrics summarize(List<CaseObservation> cases, PriceConfig prices) {
         if (cases == null || cases.isEmpty()) {
-            return new Metrics(0, null, null, null, null, null, null, null, null, null,
+            return new Metrics(0, null, null, null, null, null, null, null, null, null, null,
                     "unavailable_no_cases", "unavailable_no_cases");
         }
         int count = cases.size();
         double successes = cases.stream().filter(CaseObservation::taskSuccess).count();
+        double completions = cases.stream().filter(CaseObservation::completed).count();
         double violations = cases.stream().filter(CaseObservation::ruleViolation).count();
         double averageCalls = cases.stream().mapToInt(CaseObservation::toolCalls).average().orElse(0);
         double[] latencies = cases.stream().mapToDouble(CaseObservation::latencyMs).sorted().toArray();
@@ -129,7 +135,7 @@ public final class AgentBenchmark {
         boolean completeCosts = completeUsage && prices != null && "configured".equals(prices.status())
                 && cases.stream().allMatch(c -> c.costUsd() != null);
         Double totalCost = completeCosts ? cases.stream().mapToDouble(CaseObservation::costUsd).sum() : null;
-        return new Metrics(count, successes / count, violations / count, averageCalls,
+        return new Metrics(count, successes / count, completions / count, violations / count, averageCalls,
                 percentile(latencies, 50), percentile(latencies, 95), tokens, averageTokens,
                 totalCost, totalCost == null ? null : totalCost / count, usageStatus,
                 completeCosts ? "available" : prices == null || !"configured".equals(prices.status())
@@ -144,10 +150,12 @@ public final class AgentBenchmark {
                     || !Objects.equals(first.model(), candidate.model())
                     || !Objects.equals(first.datasetHash(), candidate.datasetHash())
                     || !Objects.equals(first.toolsetHash(), candidate.toolsetHash())
+                    || !Objects.equals(first.faultPlanHash(), candidate.faultPlanHash())
                     || first.maxCallsPerCase() != candidate.maxCallsPerCase()
                     || first.maxTotalCalls() != candidate.maxTotalCalls()
+                    || first.maxSteps() != candidate.maxSteps()
                     || first.seed() != candidate.seed()) {
-                throw new IllegalArgumentException("BENCHMARK_UNFAIR_CONTROLS: model, dataset, toolset, budget and seed must match");
+                throw new IllegalArgumentException("BENCHMARK_UNFAIR_CONTROLS: model, dataset, toolset, fault plan, budget, max steps and seed must match");
             }
         }
     }
@@ -158,8 +166,9 @@ public final class AgentBenchmark {
             if (variant.status() == VariantStatus.SUPPORTED) continue;
             result.add(new VariantRun(variant.id(), variant.label(), variant.status(),
                     ExecutionKind.NOT_EXECUTED, false, controls.provider(), controls.model(),
-                    controls.datasetHash(), controls.toolsetHash(), controls.maxCallsPerCase(),
-                    controls.maxTotalCalls(), controls.seed(), variant.pathConstraint(), variant.vetoEnabled(),
+                    controls.datasetHash(), controls.toolsetHash(), controls.faultPlanHash(),
+                    controls.maxCallsPerCase(), controls.maxTotalCalls(), controls.maxSteps(), controls.seed(),
+                    variant.topology(), variant.pathConstraint(), variant.vetoEnabled(),
                     variant.unsupportedReason(), summarize(List.of(), null), List.of()));
         }
         return List.copyOf(result);

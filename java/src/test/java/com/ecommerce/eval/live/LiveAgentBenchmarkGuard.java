@@ -13,11 +13,9 @@ final class LiveAgentBenchmarkGuard {
     static final String SEED_ENV = "ECOM_AGENT_BENCHMARK_SEED";
     static final String INPUT_PRICE_ENV = "ECOM_AGENT_BENCHMARK_INPUT_USD_PER_1M";
     static final String OUTPUT_PRICE_ENV = "ECOM_AGENT_BENCHMARK_OUTPUT_USD_PER_1M";
-    static final int MAX_TOTAL_CALLS = 96;
-
     private LiveAgentBenchmarkGuard() {}
 
-    static Settings requireConfiguration(Map<String, String> env, int caseCount) {
+    static Settings requireConfiguration(Map<String, String> env, int caseCount, int variantCount) {
         if (!"true".equalsIgnoreCase(value(env, RUN_ENV))) throw fail(RUN_ENV + " must be true");
         LiveRecommendationE2EGuard.Settings live = LiveRecommendationE2EGuard.requireConfiguration(env);
         int modeBudget = positiveInt(env, LiveRecommendationE2EGuard.BUDGET_ENV);
@@ -25,8 +23,10 @@ final class LiveAgentBenchmarkGuard {
             throw fail("ECOM_SUPERVISOR_MAX_LLM_CALLS and ECOM_RECOMMEND_MAX_LLM_CALLS must match");
         }
         int maxTotal = positiveInt(env, TOTAL_BUDGET_ENV);
-        if (maxTotal > MAX_TOTAL_CALLS || (long) modeBudget * caseCount > maxTotal) {
-            throw fail(TOTAL_BUDGET_ENV + " must cover the worst-case per-run budget and be at most " + MAX_TOTAL_CALLS);
+        long required = Math.multiplyExact(Math.multiplyExact((long) modeBudget, caseCount), variantCount);
+        if (required > Integer.MAX_VALUE || maxTotal != required) {
+            throw fail(TOTAL_BUDGET_ENV + " must equal caseCount * runnableVariantCount * perCaseBudget (required "
+                    + required + "); samples and budgets are not shared or truncated");
         }
         long seed;
         try {
@@ -42,7 +42,8 @@ final class LiveAgentBenchmarkGuard {
         String inputPrice = value(env, INPUT_PRICE_ENV);
         String outputPrice = value(env, OUTPUT_PRICE_ENV);
         AgentBenchmark.PriceConfig prices = parsePrices(inputPrice, outputPrice);
-        return new Settings(live, provider, model, modeBudget, maxTotal, seed, prices);
+        return new Settings(live, provider, model, modeBudget, maxTotal, caseCount, variantCount,
+                required, seed, prices);
     }
 
     private static AgentBenchmark.PriceConfig parsePrices(String input, String output) {
@@ -74,7 +75,8 @@ final class LiveAgentBenchmarkGuard {
     }
 
     record Settings(LiveRecommendationE2EGuard.Settings live, String provider, String model,
-                    int maxCallsPerCase, int maxTotalCalls, long seed, AgentBenchmark.PriceConfig prices) {
+                    int maxCallsPerCase, int maxTotalCalls, int caseCount, int variantCount,
+                    long requiredTotalCalls, long seed, AgentBenchmark.PriceConfig prices) {
         @Override public String toString() {
             return "Settings[provider=" + provider + ", model=" + model + ", maxCallsPerCase="
                     + maxCallsPerCase + ", maxTotalCalls=" + maxTotalCalls + ", seed=" + seed + ", key=<redacted>]";

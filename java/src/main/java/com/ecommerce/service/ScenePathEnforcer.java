@@ -141,17 +141,27 @@ public class ScenePathEnforcer {
 
     /** Specialists that can make progress from the current blackboard. */
     public List<AgentId> allowedAgents(String scene, RecommendationPipelineState context) {
+        return allowedAgents(scene, context, true);
+    }
+
+    public List<AgentId> allowedAgents(String scene, RecommendationPipelineState context, boolean pathGuardEnabled) {
         if (isPathComplete(scene, context)) return List.of(AgentId.SUPERVISOR);
         List<AgentId> allowed = new ArrayList<>();
         for (AgentId agent : List.of(AgentId.PROFILE, AgentId.PRODUCT, AgentId.INVENTORY, AgentId.COPY)) {
-            if (!executableTools(agent, scene, context).isEmpty()) allowed.add(agent);
+            if (!executableTools(agent, scene, context, pathGuardEnabled).isEmpty()) allowed.add(agent);
         }
         return allowed;
     }
 
     /** Tools a specialist may safely choose now, after prerequisites are checked. */
     public List<String> executableTools(AgentId agent, String scene, RecommendationPipelineState context) {
+        return executableTools(agent, scene, context, true);
+    }
+
+    public List<String> executableTools(
+            AgentId agent, String scene, RecommendationPipelineState context, boolean pathGuardEnabled) {
         if (agent == null || context == null) return List.of();
+        if (!pathGuardEnabled) return executableToolsWithoutScenePath(agent, context);
         String normalized = normalizeScene(scene);
         List<String> executable = new ArrayList<>();
         if (agent == AgentId.PROFILE) {
@@ -200,6 +210,45 @@ public class ScenePathEnforcer {
             }
             if (SCENE_RETENTION.equals(normalized)
                     && !context.getAgentResults().containsKey(RecommendationPipelineExecutor.RETENTION_MARKETING_COPY_RESULT)) {
+                executable.add(GENERATE_RETENTION_COPY);
+            }
+        }
+        return executable;
+    }
+
+    private List<String> executableToolsWithoutScenePath(AgentId agent, RecommendationPipelineState context) {
+        List<String> executable = new ArrayList<>();
+        if (agent == AgentId.PROFILE) {
+            if (!context.getAgentResults().containsKey(RecommendationPipelineExecutor.USER_PROFILE_RESULT)) {
+                executable.add(GET_USER_PROFILE);
+            }
+            if (!context.getAgentResults().containsKey(RecommendationPipelineExecutor.ORDER_CONTEXT_RESULT)) {
+                executable.add(GET_RECENT_ORDERS);
+            }
+        } else if (agent == AgentId.PRODUCT) {
+            if (context.hasUnhandledVeto() && context.getRecallAfterVetoCount() < 1) {
+                executable.add(SEARCH_PRODUCTS);
+            } else if (!context.getAgentResults().containsKey(RecommendationPipelineExecutor.CROSS_BORDER_RECALL_RESULT)
+                    && context.getProfile() != null) {
+                executable.add(SEARCH_PRODUCTS);
+            }
+            if (context.getRawProducts() != null && context.getRankedProducts() == null
+                    && !context.hasUnhandledVeto()) executable.add(RERANK);
+        } else if (agent == AgentId.INVENTORY) {
+            if (context.getCampaignConstraints() == null) executable.add(LOAD_CAMPAIGN_CONSTRAINTS);
+            if (context.getRawProducts() != null
+                    && !context.getAgentResults().containsKey(RecommendationPipelineExecutor.FULFILLMENT_RESULT)) {
+                executable.add(CHECK_FULFILLMENT);
+            }
+            if (context.getRawProducts() != null
+                    && !context.getAgentResults().containsKey(RecommendationPipelineExecutor.FULFILLMENT_INVENTORY_RESULT)) {
+                executable.add(CHECK_INVENTORY);
+            }
+        } else if (agent == AgentId.COPY && context.getFinalProducts() != null) {
+            if (!context.getAgentResults().containsKey(RecommendationPipelineExecutor.LOCALIZED_MARKETING_COPY_RESULT)) {
+                executable.add(GENERATE_LOCALIZED_COPY);
+            }
+            if (!context.getAgentResults().containsKey(RecommendationPipelineExecutor.RETENTION_MARKETING_COPY_RESULT)) {
                 executable.add(GENERATE_RETENTION_COPY);
             }
         }
