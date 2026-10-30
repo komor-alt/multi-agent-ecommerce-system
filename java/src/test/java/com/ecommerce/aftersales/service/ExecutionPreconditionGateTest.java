@@ -19,6 +19,15 @@ class ExecutionPreconditionGateTest {
     }
 
     @Test
+    void rejectsPartiallyRefundedOrderBeforeAnotherCompensation() {
+        ExecutionPreconditionGate.ValidationResult result = gate.validate(
+                order(true, "IN_TRANSIT", "PARTIALLY_REFUNDED"));
+
+        assertThat(result.allowed()).isFalse();
+        assertThat(result.reasonCode()).isEqualTo(ExecutionPreconditionGate.ORDER_ALREADY_REFUNDED);
+    }
+
+    @Test
     void acceptsPaidActiveOrder() {
         ExecutionPreconditionGate.ValidationResult result = gate.validate(order(true, "IN_TRANSIT", "NONE"));
 

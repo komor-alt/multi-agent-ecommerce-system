@@ -41,4 +41,24 @@ class LlmCallBudgetTest {
         assertNull(metrics.get("completionTokens"));
         assertNull(metrics.get("estimatedCost"));
     }
+
+    @Test
+    void sumsProviderUsageAndMarksPartialWhenSomeCallsOmitUsage() {
+        LlmCallBudget budget = new LlmCallBudget(2);
+        assertTrue(budget.reserve("supervisor", "call-1").acquired());
+        assertTrue(budget.reserve("final_decision", "call-2").acquired());
+        budget.recordTrace(new LlmCallBudget.CallTrace("supervisor", "provider", "model", 20,
+                "success", null, 11, 5, 16, "available", true));
+        budget.recordTrace(new LlmCallBudget.CallTrace("final_decision", "provider", "model", 30,
+                "success", null, null, null, null, "unavailable", true));
+
+        Map<String, Object> metrics = budget.snapshot();
+        assertEquals(2, metrics.get("providerCallCount"));
+        assertEquals(1, metrics.get("usageCallCount"));
+        assertEquals(11L, metrics.get("promptTokens"));
+        assertEquals(5L, metrics.get("completionTokens"));
+        assertEquals(16L, metrics.get("totalTokens"));
+        assertEquals("partial", metrics.get("usageStatus"));
+        assertEquals("provider_usage_missing_for_some_calls", metrics.get("usageUnavailableReason"));
+    }
 }

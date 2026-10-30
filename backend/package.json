@@ -7,7 +7,7 @@
     "start": "node dist/main.js",
     "start:dev": "nest start --watch",
     "typecheck": "tsc --noEmit",
-    "test:auth": "npm run build && node --test test/auth.test.cjs",
+    "test:auth": "npm run build && node --test test/auth.test.cjs test/agent-runs-sse.test.cjs",
     "prisma:generate": "prisma generate",
     "prisma:format": "prisma format --schema prisma/schema.prisma"
   },

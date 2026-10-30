@@ -67,6 +67,34 @@ public class RecommendationRuntimeStore {
         insertRun(normalized.getRunId(), normalized.getRequest(), normalized);
     }
 
+    /** Persist a bounded model scene inference so recovery and Run listings use the resolved scene. */
+    @Transactional
+    public void updateResolvedScene(String runId, RecommendationRequest request,
+                                    RecommendationExecutionLease lease) {
+        if (request == null || request.getScene() == null || request.getScene().isBlank()) {
+            throw new IllegalArgumentException("RECOMMENDATION_RESOLVED_SCENE_REQUIRED");
+        }
+        RecommendationRunEntity run = runRepository.findByIdForUpdate(runId)
+                .orElseThrow(() -> new IllegalArgumentException("RECOMMENDATION_RUN_NOT_FOUND"));
+        if (!"RUNNING".equals(run.getStatus())) throw new IllegalStateException("RECOMMENDATION_RUN_TERMINAL");
+        if (run.isRecoverable()) {
+            if (lease == null) throw new StaleExecutionLeaseException(runId);
+            lease.assertCurrent(run, RecommendationDatabaseClock.now(entityManager));
+        } else if (lease != null) {
+            throw new StaleExecutionLeaseException(runId);
+        }
+        run.setScene(request.getScene());
+        run.setRequestJson(writeJson(request));
+        if (run.getExecutionRequestJson() != null) {
+            ToolLoopRequest stored = readJson(run.getExecutionRequestJson(), ToolLoopRequest.class);
+            if (stored == null || stored.getRequest() == null) {
+                throw new IllegalStateException("RECOMMENDATION_RECOVERY_REQUEST_INVALID");
+            }
+            stored.getRequest().setScene(request.getScene());
+            run.setExecutionRequestJson(writeJson(stored));
+        }
+    }
+
     /** Avoid the insert/claim gap where a recovery scanner could take a synchronous HTTP request. */
     @Transactional
     public RecommendationExecutionLease startAndClaimRecoverableRun(ToolLoopRequest normalized, String ownerId) {

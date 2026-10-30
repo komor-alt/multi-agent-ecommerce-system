@@ -27,7 +27,7 @@ public class SpecialistAgentTeam {
     private final RecommendationPipelineExecutor pipelineExecutor;
     private final ScenePathEnforcer scenePathEnforcer;
     private final RecommendationModeResolver modeResolver;
-    private final SpecialistPlannerClient plannerClient;
+    private final TracedRecommendationLlmClient llmClient;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Map<AgentId, SpecialistDefinition> definitions = new EnumMap<>(AgentId.class);
 
@@ -35,11 +35,11 @@ public class SpecialistAgentTeam {
             RecommendationPipelineExecutor pipelineExecutor,
             ScenePathEnforcer scenePathEnforcer,
             RecommendationModeResolver modeResolver,
-            SpecialistPlannerClient plannerClient) {
+            TracedRecommendationLlmClient llmClient) {
         this.pipelineExecutor = pipelineExecutor;
         this.scenePathEnforcer = scenePathEnforcer;
         this.modeResolver = modeResolver;
-        this.plannerClient = plannerClient;
+        this.llmClient = llmClient;
         definitions.put(AgentId.PROFILE, new SpecialistDefinition(
                 "Build trustworthy user and recent-order context."));
         definitions.put(AgentId.PRODUCT, new SpecialistDefinition(
@@ -197,9 +197,7 @@ public class SpecialistAgentTeam {
                 List<String> candidates,
                 int localStep) {
             String fallback = candidates.get(0);
-            if (!modeResolver.llmEnabled() || plannerClient == null || blackboard.getLlmBudget() == null
-                    || !blackboard.getLlmBudget().tryAcquire("specialist_" + id.name().toLowerCase(),
-                    blackboard.getRunId() + ":" + id + ":" + task.taskId() + ":" + localStep)) {
+            if (!modeResolver.llmEnabled() || llmClient == null || candidates.size() < 2) {
                 return fallback;
             }
             try {
@@ -214,20 +212,46 @@ public class SpecialistAgentTeam {
                 } else {
                     state.put("contextSnapshot", task.contextSnapshot());
                 }
-                String raw = plannerClient.complete(
-                        "You are the " + id + " specialist. " + roleGoal
-                                + " Choose one candidate action. Return JSON only: {\"action\":\"...\",\"thought\":\"...\"}.",
-                        objectMapper.writeValueAsString(state));
-                String cleaned = raw == null ? "" : raw.trim();
-                if (cleaned.startsWith("```")) {
-                    cleaned = cleaned.substring(cleaned.indexOf('\n') + 1, cleaned.lastIndexOf("```"));
+                String serializedState;
+                try {
+                    serializedState = objectMapper.writeValueAsString(state);
+                } catch (com.fasterxml.jackson.core.JsonProcessingException serializationFailure) {
+                    llmClient.recordLocalFallback("specialist_" + id.name().toLowerCase(),
+                            blackboard.getLlmBudget(), "planner_input_serialization_failed");
+                    return fallback;
                 }
-                Map<String, Object> parsed = objectMapper.readValue(cleaned, new TypeReference<>() {});
-                String proposed = scenePathEnforcer.canonicalTool(String.valueOf(parsed.getOrDefault("action", "")));
-                return candidates.contains(proposed) ? proposed : fallback;
-            } catch (Exception ignored) {
+                return llmClient.complete("specialist_" + id.name().toLowerCase(),
+                        "You are the " + id + " specialist. " + roleGoal
+                                + " Choose one candidate action. Return JSON only: {\"action\":\"...\"}.",
+                        serializedState, blackboard.getLlmBudget(),
+                        blackboard.getRunId() + ":" + id + ":" + task.taskId() + ":" + localStep,
+                        raw -> {
+                            String cleaned = stripFence(raw);
+                            Map<String, Object> parsed = objectMapper.readValue(cleaned, new TypeReference<>() {});
+                            String proposed = scenePathEnforcer.canonicalTool(
+                                    String.valueOf(parsed.getOrDefault("action", "")));
+                            if (!candidates.contains(proposed)) {
+                                throw new TracedRecommendationLlmClient.OutputValidationException(
+                                        "tool_outside_candidate_set");
+                            }
+                            return proposed;
+                        });
+            } catch (TracedRecommendationLlmClient.TracedLlmException ignored) {
                 return fallback;
             }
+        }
+
+        private String stripFence(String raw) {
+            String cleaned = raw == null ? "" : raw.trim();
+            if (cleaned.startsWith("```")) {
+                int firstLine = cleaned.indexOf('\n');
+                int lastFence = cleaned.lastIndexOf("```");
+                if (firstLine < 0 || lastFence <= firstLine) {
+                    throw new TracedRecommendationLlmClient.OutputValidationException("invalid_json");
+                }
+                cleaned = cleaned.substring(firstLine + 1, lastFence).trim();
+            }
+            return cleaned;
         }
     }
 
@@ -269,11 +293,6 @@ public class SpecialistAgentTeam {
             return new SpecialistRun(agent, false, reason, List.copyOf(thoughts), List.copyOf(calls),
                     List.copyOf(observations), List.copyOf(evidences));
         }
-    }
-
-    @FunctionalInterface
-    public interface SpecialistPlannerClient {
-        String complete(String systemPrompt, String userPrompt);
     }
 
     public interface SpecialistRunListener {

@@ -6,7 +6,7 @@ Frontend connects only to NestJS:
 GET /api/v1/agent-runs/:runId/stream
 ```
 
-Python Agent Service events are normalized by NestJS before storage and push.
+Java Recommendation Agent events are normalized by NestJS before storage and push.
 
 ```json
 {
@@ -43,8 +43,9 @@ Python Agent Service events are normalized by NestJS before storage and push.
 ## Reliability Rules
 
 - `sequence` is unique within one `runId`.
-- Client sends `Last-Event-ID` on reconnect.
-- Server replays events with sequence greater than the last acknowledged event.
+- Client sends the last SSE event ID in `Last-Event-ID`; Gateway also accepts `?lastEventId=` for clients that cannot set headers.
+- Gateway resolves the event ID to its run-local sequence and replays only later events from PostgreSQL.
+- Gateway subscribes to live delivery before reading history, buffers events during the query, and de-duplicates the merge by sequence/event ID.
 - Heartbeat events keep long-running connections alive.
-- Duplicate `eventId` values are ignored by the frontend.
-- Completed runs are loaded from `/agent-runs/:runId/events` before opening SSE.
+- A terminal run replays its remaining events and closes the stream instead of retaining an idle heartbeat subscription.
+- The frontend may still de-duplicate `eventId` defensively.

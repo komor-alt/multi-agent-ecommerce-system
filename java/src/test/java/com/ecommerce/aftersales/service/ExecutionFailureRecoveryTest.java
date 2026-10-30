@@ -73,6 +73,24 @@ class ExecutionFailureRecoveryTest {
     }
 
     @Test
+    void unsupportedExternalReconciliationIsDeadLetteredWithStableReasonAndNoEffect() {
+        FaultConnector connector = new FaultConnector() {
+            @Override
+            public Optional<AfterSalesTypes.ExecutionResult> findExecution(ExecutionCommand command) {
+                throw new ConnectorException(ConnectorException.Category.TERMINAL,
+                        "SHOPIFY_EXECUTION_RECONCILIATION_UNSUPPORTED_FAIL_CLOSED");
+            }
+        };
+        Fixture f = new Fixture(connector);
+
+        f.service.executeAsync(f.job.getId());
+
+        assertThat(f.job.getStatus()).isEqualTo(AfterSalesTypes.ExecutionStatus.DEAD_LETTER);
+        assertThat(f.job.getLastError()).isEqualTo("SHOPIFY_EXECUTION_RECONCILIATION_UNSUPPORTED_FAIL_CLOSED");
+        assertThat(connector.committedEffectCount()).isZero();
+    }
+
+    @Test
     void repeatedExecutionAndApprovalReuseTheExistingBusinessCommand() {
         FaultConnector connector = new FaultConnector();
         Fixture f = new Fixture(connector);

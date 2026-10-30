@@ -6,6 +6,7 @@ import com.ecommerce.model.RecommendationRequest;
 import com.ecommerce.model.UserProfile;
 import com.ecommerce.service.LlmCallBudget;
 import com.ecommerce.service.RecommendationModeResolver;
+import com.ecommerce.service.TracedRecommendationLlmClient;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.ai.chat.client.ChatClient;
@@ -15,6 +16,7 @@ import org.springframework.stereotype.Component;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -23,7 +25,7 @@ import java.util.stream.Collectors;
 @Component
 public class MarketingCopyAgent extends BaseAgent {
 
-    private final ChatClient chatClient;
+    private final TracedRecommendationLlmClient llmClient;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final RecommendationModeResolver modeResolver;
 
@@ -39,13 +41,20 @@ public class MarketingCopyAgent extends BaseAgent {
     private static final List<String> FORBIDDEN_EN = List.of("best ever", "number one", "guaranteed", "100%", "forever", "miracle");
 
     public MarketingCopyAgent(ChatClient.Builder chatClientBuilder) {
-        this(chatClientBuilder, new RecommendationModeResolver("RULES", ""));
+        this(chatClientBuilder, new RecommendationModeResolver("RULES", ""),
+                new TracedRecommendationLlmClient(chatClientBuilder, "test", "unknown", 15000));
+    }
+
+    public MarketingCopyAgent(ChatClient.Builder chatClientBuilder, RecommendationModeResolver modeResolver) {
+        this(chatClientBuilder, modeResolver,
+                new TracedRecommendationLlmClient(chatClientBuilder, "test", "unknown", 15000));
     }
 
     @Autowired
-    public MarketingCopyAgent(ChatClient.Builder chatClientBuilder, RecommendationModeResolver modeResolver) {
+    public MarketingCopyAgent(ChatClient.Builder chatClientBuilder, RecommendationModeResolver modeResolver,
+                              TracedRecommendationLlmClient llmClient) {
         super("marketing_copy", 10.0, 1);
-        this.chatClient = chatClientBuilder.build();
+        this.llmClient = llmClient;
         this.modeResolver = modeResolver;
     }
 
@@ -71,23 +80,19 @@ public class MarketingCopyAgent extends BaseAgent {
                 .collect(Collectors.joining("\n"));
 
         List<Map<String, String>> copies;
-        try {
-            if (!modeResolver.llmEnabled()) throw new IllegalStateException("rules_mode");
+        String fallbackReason = null;
+        if (modeResolver.llmEnabled()) {
+            try {
             LlmCallBudget budget = params.get("llmBudget") instanceof LlmCallBudget value ? value : null;
-            if (budget == null || !budget.tryAcquire(name, String.valueOf(params.getOrDefault("llmFingerprint", request.getUserId())))) {
-                throw new IllegalStateException("llm_budget_exhausted");
-            }
-            String response = chatClient.prompt()
-                    .system(systemPrompt)
-                    .user("Products:\n" + productInfo)
-                    .call()
-                    .content();
-            copies = parseCopies(response);
-            if (copies.isEmpty()) {
+            Set<String> selectedIds = products.stream().map(Product::getProductId).collect(Collectors.toSet());
+            copies = llmClient.complete(name, systemPrompt, "Products:\n" + productInfo, budget,
+                    String.valueOf(params.getOrDefault("llmFingerprint", request.getUserId())),
+                    raw -> parseCopies(raw, selectedIds));
+            } catch (TracedRecommendationLlmClient.TracedLlmException failure) {
+                fallbackReason = failure.reason();
                 copies = fallbackCopies(products, request);
             }
-        } catch (Exception e) {
-            log.warn("Localized copy LLM failed, using template fallback: {}", e.getMessage());
+        } else {
             copies = fallbackCopies(products, request);
         }
 
@@ -100,6 +105,8 @@ public class MarketingCopyAgent extends BaseAgent {
         data.put("copies", copies);
         data.put("template_used", templateKey);
         data.put("copy_locale", request.localeOrDefault());
+        data.put("copy_source", fallbackReason == null && modeResolver.llmEnabled() ? "llm" : "template_fallback");
+        if (fallbackReason != null) data.put("llm_fallback_reason", fallbackReason);
         data.put("cross_border_context", Map.of(
                 "country", request.countryOrDefault(),
                 "locale", request.localeOrDefault(),
@@ -145,18 +152,31 @@ public class MarketingCopyAgent extends BaseAgent {
         return "active";
     }
 
-    private List<Map<String, String>> parseCopies(String raw) {
-        try {
-            String cleaned = raw.trim();
-            if (cleaned.startsWith("```")) {
-                cleaned = cleaned.substring(cleaned.indexOf('\n') + 1);
-                cleaned = cleaned.substring(0, cleaned.lastIndexOf("```"));
+    private List<Map<String, String>> parseCopies(String raw, Set<String> selectedIds) throws Exception {
+        String cleaned = raw == null ? "" : raw.trim();
+        if (cleaned.startsWith("```")) {
+            int firstLine = cleaned.indexOf('\n');
+            int lastFence = cleaned.lastIndexOf("```");
+            if (firstLine < 0 || lastFence <= firstLine) {
+                throw new TracedRecommendationLlmClient.OutputValidationException("invalid_json");
             }
-            return objectMapper.readValue(cleaned, new TypeReference<>() {});
-        } catch (Exception e) {
-            log.warn("Failed to parse copies: {}", e.getMessage());
-            return List.of();
+            cleaned = cleaned.substring(firstLine + 1, lastFence).trim();
         }
+        List<Map<String, String>> parsed = objectMapper.readValue(cleaned, new TypeReference<>() {});
+        if (parsed == null || parsed.isEmpty()) {
+            throw new TracedRecommendationLlmClient.OutputValidationException("empty_copy_output");
+        }
+        for (Map<String, String> item : parsed) {
+            String id = item == null ? null : item.get("product_id");
+            String copy = item == null ? null : item.get("copy");
+            if (id == null || !selectedIds.contains(id)) {
+                throw new TracedRecommendationLlmClient.OutputValidationException("product_outside_final_selection");
+            }
+            if (copy == null || copy.isBlank() || copy.length() > 1000) {
+                throw new TracedRecommendationLlmClient.OutputValidationException("invalid_copy_text");
+            }
+        }
+        return parsed;
     }
 
     private List<Map<String, String>> fallbackCopies(List<Product> products, RecommendationRequest request) {

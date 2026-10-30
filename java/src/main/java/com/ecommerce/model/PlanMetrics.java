@@ -17,8 +17,10 @@ public class PlanMetrics {
     private double latencyMs;
     /** Actual model reservations made by this run; provider token usage may be unavailable. */
     private int llmCallCount;
+    private int llmFallbackCount;
     private Integer promptTokens;
     private Integer completionTokens;
+    private Integer totalTokens;
     private Double estimatedCost;
     private String usageStatus;
 }

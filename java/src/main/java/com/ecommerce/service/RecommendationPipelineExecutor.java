@@ -123,9 +123,15 @@ public class RecommendationPipelineExecutor {
 
     public CompletableFuture<AgentResult> productRecallAsync(
             RecommendationRequest request, LlmCallBudget budget) {
+        return productRecallAsync(request, budget, Set.of());
+    }
+
+    public CompletableFuture<AgentResult> productRecallAsync(
+            RecommendationRequest request, LlmCallBudget budget, Set<String> excludedProductIds) {
         Map<String, Object> params = new HashMap<>();
         params.put("request", request);
         params.put("numItems", request.getNumItems() * 2);
+        params.put("excludedProductIds", excludedProductIds == null ? Set.of() : Set.copyOf(excludedProductIds));
         addLlmBudget(params, budget, "product_recall", request);
         return productRecAgent.runAsync(params, agentExecutor);
     }
@@ -273,9 +279,13 @@ public class RecommendationPipelineExecutor {
                     base.put("campaignId", String.valueOf(context.getRequest().getContext() == null
                             ? "default" : context.getRequest().getContext().getOrDefault("campaign_id", "default")));
             case SEARCH_PRODUCTS -> {
-                    base.put("numItems", context.getRequest().getNumItems() * 2);
-                    base.put("vetoRound", context.getRecallAfterVetoCount());
-                    base.put("vetoedProductIds", context.vetoedProductIds());
+                boolean revision = context.hasUnhandledVeto() && context.getRecallAfterVetoCount() < 1;
+                List<String> excluded = context.vetoedProductIds().stream().sorted().toList();
+                base.put("numItems", context.getRequest().getNumItems() * 2);
+                base.put("vetoRound", context.getRecallAfterVetoCount() + (revision ? 1 : 0));
+                base.put("vetoedProductIds", excluded);
+                base.put("excludedProductIds", excluded);
+                base.put("candidateVersion", context.getCandidateVersion());
             }
             case CHECK_FULFILLMENT -> {
                 base.put("candidateCount", context.getRawProducts() == null ? 0 : context.getRawProducts().size());
@@ -484,19 +494,25 @@ public class RecommendationPipelineExecutor {
     }
 
     private ToolObservation searchProducts(RecommendationPipelineState context) {
+        boolean revision = context.hasUnhandledVeto() && context.getRecallAfterVetoCount() < 1;
+        int recallAttempt = context.getRecallAfterVetoCount() + (revision ? 1 : 0);
+        Set<String> excluded = context.vetoedProductIds();
+        Set<String> previousCandidateIds = context.getRawProducts() == null ? Set.of()
+                : context.getRawProducts().stream().map(Product::getProductId)
+                .collect(Collectors.toSet());
         AgentResult result;
         String source;
         boolean vectorUsed = false;
         String fallbackReason = null;
         if (recommendationDataService == null) {
-            result = context.await(productRecallAsync(context.getRequest(), context.getLlmBudget()));
+            result = context.await(productRecallAsync(context.getRequest(), context.getLlmBudget(), excluded));
             source = "legacy_connector";
             fallbackReason = "postgresql_data_service_unavailable";
         } else {
             Set<String> categories = context.getProfile() == null || context.getProfile().getPreferredCategories() == null
                     ? Set.of() : new HashSet<>(context.getProfile().getPreferredCategories());
             RecommendationDataService.ProductSearchResult recalled = recommendationDataService.searchProductsWithSource(
-                    context.getRequest(), categories, Math.max(context.getRequest().getNumItems() * 2, 1));
+                    context.getRequest(), categories, Math.max(context.getRequest().getNumItems() * 2, 1), excluded);
             source = recalled.source();
             vectorUsed = recalled.vectorUsed();
             fallbackReason = recalled.fallbackReason();
@@ -509,9 +525,11 @@ public class RecommendationPipelineExecutor {
                     .data(data).confidence(vectorUsed ? 0.9 : 0.82).build();
         }
         ensureSuccess(result);
-        if (context.hasUnhandledVeto()) {
+        if (revision) {
             context.incrementRecallAfterVetoCount();
             context.clearAfterRerecall();
+            context.markVetoesHandled();
+        } else if (context.hasUnhandledVeto()) {
             context.markVetoesHandled();
         }
         context.putAgentResult(CROSS_BORDER_RECALL_RESULT, result);
@@ -527,6 +545,12 @@ public class RecommendationPipelineExecutor {
         context.addEvidenceIds(evidenceIds);
         Map<String, Object> observationData = new LinkedHashMap<>();
         observationData.put("productIds", filtered.stream().map(Product::getProductId).toList());
+        observationData.put("excludedProductIds", excluded.stream().sorted().toList());
+        observationData.put("vetoedProductIds", excluded.stream().sorted().toList());
+        observationData.put("recallAttempt", recallAttempt);
+        observationData.put("candidateVersion", context.getCandidateVersion());
+        observationData.put("candidateSetChanged", !previousCandidateIds.equals(filtered.stream()
+                .map(Product::getProductId).collect(Collectors.toSet())));
         observationData.put("source", source);
         observationData.put("vector_used", vectorUsed);
         if (fallbackReason != null) observationData.put("fallback_reason", fallbackReason);
@@ -615,7 +639,10 @@ public class RecommendationPipelineExecutor {
             fulfillmentDetails = details;
         }
         ensureSuccess(result);
-        Set<String> availableIds = extractAvailableIds(result);
+        Set<String> checkedProductIds = products.stream().map(Product::getProductId).collect(Collectors.toSet());
+        Set<String> availableIds = extractAvailableIds(result).stream()
+                .filter(checkedProductIds::contains)
+                .collect(Collectors.toSet());
         if (!context.applyInventoryIfCurrent(candidateVersion, availableIds, fulfillmentDetails)) {
             throw new StaleAgentResultException(CHECK_INVENTORY, candidateVersion, context.getCandidateVersion());
         }
@@ -627,11 +654,16 @@ public class RecommendationPipelineExecutor {
                 .filter(id -> !availableIds.contains(id))
                 .distinct()
                 .toList();
+        int requestedCount = Math.max(0, context.getRequest().getNumItems());
+        boolean requestRevision = !rejected.isEmpty()
+                && availableIds.size() < requestedCount
+                && context.getRecallAfterVetoCount() < 1;
         if (!rejected.isEmpty()) {
             context.write(AgentId.INVENTORY, BlackboardField.VETOES, VetoRecord.builder()
                     .source(AgentId.INVENTORY)
                     .productIds(rejected)
                     .reason("inventory_unavailable")
+                    .handled(!requestRevision)
                     .build());
         }
         List<String> evidenceIds = available.stream()
@@ -640,6 +672,9 @@ public class RecommendationPipelineExecutor {
         Map<String, Object> observationData = new LinkedHashMap<>();
         observationData.put("availableProductIds", available);
         observationData.put("vetoedProductIds", rejected);
+        observationData.put("requestedCount", requestedCount);
+        observationData.put("revisionRequested", requestRevision);
+        observationData.put("vetoRound", context.getRecallAfterVetoCount());
         observationData.put("source", source);
         observationData.put("crossBorder", crossBorderState(context.getRequest()));
         return ToolObservation.builder().toolName(CHECK_INVENTORY)

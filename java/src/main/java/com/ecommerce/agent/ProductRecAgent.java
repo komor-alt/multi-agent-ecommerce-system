@@ -8,6 +8,7 @@ import com.ecommerce.model.RecommendationRequest;
 import com.ecommerce.model.UserProfile;
 import com.ecommerce.service.LlmCallBudget;
 import com.ecommerce.service.RecommendationModeResolver;
+import com.ecommerce.service.TracedRecommendationLlmClient;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.ai.chat.client.ChatClient;
@@ -26,27 +27,37 @@ import java.util.stream.Collectors;
 @Component
 public class ProductRecAgent extends BaseAgent {
 
-    private final ChatClient chatClient;
+    private final TracedRecommendationLlmClient llmClient;
     private final List<CommerceConnector> connectors;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final RecommendationModeResolver modeResolver;
     private final RecommendationDataService recommendationDataService;
 
     public ProductRecAgent(ChatClient.Builder chatClientBuilder, List<CommerceConnector> connectors) {
-        this(chatClientBuilder, connectors, new RecommendationModeResolver("RULES", ""), null);
+        this(chatClientBuilder, connectors, new RecommendationModeResolver("RULES", ""), null,
+                new TracedRecommendationLlmClient(chatClientBuilder, "test", "unknown", 15000));
     }
 
     public ProductRecAgent(ChatClient.Builder chatClientBuilder, List<CommerceConnector> connectors,
                            RecommendationModeResolver modeResolver) {
-        this(chatClientBuilder, connectors, modeResolver, null);
+        this(chatClientBuilder, connectors, modeResolver, null,
+                new TracedRecommendationLlmClient(chatClientBuilder, "test", "unknown", 15000));
+    }
+
+    public ProductRecAgent(ChatClient.Builder chatClientBuilder, List<CommerceConnector> connectors,
+                           RecommendationModeResolver modeResolver,
+                           RecommendationDataService recommendationDataService) {
+        this(chatClientBuilder, connectors, modeResolver, recommendationDataService,
+                new TracedRecommendationLlmClient(chatClientBuilder, "test", "unknown", 15000));
     }
 
     @Autowired
     public ProductRecAgent(ChatClient.Builder chatClientBuilder, List<CommerceConnector> connectors,
                            RecommendationModeResolver modeResolver,
-                           RecommendationDataService recommendationDataService) {
+                           RecommendationDataService recommendationDataService,
+                           TracedRecommendationLlmClient llmClient) {
         super("product_rec", 8.0, 1);
-        this.chatClient = chatClientBuilder.build();
+        this.llmClient = llmClient;
         this.connectors = connectors == null ? List.of() : connectors;
         this.modeResolver = modeResolver;
         this.recommendationDataService = recommendationDataService;
@@ -58,6 +69,8 @@ public class ProductRecAgent extends BaseAgent {
         RecommendationRequest request = requestFrom(params);
         UserProfile profile = (UserProfile) params.get("userProfile");
         int numItems = (int) params.getOrDefault("numItems", 10);
+        Set<String> excludedProductIds = stringIds(params.getOrDefault(
+                "excludedProductIds", params.get("vetoedProductIds")));
 
         RecallResult recalled;
         List<Product> candidates;
@@ -65,9 +78,12 @@ public class ProductRecAgent extends BaseAgent {
             candidates = (List<Product>) raw;
             recalled = new RecallResult(candidates, "pipeline_candidates", false, null);
         } else {
-            recalled = recall(request, profile, Math.max(numItems * 2, numItems));
+            recalled = recall(request, profile, Math.max(numItems * 2, numItems), excludedProductIds);
             candidates = recalled.products();
         }
+        candidates = candidates.stream()
+                .filter(product -> !excludedProductIds.contains(product.getProductId()))
+                .toList();
 
         List<String> blockedIds = candidates.stream()
                 .filter(product -> !matchesCrossBorder(product, request) || product.getStock() <= 0)
@@ -115,15 +131,17 @@ public class ProductRecAgent extends BaseAgent {
                 .build();
     }
 
-    private RecallResult recall(RecommendationRequest request, UserProfile profile, int limit) {
+    private RecallResult recall(RecommendationRequest request, UserProfile profile, int limit,
+                                Set<String> excludedProductIds) {
         if (recommendationDataService != null) {
             Set<String> categories = profile == null || profile.getPreferredCategories() == null
                     ? Set.of() : new HashSet<>(profile.getPreferredCategories());
             RecommendationDataService.ProductSearchResult result = recommendationDataService.searchProductsWithSource(
-                    request, categories, limit);
+                    request, categories, limit, excludedProductIds);
             return new RecallResult(result.products(), result.source(), result.vectorUsed(), result.fallbackReason());
         }
-        return new RecallResult(selectConnector(request).searchProducts(request, profile, limit),
+        int connectorLimit = (int) Math.min(Integer.MAX_VALUE, (long) limit + excludedProductIds.size());
+        return new RecallResult(selectConnector(request).searchProducts(request, profile, connectorLimit),
                 "legacy_connector", false, "postgresql_data_service_unavailable");
     }
 
@@ -135,9 +153,6 @@ public class ProductRecAgent extends BaseAgent {
                 return candidates.stream().map(Product::getProductId).limit(numItems).collect(Collectors.toList());
             }
             LlmCallBudget budget = params.get("llmBudget") instanceof LlmCallBudget value ? value : null;
-            if (budget == null || !budget.tryAcquire(name, String.valueOf(params.getOrDefault("llmFingerprint", request.getUserId())))) {
-                return candidates.stream().map(Product::getProductId).limit(numItems).collect(Collectors.toList());
-            }
             String prompt = String.format(
                     "Rerank products for a cross-border ecommerce recommendation.\n" +
                             "User categories: %s, price range: %.0f-%.0f.\n" +
@@ -152,19 +167,38 @@ public class ProductRecAgent extends BaseAgent {
                                     p.getWarehouseRegion(), p.getDeliveryDays(), p.getPlatform(), p.getSupportedRegions(),
                                     p.isCrossBorderEligible(), p.getStock()))
                             .collect(Collectors.joining("\n")));
-            String response = chatClient.prompt().user(prompt).call().content();
-            String cleaned = response.trim();
-            if (cleaned.startsWith("```")) {
-                cleaned = cleaned.substring(cleaned.indexOf('\n') + 1);
-                cleaned = cleaned.substring(0, cleaned.lastIndexOf("```"));
-            }
-            List<String> ids = objectMapper.readValue(cleaned, new TypeReference<>() {});
             Set<String> candidateIds = candidates.stream().map(Product::getProductId).collect(Collectors.toSet());
-            return ids.stream().filter(candidateIds::contains).limit(numItems).collect(Collectors.toList());
+            return llmClient.complete("product_rerank", "Return JSON only. Choose only supplied product IDs.", prompt,
+                    budget, String.valueOf(params.getOrDefault("llmFingerprint", request.getUserId())), raw -> {
+                        List<String> ids = objectMapper.readValue(stripFence(raw), new TypeReference<>() {});
+                        if (ids == null || ids.isEmpty()) {
+                            throw new TracedRecommendationLlmClient.OutputValidationException("empty_rerank_selection");
+                        }
+                        if (ids.stream().anyMatch(id -> id == null || !candidateIds.contains(id))) {
+                            throw new TracedRecommendationLlmClient.OutputValidationException("product_outside_candidate_set");
+                        }
+                        return ids.stream().distinct().limit(numItems).collect(Collectors.toList());
+                    });
+        } catch (TracedRecommendationLlmClient.TracedLlmException e) {
+            log.warn("LLM rerank fell back; reason={}", e.reason());
+            return candidates.stream().map(Product::getProductId).limit(numItems).collect(Collectors.toList());
         } catch (Exception e) {
-            log.warn("LLM rerank failed, using safe candidate order: {}", e.getMessage());
+            log.warn("LLM rerank failed; using safe candidate order");
             return candidates.stream().map(Product::getProductId).limit(numItems).collect(Collectors.toList());
         }
+    }
+
+    private String stripFence(String raw) {
+        String cleaned = raw == null ? "" : raw.trim();
+        if (cleaned.startsWith("```")) {
+            int firstLine = cleaned.indexOf('\n');
+            int lastFence = cleaned.lastIndexOf("```");
+            if (firstLine < 0 || lastFence <= firstLine) {
+                throw new TracedRecommendationLlmClient.OutputValidationException("invalid_json");
+            }
+            return cleaned.substring(firstLine + 1, lastFence).trim();
+        }
+        return cleaned;
     }
 
     private CommerceConnector selectConnector(RecommendationRequest request) {
@@ -204,6 +238,15 @@ public class ProductRecAgent extends BaseAgent {
                 "platform", request.platformOrDefault(), "region", request.regionOrDefault(),
                 "country", request.countryOrDefault(), "locale", request.localeOrDefault(),
                 "currency", request.currencyOrDefault());
+    }
+
+    private Set<String> stringIds(Object value) {
+        if (!(value instanceof Iterable<?> values)) return Set.of();
+        Set<String> ids = new HashSet<>();
+        for (Object item : values) {
+            if (item != null && !String.valueOf(item).isBlank()) ids.add(String.valueOf(item));
+        }
+        return Set.copyOf(ids);
     }
 
     private record RecallResult(List<Product> products, String source, boolean vectorUsed, String fallbackReason) {

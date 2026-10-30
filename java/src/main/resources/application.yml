@@ -148,6 +148,8 @@ agent:
     mode: ${ECOM_RECOMMEND_MODE:RULES}
     live-enabled: ${ECOM_RECOMMEND_LIVE_ENABLED:false}
     max-llm-calls: ${ECOM_RECOMMEND_MAX_LLM_CALLS:0}
+    provider: ${ECOM_RECOMMEND_LLM_PROVIDER:openai-compatible}
+    llm-timeout-ms: ${ECOM_RECOMMEND_LLM_TIMEOUT_MS:15000}
   supervisor:
     # Shared per-run budget for supervisor/specialist planning and LLM-backed tools.
     max-llm-calls: ${ECOM_SUPERVISOR_MAX_LLM_CALLS:${ECOM_RECOMMEND_MAX_LLM_CALLS:0}}
@@ -161,6 +163,16 @@ agent:
     live-enabled: ${ECOM_EMBEDDING_LIVE_ENABLED:false}
     max-calls: ${ECOM_EMBEDDING_MAX_CALLS:0}
   aftersales:
+    shopify:
+      # Mock remains the only default. Shopify mode is read-only and requires its own credentials.
+      connector: ${ECOM_AFTERSALES_CONNECTOR:mock}
+      shop-domain: ${ECOM_SHOPIFY_SHOP_DOMAIN:}
+      access-token: ${ECOM_SHOPIFY_ADMIN_ACCESS_TOKEN:}
+      api-version: ${ECOM_SHOPIFY_API_VERSION:2026-10}
+      connect-timeout-ms: ${ECOM_SHOPIFY_CONNECT_TIMEOUT_MS:2000}
+      read-timeout-ms: ${ECOM_SHOPIFY_READ_TIMEOUT_MS:5000}
+      write-enabled: ${ECOM_SHOPIFY_WRITE_ENABLED:false}
+      allowed-write-actions: ${ECOM_SHOPIFY_ALLOWED_WRITE_ACTIONS:}
     # Shared per-run live-model budget; zero keeps aftersales cost-free by default.
     max-llm-calls: ${ECOM_AFTERSALES_MAX_LLM_CALLS:0}
     demo-step-delay-ms: ${ECOM_AFTERSALES_STEP_DELAY_MS:0}

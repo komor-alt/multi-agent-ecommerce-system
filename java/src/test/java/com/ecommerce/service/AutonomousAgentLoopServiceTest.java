@@ -31,6 +31,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -228,9 +229,31 @@ class AutonomousAgentLoopServiceTest {
         assertThat(response.getRunId()).isEqualTo("gateway-run-123");
         assertThat(events).extracting(AgentRunEvent::getName)
                 .contains("run.started", "agent.assigned", "planner.decision", "tool.started", "tool.completed", "observation", "run.completed");
+        assertThat(events.get(0).getName()).isEqualTo("run.started");
         assertThat(events).allMatch(event -> "gateway-run-123".equals(event.getRequestId()));
         assertThat(events).extracting(AgentRunEvent::getSequence).isSorted().doesNotHaveDuplicates();
         assertThat(events.get(events.size() - 1).getData()).containsKeys("final_answer", "metrics");
+    }
+
+    @Test
+    void failedToolTraceIncludesStructuredFailureReason() {
+        TestFixture fixture = new TestFixture();
+        when(fixture.userProfileAgent.runAsync(anyMap(), any(Executor.class)))
+                .thenReturn(CompletableFuture.completedFuture(AgentResult.builder()
+                        .agentName("user_profile").success(false)
+                        .error("profile_backend_unavailable").build()));
+        List<AgentRunEvent> events = new ArrayList<>();
+
+        AgentLoopResponse response = fixture.service().run(ToolLoopRequest.builder()
+                .request(RecommendationRequest.builder().userId("user_001").numItems(1).build())
+                .build(), events::add);
+
+        assertThat(response.getStatus()).isEqualTo("failed");
+        assertThat(response.getStopReason()).isEqualTo("tool_failed");
+        assertThat(events).filteredOn(event -> "tool.failed".equals(event.getName()))
+                .singleElement().satisfies(event -> assertThat(event.getData())
+                        .containsEntry("failureReason", "profile_backend_unavailable")
+                        .containsKeys("tool", "agent", "latencyMs"));
     }
     @Test
     void blocksWhenPlannerSelectsToolOutsideWhitelist() {
@@ -298,9 +321,9 @@ class AutonomousAgentLoopServiceTest {
         assertThat(response.getStatus()).isEqualTo("completed");
         assertThat(llmCalls.get()).isEqualTo(0);
         assertThat(response.getLlmMetrics().get("llmCallCount")).isEqualTo(0);
-        // Parallel actions are selected by the server dependency planner, so they do not
-        // spend or probe the LLM budget. Only genuinely model-plannable boundaries count.
-        assertThat(response.getLlmMetrics().get("budgetBlockedCalls")).isEqualTo(5);
+        // Parallel actions do not probe the model; the blocked attempts are Supervisor
+        // decisions plus the final business-decision generation.
+        assertThat(response.getLlmMetrics().get("budgetBlockedCalls")).isEqualTo(6);
     }
 
     @Test
@@ -335,6 +358,94 @@ class AutonomousAgentLoopServiceTest {
                 .extracting(event -> String.valueOf(event.getData().get("productIds")))
                 .asString()
                 .contains("P_LOW");
+
+        List<AgentRunEvent> searches = events.stream()
+                .filter(event -> "tool.started".equals(event.getName()))
+                .filter(event -> "search_products".equals(event.getData().get("tool")))
+                .toList();
+        assertThat(searches).hasSize(2);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> secondSearchArguments =
+                (Map<String, Object>) searches.get(1).getData().get("arguments");
+        assertThat(secondSearchArguments.get("excludedProductIds")).isEqualTo(List.of("P_LOW"));
+        assertThat(secondSearchArguments.get("vetoedProductIds")).isEqualTo(List.of("P_LOW"));
+        assertThat(response.getObservations().stream()
+                .filter(observation -> "search_products".equals(observation.getToolName()))
+                .map(observation -> observation.getData().get("excludedProductIds")))
+                .containsExactly(List.of(), List.of("P_LOW"));
+    }
+
+    @Test
+    void sufficientAvailableCandidatesDoNotTriggerARevision() {
+        TestFixture fixture = new TestFixture();
+        Product available = fixture.product("P001", "Available phone");
+        Product unavailable = fixture.product("P_LOW", "Unavailable phone");
+        fixture.recallThen(List.of(available, unavailable), List.of(available, unavailable), List.of(available));
+        fixture.inventoryThen(List.of("P001"), List.of());
+        List<AgentRunEvent> events = new ArrayList<>();
+
+        AgentLoopResponse response = fixture.service().run(ToolLoopRequest.builder()
+                .request(RecommendationRequest.builder().userId("user_001").numItems(1).build())
+                .build(), events::add);
+
+        assertThat(response.getStatus()).isEqualTo("completed");
+        assertThat(response.getToolCalls()).extracting("toolName").filteredOn("search_products"::equals)
+                .hasSize(1);
+        @SuppressWarnings("unchecked")
+        List<AgentMessage> messages = (List<AgentMessage>) response.getLlmMetrics().get("collaborationMessages");
+        assertThat(messages).extracting(AgentMessage::getType).doesNotContain(AgentMessageType.REQUEST_REVISION);
+        assertThat(events.stream().filter(event -> "agent.vetoed".equals(event.getName())))
+                .singleElement().satisfies(event -> assertThat(event.getData().get("revisionRequested")).isEqualTo(false));
+        assertThat(response.getPlan().getProducts()).extracting("productId").containsExactly("P001");
+    }
+
+    @Test
+    void secondInventoryVetoIsTerminalAndReturnsNoEligibleProducts() {
+        TestFixture fixture = new TestFixture();
+        Product first = fixture.product("P001", "First unavailable phone");
+        Product second = fixture.product("P002", "Second unavailable phone");
+        Product third = fixture.product("P003", "Replacement unavailable phone");
+        AtomicInteger recallCalls = new AtomicInteger();
+        when(fixture.productRecAgent.runAsync(anyMap(), any(Executor.class))).thenAnswer(invocation -> {
+            Map<String, Object> arguments = invocation.getArgument(0);
+            if (arguments.containsKey("candidateProducts")) {
+                @SuppressWarnings("unchecked")
+                List<Product> candidates = (List<Product>) arguments.get("candidateProducts");
+                return CompletableFuture.completedFuture(TestFixture.productsResult(candidates));
+            }
+            int call = recallCalls.getAndIncrement();
+            return CompletableFuture.completedFuture(TestFixture.productsResult(
+                    call == 0 ? List.of(first, second) : List.of(first, second, third)));
+        });
+        when(fixture.inventoryAgent.runAsync(anyMap(), any(Executor.class)))
+                .thenReturn(CompletableFuture.completedFuture(TestFixture.inventoryResult(List.of())))
+                .thenReturn(CompletableFuture.completedFuture(TestFixture.inventoryResult(List.of())));
+
+        AgentLoopResponse response = fixture.service().run(ToolLoopRequest.builder()
+                .request(RecommendationRequest.builder().userId("user_001").numItems(2).build())
+                .build());
+
+        assertThat(response.getStatus()).as(response.toString()).isEqualTo("completed");
+        assertThat(response.getPlan().getProducts()).isEmpty();
+        assertThat(response.getPlan().getFulfillment().getStatus()).isEqualTo("no_eligible_products");
+        assertThat(response.getToolCalls()).extracting("toolName").filteredOn("search_products"::equals)
+                .hasSize(2);
+        assertThat(response.getToolCalls()).extracting("toolName").filteredOn("check_inventory"::equals)
+                .hasSize(2);
+        assertThat(response.getObservations().stream()
+                .filter(observation -> "search_products".equals(observation.getToolName()))
+                .map(observation -> observation.getData().get("excludedProductIds")))
+                .containsExactly(List.of(), List.of("P001", "P002"));
+        assertThat(response.getObservations().stream()
+                .filter(observation -> "search_products".equals(observation.getToolName()))
+                .map(observation -> observation.getData().get("productIds")))
+                .containsExactly(List.of("P001", "P002"), List.of("P003"));
+        @SuppressWarnings("unchecked")
+        List<AgentMessage> messages = (List<AgentMessage>) response.getLlmMetrics().get("collaborationMessages");
+        assertThat(messages).extracting(AgentMessage::getType)
+                .contains(AgentMessageType.REQUEST_REVISION);
+        assertThat(messages).filteredOn(message -> message.getType() == AgentMessageType.REQUEST_REVISION)
+                .hasSize(1);
     }
 
     @Test

@@ -21,10 +21,13 @@ class RuntimeTelemetryTest {
         var telemetry = new RuntimeTelemetry(meters, persistence, new AgentConcurrencyGuard(4), events);
         telemetry.recordRun("untrusted-user-input", null, 100, 2);
         telemetry.recordTool(ToolCallRecord.builder().toolName("attacker-controlled").latencyMs(1).build());
+        telemetry.recordTool(ToolCallRecord.builder().toolName("search_products").status("failed").latencyMs(2).build());
         telemetry.refreshPersistence();
         assertEquals(1, meters.get("agent.runs").tags("scene", "other", "outcome", "failed").counter().count());
         assertEquals(3, meters.get("agent.persistence").tag("state", "outboxInFlight").gauge().value());
         assertEquals(45, meters.get("agent.persistence").tag("state", "outboxOldestUnfinishedAgeSeconds").gauge().value());
+        assertEquals(1, meters.get("agent.tool.calls").tags("tool", "other", "outcome", "other").counter().count());
+        assertEquals(1, meters.get("agent.tool.calls").tags("tool", "search_products", "outcome", "failed").counter().count());
         assertTrue(meters.getMeters().stream().flatMap(m -> m.getId().getTags().stream())
                 .noneMatch(tag -> tag.getValue().contains("untrusted") || tag.getValue().contains("attacker")));
         meters.close();

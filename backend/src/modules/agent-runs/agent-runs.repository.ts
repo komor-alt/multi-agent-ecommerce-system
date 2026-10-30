@@ -56,6 +56,29 @@ export class AgentRunsRepository {
     });
   }
 
+  async findEventSequence(runId: string, eventId: string) {
+    const event = await this.prisma.agentEvent.findFirst({
+      where: { runId, id: eventId },
+      select: { sequence: true },
+    });
+    return event?.sequence ?? null;
+  }
+
+  findEventsAfterSequence(runId: string, afterSequence: number) {
+    return this.prisma.agentEvent.findMany({
+      where: { runId, sequence: { gt: afterSequence } },
+      orderBy: { sequence: "asc" },
+    });
+  }
+
+  async findRunStatus(runId: string) {
+    const run = await this.prisma.agentRun.findUnique({
+      where: { id: runId },
+      select: { status: true },
+    });
+    return run?.status ?? null;
+  }
+
   async persistEvent(runId: string, event: AgentServiceRawEvent) {
     await this.prisma.agentEvent.upsert({
       where: { runId_sequence: { runId, sequence: event.sequence } },

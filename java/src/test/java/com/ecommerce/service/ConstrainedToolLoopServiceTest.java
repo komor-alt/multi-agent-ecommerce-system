@@ -54,6 +54,10 @@ class ConstrainedToolLoopServiceTest {
                 .category("手机")
                 .price(1000)
                 .stock(10)
+                .platform("shopify")
+                .currency("SGD")
+                .supportedRegions(List.of("SG"))
+                .crossBorderEligible(true)
                 .build();
 
         AgentResult profileResult = AgentResult.builder()

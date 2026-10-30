@@ -1,4 +1,4 @@
-import { Controller, Get, NotFoundException, Param, Sse } from "@nestjs/common";
+import { Controller, Get, Headers, NotFoundException, Param, Query, Sse } from "@nestjs/common";
 import { AgentRunsService } from "./agent-runs.service";
 
 @Controller("agent-runs")
@@ -23,7 +23,11 @@ export class AgentRunsController {
   }
 
   @Sse(":runId/stream")
-  stream(@Param("runId") runId: string) {
-    return this.service.stream(runId);
+  async stream(
+    @Param("runId") runId: string,
+    @Headers("last-event-id") headerLastEventId?: string,
+    @Query("lastEventId") queryLastEventId?: string,
+  ) {
+    return this.service.stream(runId, headerLastEventId || queryLastEventId);
   }
 }

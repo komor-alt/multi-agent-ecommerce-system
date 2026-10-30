@@ -4,7 +4,6 @@ import com.ecommerce.aftersales.model.AfterSalesTypes;
 import com.ecommerce.data.DemoCatalogDataFactory;
 import com.ecommerce.data.DemoFulfillmentDataFactory;
 import com.ecommerce.model.Product;
-import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -15,7 +14,6 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-@Component
 public class MockShopifyAfterSalesConnector implements AfterSalesConnector {
     // Process-local simulator, NOT a durable external payment ledger.
     private final java.util.concurrent.ConcurrentMap<String, CommittedExecution> executions =

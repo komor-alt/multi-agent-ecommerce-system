@@ -212,6 +212,8 @@ public class ExecutionService {
         } catch (Exception error) {
             boolean terminal = error instanceof com.ecommerce.aftersales.connector.ConnectorException ce
                     && ce.category() == com.ecommerce.aftersales.connector.ConnectorException.Category.TERMINAL;
+            String failureCode = error instanceof com.ecommerce.aftersales.connector.ConnectorException ce
+                    ? ce.getMessage() : "CONNECTOR_EXECUTION_FAILED";
             AfterSalesTypes.ExecutionStatus nextStatus = terminal || context.attempt() >= properties.getMaxAttempts()
                     ? AfterSalesTypes.ExecutionStatus.DEAD_LETTER
                     : AfterSalesTypes.ExecutionStatus.RETRY_WAIT;
@@ -221,7 +223,7 @@ public class ExecutionService {
                     return false;
                 }
                 job.setStatus(nextStatus);
-                job.setLastError("CONNECTOR_EXECUTION_FAILED");
+                job.setLastError(failureCode);
                 job.setNextRetryAt(nextStatus == AfterSalesTypes.ExecutionStatus.RETRY_WAIT
                         ? Instant.now().plusMillis(properties.getRetryDelayMs())
                         : null);
@@ -233,7 +235,7 @@ public class ExecutionService {
                 return;
             }
             eventService.append(context.runId(), "execution_failed", "补偿执行失败", "failed",
-                    "CONNECTOR_EXECUTION_FAILED", Map.of(
+                    failureCode, Map.of(
                             "summary", nextStatus == AfterSalesTypes.ExecutionStatus.DEAD_LETTER
                                     ? "执行超过最大重试次数，已进入死信状态。"
                                     : "执行失败，已进入重试时间窗。",

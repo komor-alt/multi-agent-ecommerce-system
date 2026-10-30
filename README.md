@@ -1,18 +1,40 @@
-# 电商可信业务 Agent 执行系统
+# 跨境电商推荐多 Agent 运营工作台
 
 [![Offline CI](https://github.com/komor-alt/multi-agent-ecommerce-system/actions/workflows/ci.yml/badge.svg?branch=codex%2Fluna-recommendation-platform)](https://github.com/komor-alt/multi-agent-ecommerce-system/actions/workflows/ci.yml)
 
-本项目的核心是 **Trusted Agent Execution**：大模型在服务端给定的合法动作中选择下一步，Java 负责业务实体绑定、证据校验、金额计算、人工审批与幂等执行。主场景是跨境电商售后，推荐模块保留为场景化受限工作流和专业角色调度的辅助示例。
+面向东南亚跨境电商运营人员，支持 homepage、campaign、retention 推荐任务、商品与市场约束查询、执行 Trace、历史回放和运营看板。推荐是主业务，售后是第二业务场景；Python / Go 目录保留为 legacy / experimental。
+
+```mermaid
+flowchart LR
+  O[运营工作台 React] --> G[NestJS Gateway\n认证 / Task / Run / SSE]
+  G --> J[Java Spring Boot\n受限 Agent Loop / Supervisor]
+  J --> D[(PostgreSQL\n业务数据 / Run / Events / Outbox)]
+  J --> R[(Redis\n实时用户特征)]
+  J --> S[画像 / 召回 / 库存履约 / 文案]
+  J -->|SSE events| G
+  G -->|持久化与实时推送| O
+  M[Micrometer / Prometheus] -.观测.-> J
+```
+
+执行采用 **Workflow 约束下的 Bounded Agent Loop**：模型只能在白名单和当前场景允许的动作中规划；服务端重建可信参数、校验证据、限制预算与步数。它不是自由 ReAct，也不把模型当作业务规则执行器。
+
+核心工程难点是跨实例任务 lease/fencing 与有限次恢复、Run/Event/Outbox 的事务一致性、SSE 断线续读与 Gateway 去重、内部服务认证，以及模型与工具调用的低基数观测。实现状态、测试证据、环境边界和未完成项见 [生产化验收手册](docs/production-readiness.md)。
+
+## 可复现验证
+
+离线回归不调用付费模型或真实 Shopify 写接口。Java 执行 `cd java; mvn test`；Gateway 执行 `cd backend; npm run test:auth`；真实 PostgreSQL 契约使用隔离脚本 `./deploy/validation/Run-PostgresValidation.ps1`。k6 脚本位于 `benchmarks/load/`，只在隔离 RULES 环境运行，阈值是验收门槛，不代表实测结果。
 
 售后链路覆盖物流延迟、包裹丢失与商品破损。Planner 可根据已有证据调整取证顺序，例如订单取回后，政策与物流都可能是合法候选；模型不能提供真实订单参数、金额或审批结果。审批通过时保存方案快照，执行前读取订单并核对审批绑定；响应丢失时先按同一个幂等命令查询模拟渠道结果，再决定是否重新执行。
 
 V2 验收与复现见 [V2 实施状态](docs/v2-implementation-status.md) 和 [离线评测口径](docs/v2-evaluation-contract.md)。公开 τ³ Retail 的[逐题结果、metadata 与实验限制](benchmarks/tau3-retail/published/retail-base-single-trial/README.md)已入库：**114 vs 114 有效配对已补齐**，Official LLMAgent 为 **96/114（84.21%）**，Guarded adapter 为 **101/114（88.60%）**，单次观察相差 4.39 个百分点。2026-10-03 仅补跑原先未评分的 8 题，6 通过、2 失败，既有有效结果未替换。结果来自跨日期续跑合并，历史源码指纹不完整，不能宣称严格同源码复现或统计显著。Java 离线业务评测与 Python 公开基准分别报告，不能相互冒充。
 
-边界：当前售后 Connector 是进程内模拟渠道，不是真实 Shopify/支付接入。数据库 Job 持久化与模拟渠道幂等不能单独证明真实外部系统的 exactly-once；真实渠道必须支持持久化幂等、参数一致性核验、结果查询和条件执行。
+边界：售后默认 Connector 是进程内模拟渠道。现已提供可选 Shopify Admin GraphQL 只读 Connector，可查询订单和履约状态、核验已授予 scopes；它尚未通过真实商店验证，也不执行任何平台写入。数据库 Job 持久化与模拟渠道幂等不能单独证明真实外部系统的 exactly-once；生产写操作仍需经过可核验的审批快照、外部幂等、结果查询和条件执行。
+
+售后 Shopify Connector 配置、权限边界和契约测试见 [Shopify 售后连接器说明](java/docs/shopify-aftersales-connector.md)。默认 `ECOM_AFTERSALES_CONNECTOR=mock`，真实 Shopify 写操作默认禁用且当前实现始终 fail-closed。
 
 生产化加固、配置、SLO 目标与验收方式见 [生产化验收手册](docs/production-readiness.md)。目标阈值不等于已达到的生产容量；真实平台和多实例恢复的未完成项在手册中明确列出。
 
-## 辅助场景：推荐受限工作流
+## 推荐系统架构
 
 运营人员创建 homepage、campaign 或 retention 推荐任务，Java Root/Supervisor 在服务端定义的场景路径和角色目录内调度带依赖关系的专业任务。Profile、Product、Inventory、Copy 使用独立有界 Loop，结果以版本化 Artifact 返回并合并为 RecommendationPlan。这是 scene-aware bounded workflow / specialist routing，不是自由多 Agent 规划的证明。
 
@@ -49,11 +71,11 @@ SSE Trace → Run 持久化 → 历史回放 / Dashboard
 | `recommendation_run_events` | 带 Run 内 sequence 的 SSE 事件日志 |
 | `recommendation_outbox` | 与状态更新处于同一事务的待发布领域事件 |
 
-客户端断线后可以携带 `Last-Event-ID` 请求 `GET /api/v1/agent-runs/{runId}/events`，服务端使用同一数据库游标补发并继续追读，支持连接切换应用实例；也可以通过 `GET /api/v1/agent-runs/{runId}/event-history?afterSequence=0&limit=100` 分页查询事件历史。`GET /api/v1/metrics` 的 `recommendation_persistence` 字段暴露运行中 Run/Task、Outbox backlog 和死信数量；`/actuator/prometheus` 提供低基数监控指标，开启鉴权时需要内部服务 Token。
+用户侧 SSE 断线后通过 `GET /api/v1/agent-runs/{runId}/stream` 携带 `Last-Event-ID`（或 `lastEventId` query）续读，Gateway 按该 Run 的事件序号补发后续事件并继续推送实时事件。Gateway 的 `GET /api/v1/agent-runs/{runId}/events` 是 JSON 历史查询接口，不是 SSE 续读地址；Java 服务内部另有 `GET /api/v1/agent-runs/{runId}/events` SSE 数据库游标接口，前端不应直接调用。`GET /api/v1/metrics` 的 `recommendation_persistence` 字段暴露运行中 Run/Task、Outbox backlog 和死信数量；`/actuator/prometheus` 提供低基数监控指标，开启鉴权时需要内部服务 Token。
 
-Outbox 默认由本地 `ApplicationEventPublisher` 投递，但写入、去重键、失败重试和死信状态已经独立于传输实现。单机运行使用 `ECOM_AGENT_OUTBOX_TRANSPORT=local`；多实例部署时应提供 Kafka/RabbitMQ 的 `RecommendationOutboxTransport` 实现，并把消费者按 `dedupKey` 做幂等。扫描间隔、批大小、最大重试次数和退避时间均可通过 `ECOM_AGENT_OUTBOX_*` 环境变量配置。
+Outbox 默认由本地 `ApplicationEventPublisher` 投递，持久化写入、去重键、失败重试和死信状态已与传输接口分开。当前没有跨实例消息传输实现；Local Transport 只在当前 JVM 发布，因此不能宣称它已提供多实例外部事件投递。扫描间隔、批大小、最大重试次数和退避时间均可通过 `ECOM_AGENT_OUTBOX_*` 环境变量配置。
 
-PostgreSQL 生产迁移位于 `java/src/main/resources/migration-recommendation-runtime-postgresql.sql`。当前恢复能力覆盖审计查询、SSE 断点续传和已完成 DAG 的重建；正在执行的 Java 调用仍不会在 JVM 崩溃后从中间步骤自动续跑。要实现这一点，还需要把子任务执行改成基于 lease 的独立 Worker 消费模型，不能仅凭已有持久化表宣称已经支持。
+PostgreSQL 生产迁移位于 `java/src/main/resources/migration-recommendation-runtime-postgresql.sql`。推荐运行时恢复能力覆盖审计查询、SSE 断点续传和已完成 DAG 的重建；售后执行任务另有持久化 lease/retry/dead-letter 与过期租约恢复。真实 Shopify 写入仍未实现，不能据此宣称真实外部 exactly-once。
 
 默认 `RULES`、Embedding `live=false`、调用预算为零，因此测试和离线演示使用同一套多 Agent Runtime 的确定性 Planner fallback，不发真实模型请求；显式开启 LLM 模式和正预算后，Supervisor 与各专业 Agent 都会进行受约束的模型规划。旧 `SupervisorOrchestrator` 仅通过 `/api/v1/recommend/workflow-baseline` 暴露，用于固定工作流对照。
 
@@ -65,7 +87,7 @@ PostgreSQL 生产迁移位于 `java/src/main/resources/migration-recommendation-
 | `campaign` | `[load_campaign_constraints ∥ search_products] → check_fulfillment → [check_inventory ∥ rerank] → merge → generate_localized_copy → RecommendationPlan` | 活动约束、履约检查和本地化活动文案 |
 | `retention` | `get_user_profile → get_recent_orders → search_products → [check_inventory ∥ rerank] → merge → generate_retention_copy → RecommendationPlan` | 基于用户与近期订单的 win-back 推荐 |
 
-`∥` 表示实际提交到独立协调线程池并发执行，`merge` 表示 Supervisor 屏障后的确定性合并。上表是依赖关系而不是硬编码的逐工具执行器；不同 Scene 只开放当前可执行的 Agent/工具，服务端会拒绝越权调用和不满足前置条件的委派。推荐链路中的用户、商品、库存、订单和 user events 使用 Java 数据服务连接 PostgreSQL/Redis；V2 主线是售后可信执行，推荐运行时保持兼容。详细边界见 `docs/multi-agent-architecture.md`。
+`∥` 表示实际提交到独立协调线程池并发执行，`merge` 表示 Supervisor 屏障后的确定性合并。上表是依赖关系而不是硬编码的逐工具执行器；不同 Scene 只开放当前可执行的 Agent/工具，服务端会拒绝越权调用和不满足前置条件的委派。推荐链路中的用户、商品、库存、订单和 user events 使用 Java 数据服务连接 PostgreSQL/Redis；售后作为第二业务场景保留在同一 Java 服务中。详细边界见 `docs/multi-agent-architecture.md`。
 
 并行度、协调线程池和是否允许推测式重排均由 `agent.orchestration` 配置控制；可通过 `ECOM_AGENT_PARALLEL_ENABLED`、`ECOM_AGENT_MAX_PARALLEL_SPECIALISTS`、`ECOM_AGENT_ORCHESTRATION_CORE_SIZE`、`ECOM_AGENT_ORCHESTRATION_MAX_SIZE`、`ECOM_AGENT_ORCHESTRATION_QUEUE_CAPACITY` 与 `ECOM_AGENT_SPECULATIVE_RERANK_ENABLED` 覆盖。协调线程池与业务工具线程池隔离，队列饱和时采用调用线程执行形成反压，不无限创建任务。
 
@@ -119,6 +141,16 @@ java/target/recommendation-eval/recommendation-business-report.json
 java/target/recommendation-eval/recommendation-business-report.md
 ```
 
+## Java Recommendation Live LLM E2E
+
+The default `mvn test` remains offline and never selects the paid live runner. Live recommendation mode is fail-closed: set `ECOM_RECOMMEND_MODE=LLM` or `AUTO`, `ECOM_RECOMMEND_LIVE_ENABLED=true`, a real `ECOM_LLM_API_KEY`, and a positive bounded call budget. Provider calls use the configured timeout, and trace events retain only phase/provider/model/latency/status/usage metadata; prompts, model output and credentials are not persisted.
+
+The manual, cost-incurring PostgreSQL E2E procedure and preflight requirements are documented in [Java Recommendation Live LLM E2E](java/docs/live-recommendation-e2e.md). It was not run as part of offline verification.
+
+## Java Agent Benchmark and Ablations
+
+The reproducible benchmark contract, Java recommendation E2E dataset, supported-variant matrix, and paid-run instructions are documented in [Java Agent Benchmark](java/docs/agent-benchmark.md). Default tests validate the framework offline only; they do not call a model. Unsupported Single-Agent and guard-ablation arms fail closed, and the τ³ Python adapter remains an external reference rather than a Java score.
+
 该报告是离线 demo simulation，不是生产收益、质量或延迟承诺。
 
 并行编排另有一组可复现的合成 I/O 对照测试：保持任务、工具结果和运行容量一致，只切换 `parallel-enabled`，比较单请求延迟、并发吞吐、成功率与输出一致性：
@@ -140,7 +172,7 @@ mvn -q -Dtest=RecommendationParallelPerformanceTest test
 | `python/` | legacy / experimental，不是本轮主线，不新增功能 |
 | `go/` | legacy / experimental，不是本轮主线，不新增功能 |
 
-售后链路继续保持确定性 Java trust boundary：模型不能决定真实订单参数、补偿金额或审批副作用；真实执行前仍经过服务端规则、审批 Gate 和幂等执行。此轮不扩展售后模块。
+售后链路继续保持确定性 Java trust boundary：模型不能决定真实订单参数、补偿金额或审批副作用；执行前仍经过服务端规则、审批 Gate 和幂等执行。Shopify 订单读取使用 GraphQL Admin API 与 `currentAppInstallation.accessScopes` 做只读权限预检，其他售后证据与写入边界见连接器说明。
 
 ## 本地运行与验证
 

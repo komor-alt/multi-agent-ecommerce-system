@@ -8,6 +8,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 /**
  * Per-run guard for real model calls.
@@ -24,6 +26,13 @@ public final class LlmCallBudget {
     private final AtomicInteger duplicateBlocked = new AtomicInteger();
     private final Set<String> fingerprints = ConcurrentHashMap.newKeySet();
     private final Map<String, AtomicInteger> callsByPhase = new ConcurrentHashMap<>();
+    private final AtomicInteger fallbackCount = new AtomicInteger();
+    private final AtomicInteger providerCallCount = new AtomicInteger();
+    private final AtomicInteger usageCallCount = new AtomicInteger();
+    private final AtomicLong promptTokens = new AtomicLong();
+    private final AtomicLong completionTokens = new AtomicLong();
+    private final AtomicLong totalTokens = new AtomicLong();
+    private volatile Consumer<CallTrace> traceListener = ignored -> {};
 
     public LlmCallBudget(int maxCalls) {
         this.maxCalls = Math.max(0, maxCalls);
@@ -34,20 +43,43 @@ public final class LlmCallBudget {
      * exhausted/zero budget returns false and never reserves a call.
      */
     public synchronized boolean tryAcquire(String phase, String fingerprint) {
+        return reserve(phase, fingerprint).acquired();
+    }
+
+    public synchronized Reservation reserve(String phase, String fingerprint) {
         String safePhase = phase == null || phase.isBlank() ? "unknown" : phase;
         String opaqueFingerprint = digest(safePhase + ":" + (fingerprint == null ? "" : fingerprint));
         if (fingerprints.contains(opaqueFingerprint)) {
             duplicateBlocked.incrementAndGet();
-            return false;
+            return new Reservation(false, "duplicate_call_blocked");
         }
         if (callCount.get() >= maxCalls) {
             budgetBlocked.incrementAndGet();
-            return false;
+            return new Reservation(false, "llm_budget_exhausted");
         }
         fingerprints.add(opaqueFingerprint);
         callCount.incrementAndGet();
         callsByPhase.computeIfAbsent(safePhase, ignored -> new AtomicInteger()).incrementAndGet();
-        return true;
+        return new Reservation(true, null);
+    }
+
+    public void setTraceListener(Consumer<CallTrace> listener) {
+        traceListener = listener == null ? ignored -> {} : listener;
+    }
+
+    public void recordTrace(CallTrace trace) {
+        if (trace == null) return;
+        if (trace.providerInvoked()) {
+            providerCallCount.incrementAndGet();
+            if (trace.usageStatus().equals("available")) {
+                usageCallCount.incrementAndGet();
+                if (trace.promptTokens() != null) promptTokens.addAndGet(trace.promptTokens());
+                if (trace.completionTokens() != null) completionTokens.addAndGet(trace.completionTokens());
+                if (trace.totalTokens() != null) totalTokens.addAndGet(trace.totalTokens());
+            }
+        }
+        if (!"success".equals(trace.status())) fallbackCount.incrementAndGet();
+        traceListener.accept(trace);
     }
 
     public int getCallCount() {
@@ -74,15 +106,48 @@ public final class LlmCallBudget {
         result.put("maxLlmCalls", maxCalls);
         result.put("budgetBlockedCalls", budgetBlocked.get());
         result.put("duplicateCallsBlocked", duplicateBlocked.get());
-        result.put("promptTokens", null);
-        result.put("completionTokens", null);
+        result.put("fallbackCount", fallbackCount.get());
+        result.put("providerCallCount", providerCallCount.get());
+        result.put("usageCallCount", usageCallCount.get());
+        boolean hasUsage = usageCallCount.get() > 0;
+        result.put("promptTokens", hasUsage ? promptTokens.get() : null);
+        result.put("completionTokens", hasUsage ? completionTokens.get() : null);
+        result.put("totalTokens", hasUsage ? totalTokens.get() : null);
         result.put("estimatedCost", null);
-        result.put("usageStatus", "unavailable");
-        result.put("usageUnavailableReason", "provider_usage_not_returned");
+        String usageStatus = !hasUsage ? "unavailable"
+                : usageCallCount.get() < providerCallCount.get() ? "partial" : "available";
+        result.put("usageStatus", usageStatus);
+        if (!"available".equals(usageStatus)) {
+            result.put("usageUnavailableReason", "partial".equals(usageStatus)
+                    ? "provider_usage_missing_for_some_calls" : "provider_usage_not_returned");
+        }
         Map<String, Integer> byPhase = new LinkedHashMap<>();
         callsByPhase.keySet().stream().sorted().forEach(key -> byPhase.put(key, callsByPhase.get(key).get()));
         result.put("byPhase", byPhase);
         return result;
+    }
+
+    public record Reservation(boolean acquired, String reason) {}
+
+    public record CallTrace(String phase, String provider, String model, long latencyMs,
+                            String status, String fallbackReason, Integer promptTokens,
+                            Integer completionTokens, Integer totalTokens, String usageStatus,
+                            boolean providerInvoked) {
+        public Map<String, Object> asMap() {
+            Map<String, Object> value = new LinkedHashMap<>();
+            value.put("phase", phase);
+            value.put("provider", provider);
+            value.put("model", model);
+            value.put("latencyMs", latencyMs);
+            value.put("status", status);
+            value.put("fallbackReason", fallbackReason);
+            value.put("promptTokens", promptTokens);
+            value.put("completionTokens", completionTokens);
+            value.put("totalTokens", totalTokens);
+            value.put("usageStatus", usageStatus);
+            value.put("providerInvoked", providerInvoked);
+            return value;
+        }
     }
 
     private static String digest(String value) {

@@ -1,12 +1,28 @@
 # 生产化加固与验收手册
 
-更新日期：2026-09-26。这里区分**已实现机制、可运行验收、仍未验证的生产能力**。
+更新日期：2026-10-30。这里区分**已实现机制、已验证证据、仍未完成/验证的生产能力**。
 
-本轮实际结果及失败修复过程见 [验证记录](production-verification-2026-09-25.md)，不把配置中的目标阈值当作测试结论。
+此前的验收过程见 [历史验证记录](production-verification-2026-09-25.md)，其中结果不代表当前工作区。本轮的精确测试命令与结果记录在本文末尾。
 
-新增的 PostgreSQL 与进程崩溃接管验收见 [恢复验证记录](recommendation-recovery-verification-2026-09-26.md)。9 月 25 日的负载结果只属于当时版本，不能直接当作新增租约后的吞吐结论。
+既有 PostgreSQL 与进程崩溃接管验收见 [恢复验证记录](recommendation-recovery-verification-2026-09-26.md)。9 月 25 日的负载结果只属于当时版本；除非本轮重新运行并留存原始报告，不得将其作为当前版本的吞吐结论。
 
 不存在一套通用的“互联网大厂上线指标”。SLO 必须结合流量、模型延迟、上游服务能力和业务损失确定。本轮采用现有 Spring Actuator / Micrometer / Prometheus、NestJS JWT / bcrypt / Throttler、PostgreSQL 事务与租约、k6，补关键运行保障，不另造服务框架。
+
+## 当前验收状态（2026-10-30）
+
+“已实现”表示源码存在机制；“已验证”必须对应当前工作区的测试或运行记录。配置阈值、脚本存在和历史报告都不能代替本轮实测。
+
+| 机制 | 已实现 | 已验证证据 | 未完成/限制 |
+|---|---|---|---|
+| PostgreSQL Runtime 持久化 | Run/Task/Artifact/Event/Outbox 使用事务与迁移脚本 | 本次验收结果与 [恢复验证记录](recommendation-recovery-verification-2026-09-26.md) 分开标注；H2 测试不算 PostgreSQL 证据 | 全业务 schema 和正式备份恢复未覆盖；PostgreSQL 测试条件跳过时明确视为未运行 |
+| Execution Lease / Recovery Worker | token、owner、attempt、leaseUntil fencing；过期任务有限次整代重放 | Lease 契约、并发与双 JVM 测试见恢复记录；本次执行情况列于下方 | 只恢复只读推荐代次，不支持任意步骤续跑；完整多实例网络分区未验证 |
+| Transactional Outbox | 与业务状态同事务写入；租约领取、事务外发布、重试和死信 | H2 与真实 PostgreSQL 契约按实际执行环境区分 | 默认 Local Transport 仅在 JVM 内发布；没有跨实例外部消息传输实现 |
+| SSE 断线恢复 | Java 数据库游标及 Gateway `Last-Event-ID` / `lastEventId` 回放和去重 | Java 事件测试、Gateway SSE 回归测试；Mock 测试不等于跨实例网络演练 | 本地 k6 若未运行，不宣称已压测重连；完整浏览器/Gateway/多实例场景待验 |
+| Gateway / Java 内部认证 | Gateway Session/JWT/RBAC/Origin；Java 内部服务 Token 默认拒绝 | Gateway HTTP auth tests、Java filter tests（以本轮结果为准） | 单租户；无企业 SSO、即时 JWT 撤销和全局限流 |
+| k6 / 资源恢复 | 固定到达率、P95/成功率/业务约束/恢复 gauge；独立 SSE resume 脚本 | 只记录实际运行脚本的原始结果 | 未运行时不得引用脚本阈值或历史负载作为当前性能结论 |
+| 模型与工具指标 | Micrometer 调用、失败、耗时、Token usage、预算拒绝 | 单测验证指标与标签边界 | Live provider usage/cost 和生产告警阈值未验证 |
+
+本轮命令、测试数量与环境记录在文末“2026-10-30 验收记录”。Docker、PostgreSQL 或 k6 不可用时写明未运行及原因，不以 H2 或旧报告替代。
 
 ## 1. 本轮具体改变
 
@@ -99,7 +115,7 @@ Caffeine 的容量淘汰是维护驱动的有界缓存机制，不是精确的�
 ### 回归与故障契约
 
 ```powershell
-cd D:\研究生\AI\multi-agent-ecommerce-system-tau-eval\java
+cd D:\研究生\AI\multi-agent-ecommerce-system-codex-luna-recommendation-platform\java
 mvn -q test
 cd ..\backend
 npm ci
@@ -138,6 +154,7 @@ CI 的 `.github/workflows/runtime-contract.yml` 配置 PostgreSQL 16 临时服�
 - `/api/v1/health` 是旧的连通性接口，**不要用它替代 readiness**。
 - Prometheus 示例使用 `X-Internal-Service-Token` 的 secret 文件。只挂载 secret，不把密钥写进 YAML。告警模板阈值须随 SLO 调整，正式运行还需接入组织现有 Alertmanager。
 - 指标标签限于 scene/outcome/tool/state 等有限集合，不把 userId/runId/error text 放入标签。
+- Agent 模型指标包括 `agent.llm.calls`、`agent.llm.failures`、`agent.llm.duration`、`agent.llm.tokens`、`agent.llm.budget.blocked`；工具调用有 `agent.tool.calls` 与 `agent.tool.duration`。phase 使用 allowlist，失败原因映射到固定类别；不记录 prompt、用户/run ID 或原始异常文本。
 - Outbox 是共享数据库 gauge，多实例看 `max`，不能 `sum` 重复计数；指标刷新失败时数据可能过期，单独告警。
 
 ### k6：先离线小负载，再真实模型/预发布
@@ -145,9 +162,16 @@ CI 的 `.github/workflows/runtime-contract.yml` 配置 PostgreSQL 16 临时服�
 在本地隔离服务或经批准的压测环境运行。默认是 Java 内部服务接口，不含 Gateway 登录链路；鉴权链路另由 HTTP 契约覆盖。
 
 ```powershell
-cd D:\研究生\AI\multi-agent-ecommerce-system-tau-eval
+cd D:\研究生\AI\multi-agent-ecommerce-system-codex-luna-recommendation-platform
 k6 run -e BASE_URL=http://127.0.0.1:8080 -e RATE=5 -e DURATION=1m `
   -e P95_MS=5000 --summary-export=load-summary.json benchmarks/load/recommendation.js
+```
+
+SSE 游标续读契约可单独运行；脚本先消费完整 Run，再带最后一个 `Last-Event-ID` 重连并核对剩余序列无重复。它不是在传输中途强行断网的浏览器/代理故障演练：
+
+```powershell
+k6 run -e BASE_URL=http://127.0.0.1:8080 -e JAVA_INTERNAL_SERVICE_TOKEN='<test token>' `
+  -e RATE=1 -e DURATION=1m benchmarks/load/sse-reconnect.js
 ```
 
 鉴权开启时从当前 shell 的安全环境提供 `JAVA_INTERNAL_SERVICE_TOKEN`，不要写入脚本或报告。`RATE`、`DURATION`、`PREALLOCATED_VUS`、`MAX_VUS`、`P95_MS`、`MIN_SUCCESS_RATE`、`MAX_REJECTION_RATE` 均可配置。脚本在三类场景间轮换；阈值失败返回非零退出码。`dropped_iterations=0` 防止负载发生器少发请求掩盖容量不足。结束后还有恢复门禁：`RECOVERY_TIMEOUT_SECONDS`（默认30）内许可全部归还、无活动任务、Outbox 无积压或死信；此断言应在独立压测环境执行，不能和其他流量混跑。
@@ -157,10 +181,25 @@ k6 run -e BASE_URL=http://127.0.0.1:8080 -e RATE=5 -e DURATION=1m `
 ## 6. 仍然不能宣称的能力
 
 1. 推荐恢复是**重新执行整个只读推荐代次**，不是从任意工具步骤精确续跑。它保存旧 Task/Artifact/Event，新代次使用新任务 ID；不自动复用旧库存结果，也不重放发券等售后副作用。双 JVM 持久化边界强杀测试已通过，但完整 HTTP/Gateway/SSE 链路的进程故障演练仍需补齐。旧版无完整执行配置的 Run 不会被自动接管。
-2. Outbox 默认 Local Transport 只在本进程发布；它是至少一次投递，不是跨服务 exactly-once。接 Kafka/RabbitMQ 后消费方仍须用 `dedupKey` 持久去重。
+2. Outbox 默认 Local Transport 只在本进程发布；它是至少一次投递，不是跨服务 exactly-once。仓库不包含跨实例外部传输实现；本轮不建议为了验收引入消息中间件。未来若增加传输，消费者仍须按 `dedupKey` 持久去重。
 3. 售后真实平台连接器/真实发券凭证核对、未知结果人工对账、库存预占与真实订单一致性，需要实际平台接口和业务规则验收；不能用 Mock 测试代替。
 4. 未完成整套多租户隔离、企业 SSO、生产级全局限流、数据库备份恢复演练、事件表保留/归档策略、Java 全依赖漏洞扫描及真实模型质量回归。
 5. 未完成真实 PostgreSQL/Redis 多实例持续压测、网络故障注入、完整服务滚动发布、长时间 soak 和备份恢复。因此这里只能说“生产化机制已补强”，不能说“达到大厂容量/任意极端情况都能处理”。
+
+## 7. 2026-10-30 验收记录
+
+本轮在 Windows 工作区执行。测试结果只覆盖下列命令和环境，不等同于生产环境验收。
+
+| 范围 | 执行结果 | 证据与边界 |
+|---|---|---|
+| Gateway | `npm run test:auth`：12 passed、0 failed；`npm run typecheck`：通过 | 本地 Nest 构建、认证与 SSE 单元/契约测试；Prisma client 在 `npm ci` 后显式生成；不是多实例 HTTP 演练 |
+| Java 离线全量 | `mvn -B test`：600 tests、0 failures、0 errors、22 skipped | H2、Mock、offline 为主；22 个 opt-in PostgreSQL 测试在该命令中跳过，不能计入 PostgreSQL 通过数 |
+| Java + PostgreSQL | `./deploy/validation/Run-PostgresValidation.ps1`：PostgreSQL 16.14，22 tests、0 failures、0 errors、0 skipped | 隔离临时 Docker Compose 项目；包含 PostgreSQL 持久化/租约并发及双 JVM 恢复契约。脚本清理了本次专属容器与网络；不是正式库、备份恢复或多实例网络分区验收 |
+| SSE 游标 | Gateway SSE 回归包含 cursor header/query 优先级、历史读取期间实时事件竞态去重和终态关闭；Java 现有事件测试纳入全量套件 | 测试覆盖应用层游标和竞态；没有真实浏览器断网、反向代理缓冲或多 Gateway 实例压测 |
+| k6 / Prometheus rules | 未运行 | 本环境 `k6` 与 `promtool` 均未安装；Docker/PostgreSQL 可用且 PostgreSQL 测试已运行。脚本阈值仅为可运行门槛，不是本轮实测数据 |
+| 真实付费/外部写操作 | 未运行 | 未调用真实 LLM/Embedding，未执行 Shopify 写操作；符合本轮安全范围 |
+
+`npm ci` 的 npm 审计摘要报告 10 项依赖漏洞（3 low、2 moderate、4 high、1 critical）；本轮未运行自动升级或 `npm audit fix`，依赖漏洞治理仍待单独评估。未执行 commit/push。
 
 上线顺序：先跑全部离线/权限/真实 PostgreSQL 契约 → 接入测试平台与真实模型的小额预算评测 → 预发布环境容量/故障/恢复演练 → 审核阻断项 → 小流量灰度与回滚演练。每一步保存环境、模型、数据集和原始报告。
 

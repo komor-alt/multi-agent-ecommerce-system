@@ -24,7 +24,7 @@ public class ExecutionPreconditionGate {
         if (order == null) {
             return ValidationResult.rejected(ORDER_SNAPSHOT_MISSING);
         }
-        if (order.fullyRefunded()) {
+        if (!"NONE".equalsIgnoreCase(order.refundStatus())) {
             return ValidationResult.rejected(ORDER_ALREADY_REFUNDED);
         }
         if (!order.paid()) {

@@ -67,13 +67,30 @@ public class RecommendationDataService {
     public ProductSearchResult searchProductsWithSource(RecommendationRequest request,
                                                          Set<String> preferredCategories,
                                                          int limit) {
+        return searchProductsWithSource(request, preferredCategories, limit, Set.of());
+    }
+
+    /**
+     * Market-filtered recall that excludes inventory-vetoed products before
+     * returning the candidate set. Retrieval overfetches by the exclusion count
+     * so vetoed items near the top of the ranking do not consume the whole top-K.
+     */
+    public ProductSearchResult searchProductsWithSource(RecommendationRequest request,
+                                                         Set<String> preferredCategories,
+                                                         int limit,
+                                                         Set<String> excludedProductIds) {
         List<RecProductEntity> rows = productRepository.findByMarket(
                 request.platformOrDefault(), request.countryOrDefault(), request.regionOrDefault(),
                 request.currencyOrDefault());
+        int target = Math.max(1, limit);
+        Set<String> excluded = excludedProductIds == null ? Set.of() : Set.copyOf(excludedProductIds);
+        int retrievalLimit = (int) Math.min(rows.size(), (long) target + excluded.size());
         String queryText = semanticQuery(request, preferredCategories);
         SemanticProductSearchService.RetrievalResult ranked = semanticSearch.retrieve(
-                rows, preferredCategories, queryText, Math.max(1, limit));
+                rows, preferredCategories, queryText, retrievalLimit);
         List<Product> products = ranked.products().stream()
+                .filter(product -> !excluded.contains(product.getProductId()))
+                .limit(target)
                 .map(this::toProduct)
                 .collect(Collectors.toList());
         return new ProductSearchResult(products, ranked.source(), ranked.vectorUsed(), ranked.fallbackReason());

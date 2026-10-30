@@ -61,6 +61,7 @@ public class RuntimeTelemetry {
                 ? call.getToolName() : "other";
         String outcome = Set.of("success", "failed", "blocked", "stale_rejected").contains(call.getStatus() == null ? "" : call.getStatus())
                 ? call.getStatus() : "other";
+        meters.counter("agent.tool.calls", "tool", tool, "outcome", outcome).increment();
         Timer.builder("agent.tool.duration").tags("tool", tool, "outcome", outcome)
                 .publishPercentileHistogram().register(meters)
                 .record(Duration.ofNanos(Math.max(0L, (long) (call.getLatencyMs() * 1_000_000))));

@@ -20,23 +20,30 @@ public class RecommendationModeResolver {
     private final Mode mode;
     private final boolean hasApiKey;
     private final boolean liveEnabled;
+    private final int maxLlmCalls;
 
     /** Direct construction is reserved for explicit tests; Spring production wiring is fail-closed. */
     public RecommendationModeResolver(String mode, String apiKey) {
-        this(mode, apiKey, true);
+        this(mode, apiKey, true, 1);
+    }
+
+    public RecommendationModeResolver(String mode, String apiKey, boolean liveEnabled) {
+        this(mode, apiKey, liveEnabled, 1);
     }
 
     @org.springframework.beans.factory.annotation.Autowired
     public RecommendationModeResolver(@Value("${agent.recommend.mode:RULES}") String mode,
                                       @Value("${ECOM_LLM_API_KEY:your_api_key_here}") String apiKey,
-                                      @Value("${agent.recommend.live-enabled:false}") boolean liveEnabled) {
+                                      @Value("${agent.recommend.live-enabled:false}") boolean liveEnabled,
+                                      @Value("${agent.recommend.max-llm-calls:0}") int maxLlmCalls) {
         this.mode = parseMode(mode);
         this.hasApiKey = apiKey != null && !apiKey.isBlank() && !"your_api_key_here".equals(apiKey);
         this.liveEnabled = liveEnabled;
+        this.maxLlmCalls = Math.max(0, maxLlmCalls);
     }
 
     public boolean llmEnabled() {
-        return liveEnabled && hasApiKey && (mode == Mode.LLM || mode == Mode.AUTO);
+        return liveEnabled && hasApiKey && maxLlmCalls > 0 && (mode == Mode.LLM || mode == Mode.AUTO);
     }
 
     public Mode mode() {
