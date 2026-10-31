@@ -32,13 +32,25 @@ class AgentExecutionTimeoutTest {
         MarketingCopyAgent copy = new MarketingCopyAgent(builder, mode, llmClient);
 
         assertThat(profile.executionTimeoutMs()).isEqualTo(llmTimeoutMs + 2_000L).isGreaterThan(llmTimeoutMs);
-        assertThat(products.executionTimeoutMs()).isEqualTo(llmTimeoutMs + 2_000L).isGreaterThan(llmTimeoutMs);
+        assertThat(products.executionTimeoutMs()).isEqualTo(llmTimeoutMs * 2 + 2_000L)
+                .isGreaterThan(llmTimeoutMs * 2);
         assertThat(copy.executionTimeoutMs()).isEqualTo(llmTimeoutMs + 2_000L).isGreaterThan(llmTimeoutMs);
     }
 
     @Test
     void inventoryKeepsDeterministicFiveSecondTimeout() {
         assertThat(new InventoryAgent().executionTimeoutMs()).isEqualTo(5_000L);
+    }
+
+    @Test
+    void productOuterTimeoutSaturatesInsteadOfOverflowing() {
+        TracedRecommendationLlmClient llmClient = mock(TracedRecommendationLlmClient.class);
+        when(llmClient.timeoutMs()).thenReturn(Long.MAX_VALUE);
+        ProductRecAgent products = new ProductRecAgent(mock(ChatClient.Builder.class), List.of(),
+                new RecommendationModeResolver("LLM", "test-key"),
+                mock(RecommendationDataService.class), llmClient);
+
+        assertThat(products.executionTimeoutMs()).isEqualTo(Long.MAX_VALUE);
     }
 
     @Test

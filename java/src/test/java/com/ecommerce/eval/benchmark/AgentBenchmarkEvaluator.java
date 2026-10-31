@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 public final class AgentBenchmarkEvaluator {
@@ -170,6 +171,9 @@ public final class AgentBenchmarkEvaluator {
             boolean invoked = providerCalls > 0;
             boolean fallback = number(metrics.get("fallbackCount")) > 0
                     || llmCalls != providerCalls;
+            if (fallback && onlyRecoveredRerankFailures(response, calls, number(metrics.get("fallbackCount")))) {
+                fallback = false;
+            }
             return new TraceUsage(invoked, llmCalls, providerCalls, fallback,
                     longValue(metrics.get("promptTokens")),
                     longValue(metrics.get("completionTokens")), longValue(metrics.get("totalTokens")),
@@ -180,6 +184,9 @@ public final class AgentBenchmarkEvaluator {
         boolean invoked = eventProviderCalls > 0;
         boolean fallback = eventLlmCalls != eventProviderCalls || calls.stream().anyMatch(call ->
                 call.containsKey("status") && !"success".equals(call.get("status")));
+        if (fallback && onlyRecoveredRerankFailures(response, calls, failedCalls(calls).size())) {
+            fallback = false;
+        }
         boolean complete = !calls.isEmpty() && calls.stream().allMatch(call ->
                 call.get("promptTokens") instanceof Number && call.get("completionTokens") instanceof Number
                         && call.get("totalTokens") instanceof Number);
@@ -209,6 +216,32 @@ public final class AgentBenchmarkEvaluator {
             return message;
         }
         return null;
+    }
+
+    private static boolean onlyRecoveredRerankFailures(
+            AgentLoopResponse response, List<Map<String, Object>> calls, double reportedFallbackCount) {
+        long recoveredCount = response == null || response.getObservations() == null ? 0
+                : response.getObservations().stream().filter(AgentBenchmarkEvaluator::recoveredRerank).count();
+        List<Map<String, Object>> failures = failedCalls(calls);
+        if (recoveredCount == 0 || reportedFallbackCount != failures.size()
+                || failures.size() != recoveredCount) return false;
+        return failures.stream().allMatch(call -> Boolean.TRUE.equals(call.get("providerInvoked"))
+                && "product_rerank".equals(call.get("phase"))
+                && Set.of("empty_rerank_selection", "invalid_json", "invalid_model_output")
+                .contains(String.valueOf(call.get("fallbackReason"))));
+    }
+
+    private static List<Map<String, Object>> failedCalls(List<Map<String, Object>> calls) {
+        return calls.stream().filter(call -> !"success".equals(call.get("status"))).toList();
+    }
+
+    private static boolean recoveredRerank(com.ecommerce.model.ToolObservation observation) {
+        if (observation == null || observation.getData() == null
+                || !(observation.getData().get("rerankDiagnostics") instanceof Map<?, ?> diagnostics)) {
+            return false;
+        }
+        return "llm_retry_success".equals(diagnostics.get("status"))
+                && Boolean.FALSE.equals(diagnostics.get("fallbackUsed"));
     }
 
     @SuppressWarnings("unchecked")

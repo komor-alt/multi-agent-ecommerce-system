@@ -9,7 +9,7 @@ import com.ecommerce.model.UserProfile;
 import com.ecommerce.service.LlmCallBudget;
 import com.ecommerce.service.RecommendationModeResolver;
 import com.ecommerce.service.TracedRecommendationLlmClient;
-import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -18,6 +18,8 @@ import org.springframework.stereotype.Component;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -67,7 +69,9 @@ public class ProductRecAgent extends BaseAgent {
 
     @Override
     protected long executionTimeoutMs() {
-        return timeoutWithMargin(llmClient.timeoutMs(), LLM_OUTER_TIMEOUT_MARGIN_MS);
+        long perCallTimeout = Math.max(1L, llmClient.timeoutMs());
+        long twoCallTimeout = perCallTimeout > Long.MAX_VALUE / 2 ? Long.MAX_VALUE : perCallTimeout * 2;
+        return timeoutWithMargin(twoCallTimeout, LLM_OUTER_TIMEOUT_MARGIN_MS);
     }
 
     @Override
@@ -102,7 +106,8 @@ public class ProductRecAgent extends BaseAgent {
                 .limit(Math.max(numItems * 2, numItems))
                 .collect(Collectors.toList());
 
-        List<String> rankedIds = rerank(request, profile, candidates, numItems, params);
+        RerankOutcome rerankOutcome = rerank(request, profile, candidates, numItems, params);
+        List<String> rankedIds = rerankOutcome.productIds();
         Map<String, Product> idMap = candidates.stream()
                 .collect(Collectors.toMap(Product::getProductId, p -> p, (a, b) -> a));
         List<Product> finalProducts = rankedIds.stream()
@@ -126,6 +131,7 @@ public class ProductRecAgent extends BaseAgent {
         data.put("vector_used", recalled.vectorUsed());
         if (recalled.fallbackReason() != null) data.put("fallback_reason", recalled.fallbackReason());
         data.put("candidate_count", candidates.size());
+        data.put("rerank_diagnostics", rerankOutcome.diagnostics());
         data.put("blocked_product_ids", blockedIds);
         data.put("cross_border_context", crossBorderContext(request));
         data.put("connector_platform", recalled.source().startsWith("postgresql") ? "postgresql" : selectConnector(request).platform());
@@ -152,47 +158,188 @@ public class ProductRecAgent extends BaseAgent {
                 "legacy_connector", false, "postgresql_data_service_unavailable");
     }
 
-    private List<String> rerank(RecommendationRequest request, UserProfile profile, List<Product> candidates, int numItems, Map<String, Object> params) {
-        if (candidates.isEmpty()) return List.of();
-        if (profile == null) return candidates.stream().map(Product::getProductId).limit(numItems).collect(Collectors.toList());
-        try {
-            if (!modeResolver.llmEnabled()) {
-                return candidates.stream().map(Product::getProductId).limit(numItems).collect(Collectors.toList());
-            }
-            LlmCallBudget budget = params.get("llmBudget") instanceof LlmCallBudget value ? value : null;
-            String prompt = String.format(
-                    "Rerank products for a cross-border ecommerce recommendation.\n" +
-                            "User categories: %s, price range: %.0f-%.0f.\n" +
-                            "Cross-border context: platform=%s, region=%s, country=%s, locale=%s, currency=%s.\n" +
-                            "Only choose from the provided product IDs. Do not invent fields or products. Return JSON array of product IDs, max %d.\n%s",
-                    profile.getPreferredCategories(), priceMin(profile), priceMax(profile),
-                    request.platformOrDefault(), request.regionOrDefault(), request.countryOrDefault(),
-                    request.localeOrDefault(), request.currencyOrDefault(), numItems,
-                    candidates.stream()
-                            .map(p -> String.format("ID:%s name:%s category:%s price:%s %.2f warehouse:%s deliveryDays:%d platform:%s supported:%s crossBorder:%s stock:%d",
-                                    p.getProductId(), p.getName(), p.getCategory(), p.getCurrency(), p.getPrice(),
-                                    p.getWarehouseRegion(), p.getDeliveryDays(), p.getPlatform(), p.getSupportedRegions(),
-                                    p.isCrossBorderEligible(), p.getStock()))
-                            .collect(Collectors.joining("\n")));
-            Set<String> candidateIds = candidates.stream().map(Product::getProductId).collect(Collectors.toSet());
-            return llmClient.complete("product_rerank", "Return JSON only. Choose only supplied product IDs.", prompt,
-                    budget, String.valueOf(params.getOrDefault("llmFingerprint", request.getUserId())), raw -> {
-                        List<String> ids = objectMapper.readValue(stripFence(raw), new TypeReference<>() {});
-                        if (ids == null || ids.isEmpty()) {
-                            throw new TracedRecommendationLlmClient.OutputValidationException("empty_rerank_selection");
-                        }
-                        if (ids.stream().anyMatch(id -> id == null || !candidateIds.contains(id))) {
-                            throw new TracedRecommendationLlmClient.OutputValidationException("product_outside_candidate_set");
-                        }
-                        return ids.stream().distinct().limit(numItems).collect(Collectors.toList());
-                    });
-        } catch (TracedRecommendationLlmClient.TracedLlmException e) {
-            log.warn("LLM rerank fell back; reason={}", e.reason());
-            return candidates.stream().map(Product::getProductId).limit(numItems).collect(Collectors.toList());
-        } catch (Exception e) {
-            log.warn("LLM rerank failed; using safe candidate order");
-            return candidates.stream().map(Product::getProductId).limit(numItems).collect(Collectors.toList());
+    private RerankOutcome rerank(RecommendationRequest request, UserProfile profile,
+                                 List<Product> candidates, int numItems, Map<String, Object> params) {
+        if (candidates.isEmpty()) {
+            return rulesOutcome(List.of(), 0);
         }
+        List<String> safeOrder = candidates.stream().map(Product::getProductId).limit(numItems).toList();
+        if (profile == null) return rulesOutcome(safeOrder, candidates.size());
+        if (!modeResolver.llmEnabled()) return rulesOutcome(safeOrder, candidates.size());
+
+        LlmCallBudget budget = params.get("llmBudget") instanceof LlmCallBudget value ? value : null;
+        int selectionLimit = Math.max(1, Math.min(numItems, candidates.size()));
+        String prompt = rerankPrompt(request, profile, candidates, selectionLimit, null);
+        Map<String, String> candidateIds = candidateIdWhitelist(candidates);
+        String fingerprint = String.valueOf(params.getOrDefault("llmFingerprint", request.getUserId()));
+        AttemptDiagnostics firstAttempt = new AttemptDiagnostics();
+        try {
+            List<String> selected = completeRerank(prompt, budget, fingerprint, candidateIds,
+                    selectionLimit, firstAttempt);
+            return modelOutcome(selected, "llm_success", null, null, null,
+                    0, candidates.size(), firstAttempt.invalidIdCount());
+        } catch (TracedRecommendationLlmClient.TracedLlmException firstFailure) {
+            String firstReason = firstFailure.reason();
+            int invalidIdCount = firstAttempt.invalidIdCount();
+            if (recoverableRerankFailure(firstReason)) {
+                String retrySkippedReason = retryUnavailableReason(budget);
+                if (retrySkippedReason == null) {
+                    AttemptDiagnostics retryAttempt = new AttemptDiagnostics();
+                    try {
+                        String retryPrompt = rerankPrompt(request, profile, candidates, selectionLimit, firstReason);
+                        List<String> selected = completeRerank(retryPrompt, budget,
+                                fingerprint + ":retry:1", candidateIds, selectionLimit, retryAttempt);
+                        return modelOutcome(selected, "llm_retry_success", firstReason, null, null,
+                                1, candidates.size(), invalidIdCount + retryAttempt.invalidIdCount());
+                    } catch (TracedRecommendationLlmClient.TracedLlmException retryFailure) {
+                        invalidIdCount += retryAttempt.invalidIdCount();
+                        log.warn("LLM rerank retry fell back; firstReason={}, finalReason={}, candidateCount={}, invalidIdCount={}",
+                                firstReason, retryFailure.reason(), candidates.size(), invalidIdCount);
+                        return fallbackOutcome(safeOrder, firstReason, retryFailure.reason(), null,
+                                1, candidates.size(), invalidIdCount);
+                    }
+                }
+                llmClient.recordLocalFallback("product_rerank", budget, retrySkippedReason);
+                log.warn("LLM rerank retry skipped; firstReason={}, skipReason={}, candidateCount={}, invalidIdCount={}",
+                        firstReason, retrySkippedReason, candidates.size(), invalidIdCount);
+                return fallbackOutcome(safeOrder, firstReason, firstReason, retrySkippedReason,
+                        0, candidates.size(), invalidIdCount);
+            }
+            log.warn("LLM rerank fell back; reason={}, candidateCount={}, invalidIdCount={}",
+                    firstReason, candidates.size(), invalidIdCount);
+            return fallbackOutcome(safeOrder, firstReason, firstReason, null,
+                    0, candidates.size(), invalidIdCount);
+        } catch (Exception failure) {
+            log.warn("LLM rerank failed; using safe candidate order; candidateCount={}", candidates.size());
+            return fallbackOutcome(safeOrder, "local_processing_failed", "local_processing_failed",
+                    null, 0, candidates.size(), firstAttempt.invalidIdCount());
+        }
+    }
+
+    private List<String> completeRerank(String prompt, LlmCallBudget budget, String fingerprint,
+                                        Map<String, String> candidateIds, int selectionLimit,
+                                        AttemptDiagnostics diagnostics) {
+        return llmClient.complete("product_rerank",
+                "Return JSON only. Select at least one supplied product ID; never invent or omit the selection field.",
+                prompt, budget, fingerprint,
+                raw -> parseRerankSelection(raw, candidateIds, selectionLimit, diagnostics));
+    }
+
+    private List<String> parseRerankSelection(String raw, Map<String, String> candidateIds,
+                                               int selectionLimit, AttemptDiagnostics diagnostics) throws Exception {
+        JsonNode root = objectMapper.readTree(stripFence(raw));
+        JsonNode selection = root;
+        if (root != null && root.isObject()) {
+            selection = firstArray(root, "productIds", "selectedProductIds", "rankedProductIds", "ids");
+        }
+        if (selection == null || !selection.isArray()) {
+            throw new TracedRecommendationLlmClient.OutputValidationException("invalid_model_output");
+        }
+
+        LinkedHashSet<String> selected = new LinkedHashSet<>();
+        int invalidCount = 0;
+        for (JsonNode value : selection) {
+            if (!value.isTextual()) {
+                invalidCount++;
+                continue;
+            }
+            String normalized = normalizeProductId(value.asText());
+            String canonical = candidateIds.get(normalized);
+            if (canonical == null) {
+                invalidCount++;
+            } else {
+                selected.add(canonical);
+            }
+        }
+        diagnostics.addInvalidIds(invalidCount);
+        if (invalidCount > 0) {
+            throw new TracedRecommendationLlmClient.OutputValidationException("product_outside_candidate_set");
+        }
+        if (selected.isEmpty()) {
+            throw new TracedRecommendationLlmClient.OutputValidationException("empty_rerank_selection");
+        }
+        return selected.stream().limit(selectionLimit).toList();
+    }
+
+    private JsonNode firstArray(JsonNode object, String... fields) {
+        for (String field : fields) {
+            JsonNode value = object.get(field);
+            if (value != null) return value;
+        }
+        return null;
+    }
+
+    private Map<String, String> candidateIdWhitelist(List<Product> candidates) {
+        Map<String, String> ids = new LinkedHashMap<>();
+        for (Product candidate : candidates) {
+            String canonical = candidate.getProductId();
+            String normalized = normalizeProductId(canonical);
+            if (!normalized.isEmpty()) ids.putIfAbsent(normalized, canonical);
+        }
+        return Map.copyOf(ids);
+    }
+
+    private String normalizeProductId(String value) {
+        return value == null ? "" : value.trim();
+    }
+
+    private String rerankPrompt(RecommendationRequest request, UserProfile profile,
+                                List<Product> candidates, int selectionLimit, String priorFailure) {
+        String correction = priorFailure == null ? "" : String.format(
+                "The previous response was rejected for %s. Correct only the output format; do not add products.\n",
+                priorFailure);
+        return String.format(
+                "Rerank products for a cross-border ecommerce recommendation.\n" +
+                        "User categories: %s, price range: %.0f-%.0f.\n" +
+                        "Cross-border context: platform=%s, region=%s, country=%s, locale=%s, currency=%s.\n" +
+                        "%sChoose between 1 and %d IDs from the provided candidates. Even if relevance is weak, choose the best available candidate; never return an empty selection.\n" +
+                        "Return exactly one JSON object: {\"productIds\":[\"candidate-id\"]}. Do not invent fields or IDs.\n%s",
+                profile.getPreferredCategories(), priceMin(profile), priceMax(profile),
+                request.platformOrDefault(), request.regionOrDefault(), request.countryOrDefault(),
+                request.localeOrDefault(), request.currencyOrDefault(), correction, selectionLimit,
+                candidates.stream()
+                        .map(p -> String.format("ID:%s name:%s category:%s price:%s %.2f warehouse:%s deliveryDays:%d platform:%s supported:%s crossBorder:%s stock:%d",
+                                p.getProductId(), p.getName(), p.getCategory(), p.getCurrency(), p.getPrice(),
+                                p.getWarehouseRegion(), p.getDeliveryDays(), p.getPlatform(), p.getSupportedRegions(),
+                                p.isCrossBorderEligible(), p.getStock()))
+                        .collect(Collectors.joining("\n")));
+    }
+
+    private boolean recoverableRerankFailure(String reason) {
+        return Set.of("empty_rerank_selection", "invalid_json", "invalid_model_output").contains(reason);
+    }
+
+    private String retryUnavailableReason(LlmCallBudget budget) {
+        if (budget == null) return "llm_budget_unavailable";
+        return budget.getCallCount() >= budget.getMaxCalls() ? "llm_budget_exhausted" : null;
+    }
+
+    private RerankOutcome rulesOutcome(List<String> ids, int candidateCount) {
+        return modelOutcome(ids, "rules", null, null, null, 0, candidateCount, 0);
+    }
+
+    private RerankOutcome fallbackOutcome(List<String> ids, String firstReason, String finalReason,
+                                          String retrySkippedReason, int retryCount,
+                                          int candidateCount, int invalidIdCount) {
+        return modelOutcome(ids, "safe_fallback", firstReason, finalReason, retrySkippedReason,
+                retryCount, candidateCount, invalidIdCount);
+    }
+
+    private RerankOutcome modelOutcome(List<String> ids, String status, String firstReason,
+                                       String finalReason, String retrySkippedReason, int retryCount,
+                                       int candidateCount, int invalidIdCount) {
+        Map<String, Object> diagnostics = new LinkedHashMap<>();
+        diagnostics.put("status", status);
+        diagnostics.put("fallbackUsed", "safe_fallback".equals(status));
+        diagnostics.put("firstFailureReason", firstReason);
+        diagnostics.put("finalFailureReason", finalReason);
+        diagnostics.put("retrySkippedReason", retrySkippedReason);
+        diagnostics.put("retryCount", retryCount);
+        diagnostics.put("candidateCount", candidateCount);
+        diagnostics.put("invalidIdCount", invalidIdCount);
+        diagnostics.put("selectedCount", ids.size());
+        return new RerankOutcome(List.copyOf(ids),
+                java.util.Collections.unmodifiableMap(new LinkedHashMap<>(diagnostics)));
     }
 
     private String stripFence(String raw) {
@@ -259,6 +406,20 @@ public class ProductRecAgent extends BaseAgent {
     private record RecallResult(List<Product> products, String source, boolean vectorUsed, String fallbackReason) {
         private RecallResult {
             products = products == null ? List.of() : List.copyOf(products);
+        }
+    }
+
+    private record RerankOutcome(List<String> productIds, Map<String, Object> diagnostics) {}
+
+    private static final class AttemptDiagnostics {
+        private int invalidIdCount;
+
+        void addInvalidIds(int count) {
+            invalidIdCount += Math.max(0, count);
+        }
+
+        int invalidIdCount() {
+            return invalidIdCount;
         }
     }
 }

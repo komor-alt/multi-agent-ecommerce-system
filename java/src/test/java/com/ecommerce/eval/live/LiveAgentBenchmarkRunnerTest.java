@@ -62,7 +62,8 @@ class LiveAgentBenchmarkRunnerTest {
                 : Map.of("recommendation-" + settings.scope().name().toLowerCase(), selectedHash);
         AgentBenchmark.Controls controls = new AgentBenchmark.Controls(settings.provider(), settings.model(),
                 selectedHash, suiteHashes, toolsetHash, selectedFaultPlanHash(selectedCases),
-                settings.maxCallsPerCase(), settings.maxTotalCalls(), MAX_STEPS, settings.seed(),
+                settings.maxCallsPerCase(), settings.maxTotalCalls(), settings.maxOutputTokensPerCall(),
+                MAX_STEPS, settings.seed(),
                 "variant-recorded;single-topology=false");
         AgentBenchmark.requireFairControls(Collections.nCopies(variants.size(), controls));
 
@@ -75,7 +76,7 @@ class LiveAgentBenchmarkRunnerTest {
         try (ConfigurableApplicationContext app = new SpringApplicationBuilder(
                 MultiAgentApplication.class, FaultConfiguration.class)
                 .web(WebApplicationType.NONE)
-                .properties(applicationProperties(settings.maxCallsPerCase()))
+                .properties(applicationProperties(settings.maxCallsPerCase(), settings.maxOutputTokensPerCall()))
                 .run()) {
             AutonomousAgentLoopService agent = app.getBean(AutonomousAgentLoopService.class);
             RecommendationRunRepository runs = app.getBean(RecommendationRunRepository.class);
@@ -148,12 +149,13 @@ class LiveAgentBenchmarkRunnerTest {
         });
     }
 
-    static Map<String, Object> applicationProperties(int maxCallsPerCase) {
+    static Map<String, Object> applicationProperties(int maxCallsPerCase, int maxOutputTokensPerCall) {
         return Map.of(
                 "agent.recommend.mode", "LLM",
                 "agent.recommend.live-enabled", "true",
                 "agent.recommend.max-llm-calls", maxCallsPerCase,
                 "agent.supervisor.max-llm-calls", maxCallsPerCase,
+                "spring.ai.openai.chat.options.max-tokens", maxOutputTokensPerCall,
                 "agent.embedding.live-enabled", "false",
                 "agent.embedding.max-calls", "0",
                 "spring.datasource.driver-class-name", "org.postgresql.Driver");

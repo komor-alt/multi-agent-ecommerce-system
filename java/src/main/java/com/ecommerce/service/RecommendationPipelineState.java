@@ -27,6 +27,7 @@ import java.util.concurrent.TimeoutException;
 import java.time.Duration;
 
 public class RecommendationPipelineState {
+    private static final long MAX_WRAP_SAFE_NANO_DELAY = Long.MAX_VALUE / 2;
     private final String runId;
     private final RecommendationRequest request;
     private final Map<String, AgentResult> agentResults = new ConcurrentHashMap<>();
@@ -67,7 +68,16 @@ public class RecommendationPipelineState {
     }
 
     public void setDeadline(Duration timeout) {
-        deadlineNanos = System.nanoTime() + timeout.toNanos();
+        java.util.Objects.requireNonNull(timeout, "timeout");
+        long timeoutNanos;
+        try {
+            timeoutNanos = timeout.toNanos();
+        } catch (ArithmeticException overflow) {
+            timeoutNanos = MAX_WRAP_SAFE_NANO_DELAY;
+        }
+        // Signed subtraction remains wrap-safe while the relative delay stays below half the long range.
+        long boundedDelay = Math.min(Math.max(0L, timeoutNanos), MAX_WRAP_SAFE_NANO_DELAY);
+        deadlineNanos = System.nanoTime() + boundedDelay;
     }
 
     public void checkActive() {

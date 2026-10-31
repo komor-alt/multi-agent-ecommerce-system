@@ -77,7 +77,7 @@ public class TracedRecommendationLlmClient {
         return execute(phase, budget, fingerprint, parser, invocation);
     }
 
-    void recordLocalFallback(String phase, LlmCallBudget budget, String reason) {
+    public void recordLocalFallback(String phase, LlmCallBudget budget, String reason) {
         if (budget == null) return;
         recordTrace(budget, new LlmCallBudget.CallTrace(metricPhase(phase), provider,
                 configuredModel, 0, "fallback", safeLabel(reason, "local_processing_failed"),
@@ -243,6 +243,7 @@ public class TracedRecommendationLlmClient {
     private static String metricFailureReason(String value) {
         if (value != null && java.util.Set.of("provider_timeout", "provider_error", "llm_executor_saturated",
                 "call_interrupted", "empty_model_output", "invalid_json", "invalid_model_output",
+                 "empty_rerank_selection", "product_outside_candidate_set",
                 "tool_outside_candidate_set", "unexpected_decision_fields", "invalid_decision_summary",
                 "invalid_product_reasons", "product_outside_final_selection").contains(value)) return value;
         return "other";

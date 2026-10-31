@@ -20,6 +20,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -149,7 +152,7 @@ public class RecommendationPipelineExecutor {
         params.put("userProfile", profile == null ? new UserProfile() : profile);
         params.put("candidateProducts", candidates == null ? List.of() : candidates);
         params.put("numItems", request.getNumItems());
-        addLlmBudget(params, budget, "product_rerank", request);
+        addLlmBudget(params, budget, "product_rerank", request, candidateSetDigest(candidates));
         return productRecAgent.runAsync(params, agentExecutor);
     }
 
@@ -175,10 +178,63 @@ public class RecommendationPipelineExecutor {
 
     private void addLlmBudget(
             Map<String, Object> params, LlmCallBudget budget, String phase, RecommendationRequest request) {
+        addLlmBudget(params, budget, phase, request, null);
+    }
+
+    private void addLlmBudget(
+            Map<String, Object> params, LlmCallBudget budget, String phase,
+            RecommendationRequest request, String scopeDigest) {
         if (budget != null) {
             params.put("llmBudget", budget);
-            params.put("llmFingerprint", phase + ":" + safeUserId(request) + ":" + request.getScene());
+            String base = phase + ":" + safeUserId(request) + ":" + request.getScene();
+            params.put("llmFingerprint", scopeDigest == null ? base : base + ":scope:" + scopeDigest);
         }
+    }
+
+    private String candidateSetDigest(List<Product> candidates) {
+        String canonical = (candidates == null ? List.<Product>of() : candidates).stream()
+                .map(this::rerankPromptSnapshot)
+                .collect(Collectors.joining("|"));
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(canonical.getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder(digest.length * 2);
+            for (byte value : digest) hex.append(String.format("%02x", value));
+            return hex.toString();
+        } catch (NoSuchAlgorithmException error) {
+            throw new IllegalStateException("SHA-256 unavailable", error);
+        }
+    }
+
+    /**
+     * Hash input mirrors every candidate field currently rendered into ProductRecAgent's rerank prompt.
+     * Candidate order and duplicates are retained because both change the actual prompt seen by the model.
+     */
+    private String rerankPromptSnapshot(Product product) {
+        if (product == null) return lengthPrefixed("");
+        List<String> fields = List.of(
+                safeFingerprintField(product.getProductId()),
+                safeFingerprintField(product.getName()),
+                safeFingerprintField(product.getCategory()),
+                safeFingerprintField(product.getCurrency()),
+                Double.toString(product.getPrice()),
+                safeFingerprintField(product.getWarehouseRegion()),
+                Integer.toString(product.getDeliveryDays()),
+                safeFingerprintField(product.getPlatform()),
+                product.getSupportedRegions() == null ? "" : product.getSupportedRegions().stream()
+                        .map(this::lengthPrefixed).collect(Collectors.joining()),
+                Boolean.toString(product.isCrossBorderEligible()),
+                Integer.toString(product.getStock()));
+        return fields.stream().map(this::lengthPrefixed).collect(Collectors.joining());
+    }
+
+    private String safeFingerprintField(String value) {
+        return value == null ? "" : value.trim();
+    }
+
+    private String lengthPrefixed(String value) {
+        String safe = value == null ? "" : value;
+        return safe.length() + ":" + safe;
     }
 
     public ToolObservation executeTool(String action, RecommendationPipelineState context) {
@@ -579,6 +635,9 @@ public class RecommendationPipelineExecutor {
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("rankedProductIds", rankedIds);
         data.put("finalProductIds", List.of());
+        if (result.getData() != null && result.getData().get("rerank_diagnostics") instanceof Map<?, ?> diagnostics) {
+            data.put("rerankDiagnostics", diagnostics);
+        }
         data.put("crossBorder", crossBorderState(context.getRequest()));
         return ToolObservation.builder().toolName(RERANK)
                 .summary("Reranked products; Supervisor fulfillment merge remains pending")

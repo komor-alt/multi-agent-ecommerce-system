@@ -44,7 +44,7 @@ public final class AgentBenchmark {
     public record Controls(String provider, String model, String datasetHash, Map<String, String> suiteHashes,
                            String toolsetHash,
                            String faultPlanHash, int maxCallsPerCase, int maxTotalCalls,
-                           int maxSteps, long seed, String parallelPolicy) {
+                           int maxOutputTokensPerCall, int maxSteps, long seed, String parallelPolicy) {
         public Controls {
             Objects.requireNonNull(provider);
             Objects.requireNonNull(model);
@@ -53,7 +53,8 @@ public final class AgentBenchmark {
             Objects.requireNonNull(toolsetHash);
             Objects.requireNonNull(faultPlanHash);
             Objects.requireNonNull(parallelPolicy);
-            if (maxCallsPerCase < 0 || maxTotalCalls < maxCallsPerCase || maxSteps <= 0) {
+            if (maxCallsPerCase < 0 || maxTotalCalls < maxCallsPerCase
+                    || maxOutputTokensPerCall < 0 || maxSteps <= 0) {
                 throw new IllegalArgumentException("BENCHMARK_BUDGET_INVALID");
             }
         }
@@ -205,10 +206,11 @@ public final class AgentBenchmark {
                     || !Objects.equals(first.faultPlanHash(), candidate.faultPlanHash())
                     || first.maxCallsPerCase() != candidate.maxCallsPerCase()
                     || first.maxTotalCalls() != candidate.maxTotalCalls()
+                    || first.maxOutputTokensPerCall() != candidate.maxOutputTokensPerCall()
                     || first.maxSteps() != candidate.maxSteps()
                     || first.seed() != candidate.seed()
                     || !Objects.equals(first.parallelPolicy(), candidate.parallelPolicy())) {
-                throw new IllegalArgumentException("BENCHMARK_UNFAIR_CONTROLS: model, suites, dataset, toolset, fault plan, budget, max steps, seed and parallel policy must match");
+                throw new IllegalArgumentException("BENCHMARK_UNFAIR_CONTROLS: model, suites, dataset, toolset, fault plan, call budget, max output tokens, max steps, seed and parallel policy must match");
             }
         }
     }

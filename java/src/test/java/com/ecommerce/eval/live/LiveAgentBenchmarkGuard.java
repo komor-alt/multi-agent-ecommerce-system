@@ -1,8 +1,10 @@
 package com.ecommerce.eval.live;
 
 import com.ecommerce.eval.benchmark.AgentBenchmark;
+import org.springframework.boot.convert.DurationStyle;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.util.Locale;
 import java.util.List;
 import java.util.Map;
@@ -14,9 +16,15 @@ final class LiveAgentBenchmarkGuard {
     static final String ARM_SET_ENV = "ECOM_AGENT_BENCHMARK_ARMS";
     static final String SMOKE_PASSED_ENV = "ECOM_AGENT_BENCHMARK_SMOKE_PASSED";
     static final String TOTAL_BUDGET_ENV = "ECOM_AGENT_BENCHMARK_MAX_TOTAL_LLM_CALLS";
+    static final String MAX_OUTPUT_TOKENS_ENV = "ECOM_AGENT_BENCHMARK_MAX_OUTPUT_TOKENS";
     static final String SEED_ENV = "ECOM_AGENT_BENCHMARK_SEED";
     static final String INPUT_PRICE_ENV = "ECOM_AGENT_BENCHMARK_INPUT_USD_PER_1M";
     static final String OUTPUT_PRICE_ENV = "ECOM_AGENT_BENCHMARK_OUTPUT_USD_PER_1M";
+    static final String LLM_TIMEOUT_ENV = "ECOM_RECOMMEND_LLM_TIMEOUT_MS";
+    static final String RUN_TIMEOUT_ENV = "ECOM_AGENT_RUN_TIMEOUT";
+    private static final long DEFAULT_LLM_TIMEOUT_MS = 15_000L;
+    private static final Duration DEFAULT_RUN_TIMEOUT = Duration.ofSeconds(60);
+    private static final long PRODUCT_RERANK_RETRY_MARGIN_MS = 2_000L;
     enum Scope { SMOKE, PILOT, FULL }
     enum ArmSet { CORE, FULL }
     private LiveAgentBenchmarkGuard() {}
@@ -60,12 +68,27 @@ final class LiveAgentBenchmarkGuard {
         if (live.maxLlmCalls() != modeBudget) {
             throw fail("ECOM_SUPERVISOR_MAX_LLM_CALLS and ECOM_RECOMMEND_MAX_LLM_CALLS must match");
         }
+        long llmTimeoutMs = positiveLongOrDefault(env, LLM_TIMEOUT_ENV, DEFAULT_LLM_TIMEOUT_MS);
+        long runTimeoutMs = positiveDurationMsOrDefault(env, RUN_TIMEOUT_ENV, DEFAULT_RUN_TIMEOUT);
+        long rerankOuterTimeoutMs;
+        try {
+            rerankOuterTimeoutMs = Math.addExact(Math.multiplyExact(llmTimeoutMs, 2L),
+                    PRODUCT_RERANK_RETRY_MARGIN_MS);
+        } catch (ArithmeticException error) {
+            throw fail(LLM_TIMEOUT_ENV + " is too large");
+        }
+        if (runTimeoutMs <= rerankOuterTimeoutMs) {
+            throw fail(RUN_TIMEOUT_ENV + " must be greater than the ProductRecAgent retry deadline ("
+                    + rerankOuterTimeoutMs + "ms for " + LLM_TIMEOUT_ENV + "=" + llmTimeoutMs
+                    + "ms); configure an explicit Live run timeout before provider execution");
+        }
         int maxTotal = positiveInt(env, TOTAL_BUDGET_ENV);
         long required = Math.multiplyExact(Math.multiplyExact((long) modeBudget, caseCount), variantCount);
         if (required > Integer.MAX_VALUE || maxTotal != required) {
             throw budgetFail(TOTAL_BUDGET_ENV + " must equal caseCount * runnableVariantCount * perCaseBudget (required "
                     + required + "); samples and budgets are not shared or truncated");
         }
+        int maxOutputTokensPerCall = positiveInt(env, MAX_OUTPUT_TOKENS_ENV);
         long seed;
         try {
             seed = Long.parseLong(value(env, SEED_ENV));
@@ -81,7 +104,7 @@ final class LiveAgentBenchmarkGuard {
         String outputPrice = value(env, OUTPUT_PRICE_ENV);
         AgentBenchmark.PriceConfig prices = parsePrices(inputPrice, outputPrice);
         return new Settings(live, scope, armSet, provider, model, modeBudget, maxTotal, caseCount, variantCount,
-                required, seed, prices);
+                required, maxOutputTokensPerCall, seed, llmTimeoutMs, runTimeoutMs, prices);
     }
 
     private static ArmSet armSet(Map<String, String> env) {
@@ -113,6 +136,34 @@ final class LiveAgentBenchmarkGuard {
         throw fail(key + " must be a positive integer");
     }
 
+    private static long positiveLongOrDefault(Map<String, String> env, String key, long defaultValue) {
+        String configured = value(env, key);
+        if (configured.isBlank()) return defaultValue;
+        try {
+            long number = Long.parseLong(configured);
+            if (number > 0) return number;
+        } catch (NumberFormatException ignored) { }
+        throw fail(key + " must be a positive integer number of milliseconds");
+    }
+
+    private static long positiveDurationMsOrDefault(Map<String, String> env, String key, Duration defaultValue) {
+        String configured = value(env, key);
+        Duration duration;
+        try {
+            duration = configured.isBlank() ? defaultValue : DurationStyle.detectAndParse(configured);
+        } catch (IllegalArgumentException error) {
+            throw fail(key + " must be a positive Spring duration such as 90s");
+        }
+        if (duration.isZero() || duration.isNegative()) {
+            throw fail(key + " must be a positive Spring duration such as 90s");
+        }
+        try {
+            return duration.toMillis();
+        } catch (ArithmeticException error) {
+            throw fail(key + " is too large");
+        }
+    }
+
     private static String value(Map<String, String> env, String key) {
         return env.getOrDefault(key, "").trim();
     }
@@ -128,11 +179,15 @@ final class LiveAgentBenchmarkGuard {
     record Settings(LiveRecommendationE2EGuard.Settings live, Scope scope, ArmSet armSet,
                     String provider, String model,
                     int maxCallsPerCase, int maxTotalCalls, int caseCount, int variantCount,
-                    long requiredTotalCalls, long seed, AgentBenchmark.PriceConfig prices) {
+                    long requiredTotalCalls, int maxOutputTokensPerCall,
+                    long seed, long llmTimeoutMs, long runTimeoutMs,
+                    AgentBenchmark.PriceConfig prices) {
         @Override public String toString() {
             return "Settings[scope=" + scope + ", armSet=" + armSet + ", provider=" + provider
                     + ", model=" + model + ", maxCallsPerCase="
-                    + maxCallsPerCase + ", maxTotalCalls=" + maxTotalCalls + ", seed=" + seed + ", key=<redacted>]";
+                    + maxCallsPerCase + ", maxTotalCalls=" + maxTotalCalls + ", llmTimeoutMs="
+                    + llmTimeoutMs + ", runTimeoutMs=" + runTimeoutMs + ", maxOutputTokensPerCall="
+                    + maxOutputTokensPerCall + ", seed=" + seed + ", key=<redacted>]";
         }
     }
 }

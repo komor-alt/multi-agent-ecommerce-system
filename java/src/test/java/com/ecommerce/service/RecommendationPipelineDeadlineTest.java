@@ -125,6 +125,15 @@ class RecommendationPipelineDeadlineTest {
         assertThatThrownBy(() -> state.await(CompletableFuture.failedFuture(failure))).isSameAs(failure);
     }
 
+    @Test
+    void extremelyLargeConfiguredDurationIsClampedWithoutOverflowingIntoAnExpiredDeadline() {
+        RecommendationPipelineState state = state();
+
+        state.setDeadline(Duration.ofSeconds(Long.MAX_VALUE));
+
+        assertThat(state.await(CompletableFuture.completedFuture("ok"))).isEqualTo("ok");
+    }
+
     private static RecommendationPipelineState state() {
         return new RecommendationPipelineState("run-deadline", RecommendationRequest.builder().scene("homepage").build());
     }

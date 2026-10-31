@@ -3,6 +3,9 @@ package com.ecommerce.service;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -60,5 +63,34 @@ class LlmCallBudgetTest {
         assertEquals(16L, metrics.get("totalTokens"));
         assertEquals("partial", metrics.get("usageStatus"));
         assertEquals("provider_usage_missing_for_some_calls", metrics.get("usageUnavailableReason"));
+    }
+
+    @Test
+    void concurrentDuplicateReservationsAreAtomicAndRetryFingerprintStillUsesTheSameBudget() throws Exception {
+        LlmCallBudget budget = new LlmCallBudget(2);
+        ExecutorService workers = Executors.newFixedThreadPool(8);
+        try {
+            Callable<LlmCallBudget.Reservation> duplicate =
+                    () -> budget.reserve("product_rerank", "candidate-digest");
+            var reservations = workers.invokeAll(java.util.Collections.nCopies(16, duplicate)).stream()
+                    .map(future -> {
+                        try {
+                            return future.get();
+                        } catch (Exception error) {
+                            throw new AssertionError(error);
+                        }
+                    }).toList();
+
+            assertEquals(1, reservations.stream().filter(LlmCallBudget.Reservation::acquired).count());
+            assertEquals(15, reservations.stream()
+                    .filter(value -> "duplicate_call_blocked".equals(value.reason())).count());
+            assertTrue(budget.reserve("product_rerank", "candidate-digest:retry:1").acquired());
+            assertFalse(budget.reserve("product_rerank", "changed-candidate-digest").acquired());
+            assertEquals(2, budget.snapshot().get("llmCallCount"));
+            assertEquals(15, budget.snapshot().get("duplicateCallsBlocked"));
+            assertEquals(1, budget.snapshot().get("budgetBlockedCalls"));
+        } finally {
+            workers.shutdownNow();
+        }
     }
 }

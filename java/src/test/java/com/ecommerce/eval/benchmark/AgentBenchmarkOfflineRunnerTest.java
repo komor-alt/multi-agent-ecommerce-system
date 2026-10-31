@@ -70,7 +70,7 @@ class AgentBenchmarkOfflineRunnerTest {
         Collections.shuffle(orderedCases, new Random(SEED));
         AgentBenchmark.Controls controls = new AgentBenchmark.Controls(
                 "offline-rules", "deterministic-rules", dataset.sha256(), dataset.suiteHashes(),
-                toolsetHash, dataset.faultPlanHash(), 0, 0, MAX_STEPS, SEED,
+                toolsetHash, dataset.faultPlanHash(), 0, 0, 0, MAX_STEPS, SEED,
                 "single=false;multi=true");
         AgentBenchmark.requireFairControls(Collections.nCopies(variants.size(), controls));
 

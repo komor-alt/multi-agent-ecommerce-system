@@ -7,6 +7,7 @@ import com.ecommerce.model.MarketContext;
 import com.ecommerce.model.Product;
 import com.ecommerce.model.RecommendationPlan;
 import com.ecommerce.model.ToolCallRecord;
+import com.ecommerce.model.ToolObservation;
 import com.ecommerce.service.RunDeadlineExceededException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -338,16 +339,72 @@ class AgentBenchmarkFrameworkTest {
     }
 
     @Test
+    void distinguishesRecoveredRerankFormatRetryFromFinalRulesFallback() {
+        AgentBenchmarkDataset.Case testCase = complexCase("complex-homepage-001");
+        AgentLoopResponse response = completedResponse(testCase, List.of(
+                "get_user_profile", "search_products", "check_inventory", "rerank", "final_answer"));
+        response.setLlmMetrics(Map.of("llmCallCount", 2, "providerCallCount", 2,
+                "fallbackCount", 1, "usageStatus", "available",
+                "promptTokens", 20, "completionTokens", 10, "totalTokens", 30));
+        response.setObservations(List.of(ToolObservation.builder().toolName("rerank")
+                .data(Map.of("rerankDiagnostics", Map.of(
+                        "status", "llm_retry_success", "fallbackUsed", false,
+                        "firstFailureReason", "empty_rerank_selection", "retryCount", 1)))
+                .build()));
+        List<AgentRunEvent> events = List.of(
+                llmCall(true, "fallback", "empty_rerank_selection", "product_rerank"),
+                llmCall(true, "success", null, "product_rerank"));
+
+        AgentBenchmark.CaseObservation observation = AgentBenchmarkEvaluator.evaluate(testCase, response,
+                null, events, 12.0, true, true, new AgentBenchmark.PriceConfig(null, null));
+
+        assertThat(observation.fallbackDetected()).isFalse();
+        assertThat(observation.expectedBehaviorMatch()).isTrue();
+        assertThat(observation.llmCallCount()).isEqualTo(2);
+        assertThat(observation.providerCallCount()).isEqualTo(2);
+        assertThat(response.getLlmMetrics()).containsEntry("fallbackCount", 1);
+    }
+
+    @Test
+    void keepsFinalRerankRulesFallbackVisibleAfterAFailedRetry() {
+        AgentBenchmarkDataset.Case testCase = complexCase("complex-homepage-001");
+        AgentLoopResponse response = completedResponse(testCase, List.of(
+                "get_user_profile", "search_products", "check_inventory", "rerank", "final_answer"));
+        response.setLlmMetrics(Map.of("llmCallCount", 2, "providerCallCount", 2,
+                "fallbackCount", 2, "usageStatus", "unavailable"));
+        response.setObservations(List.of(ToolObservation.builder().toolName("rerank")
+                .data(Map.of("rerankDiagnostics", Map.of(
+                        "status", "safe_fallback", "fallbackUsed", true,
+                        "firstFailureReason", "empty_rerank_selection",
+                        "finalFailureReason", "invalid_json", "retryCount", 1)))
+                .build()));
+        List<AgentRunEvent> events = List.of(
+                llmCall(true, "fallback", "empty_rerank_selection", "product_rerank"),
+                llmCall(true, "fallback", "invalid_json", "product_rerank"));
+
+        AgentBenchmark.CaseObservation observation = AgentBenchmarkEvaluator.evaluate(testCase, response,
+                null, events, 12.0, true, true, new AgentBenchmark.PriceConfig(null, null));
+
+        assertThat(observation.fallbackDetected()).isTrue();
+        assertThat(observation.expectedBehaviorMatch()).isFalse();
+        assertThat(observation.llmCallCount()).isEqualTo(2);
+        assertThat(observation.providerCallCount()).isEqualTo(2);
+    }
+
+    @Test
     void rejectsUnfairControlSettingsAcrossArms() {
         AgentBenchmark.Controls baseline = controls("model-a", 4);
         AgentBenchmark.Controls changedModel = controls("model-b", 4);
         AgentBenchmark.Controls changedBudget = controls("model-a", 5);
         AgentBenchmark.Controls changedDataset = new AgentBenchmark.Controls("test-provider", "model-a",
                 "other-dataset", java.util.Map.of("regression", "other"), "toolset-hash", "fault-hash",
-                4, 24, 12, 7L, "single=false;multi=true");
+                4, 24, 2048, 12, 7L, "single=false;multi=true");
         AgentBenchmark.Controls changedSeed = new AgentBenchmark.Controls("test-provider", "model-a",
                 "dataset-hash", java.util.Map.of("regression", "suite-hash"), "toolset-hash", "fault-hash",
-                4, 24, 12, 8L, "single=false;multi=true");
+                4, 24, 2048, 12, 8L, "single=false;multi=true");
+        AgentBenchmark.Controls changedOutputCap = new AgentBenchmark.Controls("test-provider", "model-a",
+                "dataset-hash", java.util.Map.of("regression", "suite-hash"), "toolset-hash", "fault-hash",
+                4, 24, 1024, 12, 7L, "single=false;multi=true");
         assertThatThrownBy(() -> AgentBenchmark.requireFairControls(List.of(baseline, changedModel)))
                 .hasMessageContaining("BENCHMARK_UNFAIR_CONTROLS");
         assertThatThrownBy(() -> AgentBenchmark.requireFairControls(List.of(baseline, changedBudget)))
@@ -355,6 +412,8 @@ class AgentBenchmarkFrameworkTest {
         assertThatThrownBy(() -> AgentBenchmark.requireFairControls(List.of(baseline, changedDataset)))
                 .hasMessageContaining("BENCHMARK_UNFAIR_CONTROLS");
         assertThatThrownBy(() -> AgentBenchmark.requireFairControls(List.of(baseline, changedSeed)))
+                .hasMessageContaining("BENCHMARK_UNFAIR_CONTROLS");
+        assertThatThrownBy(() -> AgentBenchmark.requireFairControls(List.of(baseline, changedOutputCap)))
                 .hasMessageContaining("BENCHMARK_UNFAIR_CONTROLS");
         assertThatCode(() -> AgentBenchmark.requireFairControls(List.of(baseline, baseline))).doesNotThrowAnyException();
     }
@@ -399,14 +458,16 @@ class AgentBenchmarkFrameworkTest {
         assertThat(markdown).contains("- Scope: `OFFLINE_FULL`");
         assertThat(liveMarkdown).contains("- Scope: `LIVE_SMOKE_CORE`");
         assertThat(json).contains("OFFLINE_SIMULATION", "providerInvoked", "datasetHash", "toolsetHash",
-                "faultPlanHash", "maxCallsPerCase", "maxTotalCalls", "maxSteps", "seed",
+                "faultPlanHash", "maxCallsPerCase", "maxTotalCalls", "maxOutputTokensPerCall",
+                "maxSteps", "seed",
                 "topology", "pathConstraint", "vetoEnabled", "parallelScheduling",
                 "businessTaskSuccess", "safeTaskSuccess", "safeTaskSuccessRate",
                 "expectedBehaviorMatch", "validExperiment", "invalidReason",
                 "invalidCaseCount", "invalidCaseRate", "suiteHashes",
                 "providerCallCount", "averageProviderCalls", "p95ProviderCalls");
         assertThat(markdown).contains("Failure Analysis", "Grouped Metrics", "Per-Case Results",
-                        "EXTERNAL_REFERENCE", "false")
+                        "EXTERNAL_REFERENCE", "false", "max output tokens/call `2048`",
+                        "not a total-token ceiling")
                 .contains("No paired live arms");
     }
 
@@ -423,7 +484,7 @@ class AgentBenchmarkFrameworkTest {
     private static AgentBenchmark.Controls controls(String model, int budget) {
         return new AgentBenchmark.Controls("test-provider", model, "dataset-hash",
                 java.util.Map.of("regression", "suite-hash"), "toolset-hash",
-                "fault-hash", budget, 24, 12, 7L, "single=false;multi=true");
+                "fault-hash", budget, 24, 2048, 12, 7L, "single=false;multi=true");
     }
 
     private static AgentRunEvent toolStarted(String tool) {
@@ -435,7 +496,13 @@ class AgentBenchmarkFrameworkTest {
     }
 
     private static AgentRunEvent llmCall(boolean providerInvoked, String status, String fallbackReason) {
+        return llmCall(providerInvoked, status, fallbackReason, "supervisor");
+    }
+
+    private static AgentRunEvent llmCall(
+            boolean providerInvoked, String status, String fallbackReason, String phase) {
         Map<String, Object> data = new java.util.LinkedHashMap<>();
+        data.put("phase", phase);
         data.put("providerInvoked", providerInvoked);
         data.put("status", status);
         data.put("fallbackReason", fallbackReason);

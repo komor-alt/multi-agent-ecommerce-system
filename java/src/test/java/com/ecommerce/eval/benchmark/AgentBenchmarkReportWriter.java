@@ -53,8 +53,10 @@ public final class AgentBenchmarkReportWriter {
         md.append("- Toolset SHA-256: `").append(report.controls().toolsetHash()).append("`\n");
         md.append("- Fault-plan SHA-256: `").append(report.controls().faultPlanHash()).append("`\n");
         md.append("- Budget: `").append(report.controls().maxCallsPerCase()).append("` LLM calls/case; total ceiling `")
-                .append(report.controls().maxTotalCalls()).append("`; max steps `")
+                .append(report.controls().maxTotalCalls()).append("`; max output tokens/call `")
+                .append(report.controls().maxOutputTokensPerCall()).append("`; max steps `")
                 .append(report.controls().maxSteps()).append("`; seed `").append(report.controls().seed()).append("`\n");
+        md.append("- The output-token cap applies to completions only; call ceiling multiplied by this value is not a total-token ceiling because prompt tokens are separate.\n");
         md.append("- Parallel policy: `").append(report.controls().parallelPolicy()).append("`\n");
         md.append("- Cross-variant comparison available: **").append(report.crossVariantComparisonAvailable())
                 .append("**. ").append(nullSafe(report.comparisonLimitation())).append("\n\n");

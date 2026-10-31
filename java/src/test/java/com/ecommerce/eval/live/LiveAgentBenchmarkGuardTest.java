@@ -23,6 +23,7 @@ class LiveAgentBenchmarkGuardTest {
         env.put(LiveRecommendationE2EGuard.BUDGET_ENV, "4");
         env.put(LiveRecommendationE2EGuard.SUPERVISOR_BUDGET_ENV, "4");
         env.put(LiveAgentBenchmarkGuard.TOTAL_BUDGET_ENV, "48");
+        env.put(LiveAgentBenchmarkGuard.MAX_OUTPUT_TOKENS_ENV, "2048");
         env.put(LiveAgentBenchmarkGuard.SEED_ENV, "20261030");
         env.put("ECOM_LLM_MODEL", "deepseek-flash");
         env.put("ECOM_RECOMMEND_LLM_PROVIDER", "openai-compatible");
@@ -37,6 +38,7 @@ class LiveAgentBenchmarkGuardTest {
         assertThat(settings.scope()).isEqualTo(LiveAgentBenchmarkGuard.Scope.PILOT);
         assertThat(settings.maxCallsPerCase()).isEqualTo(4);
         assertThat(settings.maxTotalCalls()).isEqualTo(48);
+        assertThat(settings.maxOutputTokensPerCall()).isEqualTo(2048);
         assertThat(settings.requiredTotalCalls()).isEqualTo(48);
         assertThat(settings.armSet()).isEqualTo(LiveAgentBenchmarkGuard.ArmSet.CORE);
         assertThat(settings.seed()).isEqualTo(20261030L);
@@ -80,6 +82,63 @@ class LiveAgentBenchmarkGuardTest {
         invalid.put(LiveAgentBenchmarkGuard.ARM_SET_ENV, "AUTO");
         assertThatThrownBy(() -> LiveAgentBenchmarkGuard.selectedVariants(invalid))
                 .hasMessageContaining("CORE or FULL");
+    }
+
+    @Test
+    void acceptsObservedSmokeBasedPilotBudgetForNineCasesAndCoreArmsOnly() {
+        Map<String, String> pilot = env();
+        pilot.put(LiveRecommendationE2EGuard.BUDGET_ENV, "14");
+        pilot.put(LiveRecommendationE2EGuard.SUPERVISOR_BUDGET_ENV, "14");
+        pilot.put(LiveAgentBenchmarkGuard.TOTAL_BUDGET_ENV, "252");
+        pilot.put(LiveAgentBenchmarkGuard.LLM_TIMEOUT_ENV, "30000");
+        pilot.put(LiveAgentBenchmarkGuard.RUN_TIMEOUT_ENV, "90s");
+
+        List<com.ecommerce.eval.benchmark.AgentBenchmark.Variant> variants =
+                LiveAgentBenchmarkGuard.selectedVariants(pilot);
+        LiveAgentBenchmarkGuard.Settings settings = LiveAgentBenchmarkGuard.requireConfiguration(
+                pilot, 102, 9, 3, variants.size());
+
+        assertThat(variants).extracting(com.ecommerce.eval.benchmark.AgentBenchmark.Variant::id)
+                .containsExactly("java-single-agent-veto-on-path-on",
+                        com.ecommerce.eval.benchmark.AgentBenchmark.RUNNABLE_VARIANT);
+        assertThat(settings.scope()).isEqualTo(LiveAgentBenchmarkGuard.Scope.PILOT);
+        assertThat(settings.maxCallsPerCase()).isEqualTo(14);
+        assertThat(settings.requiredTotalCalls()).isEqualTo(9L * 2 * 14);
+        assertThat(settings.maxTotalCalls()).isEqualTo(252);
+        assertThat(settings.llmTimeoutMs()).isEqualTo(30_000L);
+        assertThat(settings.runTimeoutMs()).isEqualTo(90_000L);
+        assertThat(settings.maxOutputTokensPerCall()).isEqualTo(2048);
+    }
+
+    @Test
+    void requiresPositivePerCallOutputTokenCap() {
+        Map<String, String> missing = env();
+        missing.remove(LiveAgentBenchmarkGuard.MAX_OUTPUT_TOKENS_ENV);
+        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(missing, 102, 6, 3, 2))
+                .hasMessageContaining(LiveAgentBenchmarkGuard.MAX_OUTPUT_TOKENS_ENV);
+
+        for (String invalid : List.of("0", "-1", "not-a-number")) {
+            Map<String, String> configured = env();
+            configured.put(LiveAgentBenchmarkGuard.MAX_OUTPUT_TOKENS_ENV, invalid);
+            assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(configured, 102, 6, 3, 2))
+                    .hasMessageContaining(LiveAgentBenchmarkGuard.MAX_OUTPUT_TOKENS_ENV);
+        }
+
+        Map<String, String> valid = env();
+        valid.put(LiveAgentBenchmarkGuard.MAX_OUTPUT_TOKENS_ENV, "2048");
+        assertThat(LiveAgentBenchmarkGuard.requireConfiguration(valid, 102, 6, 3, 2)
+                .maxOutputTokensPerCall()).isEqualTo(2048);
+    }
+
+    @Test
+    void rejectsLiveRunDeadlineThatCannotContainOneRerankRetry() {
+        Map<String, String> tooShort = env();
+        tooShort.put(LiveAgentBenchmarkGuard.LLM_TIMEOUT_ENV, "30000");
+        tooShort.put(LiveAgentBenchmarkGuard.RUN_TIMEOUT_ENV, "60s");
+
+        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(tooShort, 102, 6, 3, 2))
+                .hasMessageContaining(LiveAgentBenchmarkGuard.RUN_TIMEOUT_ENV)
+                .hasMessageContaining("62000ms");
     }
 
     @Test

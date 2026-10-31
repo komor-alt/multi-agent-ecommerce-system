@@ -40,12 +40,12 @@ The following result was generated on 2026-10-31 by executing all 102 cases agai
 
 | Arm | Business success | Safe success | Expected match | Completion | Rule violation | Valid/invalid | Avg tools | P50/P95 ms |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Single Agent | 79.41% | 79.41% | 100.00% | 83.33% | 0.00% | 102 / 0 | 6.12 | 8.7480 / 23.1112 |
-| Guarded Multi-Agent | 79.41% | 79.41% | 100.00% | 83.33% | 0.00% | 102 / 0 | 6.30 | 19.1665 / 60.9683 |
-| Multi-Agent, parallel off | 79.41% | 79.41% | 100.00% | 83.33% | 0.00% | 102 / 0 | 6.12 | 20.9389 / 60.8179 |
-| Multi-Agent, VETO off | 76.47% | 76.47% | 88.24% | 83.33% | 2.94% | 102 / 0 | 5.91 | 18.9659 / 47.5332 |
-| Multi-Agent, path guard off | 79.41% | 18.63% | 27.45% | 83.33% | 72.55% | 102 / 0 | 9.82 | 29.7382 / 103.2785 |
-| Multi-Agent, both off | 76.47% | 15.69% | 24.51% | 83.33% | 75.49% | 102 / 0 | 9.35 | 28.8499 / 74.5726 |
+| Single Agent | 79.41% | 79.41% | 100.00% | 83.33% | 0.00% | 102 / 0 | 6.12 | 9.0215 / 28.9985 |
+| Guarded Multi-Agent | 79.41% | 79.41% | 100.00% | 83.33% | 0.00% | 102 / 0 | 6.30 | 20.8953 / 63.2601 |
+| Multi-Agent, parallel off | 79.41% | 79.41% | 100.00% | 83.33% | 0.00% | 102 / 0 | 6.12 | 23.6890 / 68.4384 |
+| Multi-Agent, VETO off | 76.47% | 76.47% | 88.24% | 83.33% | 2.94% | 102 / 0 | 5.91 | 19.7981 / 53.7552 |
+| Multi-Agent, path guard off | 79.41% | 18.63% | 27.45% | 83.33% | 72.55% | 102 / 0 | 9.82 | 32.3005 / 120.0183 |
+| Multi-Agent, both off | 76.47% | 15.69% | 24.51% | 83.33% | 75.49% | 102 / 0 | 9.35 | 31.3648 / 91.3129 |
 
 Latency is a single-machine offline engineering measurement and may vary with the machine and runtime environment; use the generated report under `target/agent-benchmark/` as the source of truth.
 
@@ -83,17 +83,21 @@ The second, authorized live SMOKE used provider/model `deepseek/deepseek-flash`,
 
 Guarded Multi-Agent produced safe, business-valid results for all three cases, but retention and homepage encountered `empty_rerank_selection` and used the RULES fallback. Those two cases therefore fail the strict provider-only expected-behavior contract even though their final business results remain safe. This distinction is why business/safe success and expected-behavior match are reported separately. Three normal SMOKE cases are not sufficient evidence that Multi-Agent is better than Single Agent.
 
+The persisted reason means the provider response was successfully parsed as an empty selection while market-filtered candidates were available for the deterministic fallback. The old prompt said only "max N" and therefore did not explicitly prohibit zero selections; the old parser also accepted only a top-level string array. The production reranker now requires one or more IDs, accepts a top-level array or one of four explicit object fields, trims IDs and checks every value against the exact candidate whitelist. Only empty or malformed output is eligible for one retry. The retry uses a distinct auditable fingerprint but the same `LlmCallBudget`; no remaining budget means no retry. Illegal IDs, provider errors and timeouts do not retry. A final safe fallback records the first/final reason, retry count, candidate count, invalid-ID count and selected count in the Agent result and rerank Tool Observation without storing prompts, raw output, user IDs or product IDs in the diagnostic block. The durable Observation Trace carries only those whitelisted diagnostics. The evaluator treats a failed first attempt as recovered only when every failed call is a provider-invoked `product_rerank` empty/format error and the final diagnostic is `llm_retry_success` with `fallbackUsed=false`; every other failure remains a fallback. This repair is covered only by offline tests until another live run is separately authorized.
+
+First-stage offline verification also found that the old base rerank fingerprint did not distinguish a changed candidate set after inventory VETO and re-recall. The base fingerprint now includes only a SHA-256 digest of the ordered, length-prefixed candidate snapshot fields rendered into the rerank prompt: ID, name, category, currency, price, warehouse, delivery days, platform, supported regions, cross-border eligibility and stock. Candidate order and duplicate entries are preserved in the snapshot so the fingerprint matches the prompt-visible sequence. The same snapshot remains duplicate-blocked, while changed IDs or prompt-relevant attributes may make a new bounded call. Raw candidate values are not added to the LLM call Trace. The retry appends `:retry:1` to that base and shares the same atomic call budget. A skipped retry caused by exhausted budget emits a non-provider local fallback trace, so the budget reason remains visible without consuming another call. The run deadline still checks before waiting, bounds queue plus execution time, checks again after completion and cancels pending futures on expiry; extreme configured durations are now clamped to a wrap-safe relative nanosecond delay. On 2026-10-31 the focused offline suite ran 70 tests with no failures, the complete Java suite ran 653 tests with 0 failures, 0 errors and 22 skipped, and the isolated PostgreSQL persistence/lease/recovery suite ran 22 tests with no failures. No Live SMOKE or PILOT was executed for these changes.
+
 The valid report is stored under `target/agent-benchmark/live-smoke-core/`. The first attempt, archived under `target/agent-benchmark/live-smoke-core-attempt-1/`, used a 24-call aggregate ceiling and is invalid because calls exhausted the budget and the Live runner fixed the model timeout at 15 seconds. The call budget was raised for the authorized second attempt; LLM-backed Agent outer timeouts now follow the effective client timeout with margin, and the Live runner now leaves timeout selection to `ECOM_RECOMMEND_LLM_TIMEOUT_MS`. The nine-case PILOT has not been authorized or executed.
 
 ## Explicit live run
 
-Live execution is excluded from normal tests. It requires both authorization switches, an explicit `SMOKE`, `PILOT`, or `FULL` scope, PostgreSQL, provider credentials, positive bounded per-case calls, and an **exact** aggregate budget:
+Live execution is excluded from normal tests. It requires both authorization switches, an explicit `SMOKE`, `PILOT`, or `FULL` scope, PostgreSQL, provider credentials, positive bounded per-case calls, a positive per-call output-token cap, and an **exact** aggregate call budget:
 
 ```text
 requiredTotalCalls = caseCount * armCount * maxCallsPerCase
 ```
 
-Run SMOKE first. It executes three fixed normal regression cases, one per scene. `ECOM_AGENT_BENCHMARK_ARMS` defaults to `CORE`, comparing only Single Agent and Guarded Multi-Agent. The successful authorized run above used a 12-call ceiling, so its exact aggregate ceiling was `3 * 2 * 12 = 72`; the earlier four-call/24-total attempt was invalid and is retained only as failure provenance. PILOT/FULL additionally require `ECOM_AGENT_BENCHMARK_SMOKE_PASSED=true`. Explicit `ECOM_AGENT_BENCHMARK_ARMS=FULL` runs all six arms, including parallel-off. Budget mismatch fails with `LIVE_AGENT_BENCHMARK_BUDGET` before execution. Runtime `llm_budget_exhausted` or `llm_budget_unavailable` cases are marked invalid rather than counted as model business failures. A human must select every later per-case budget and matching aggregate ceiling from observed evidence plus an explicit margin; the framework does not infer prices or budgets.
+Run SMOKE first. It executes three fixed normal regression cases, one per scene. `ECOM_AGENT_BENCHMARK_ARMS` defaults to `CORE`, comparing only Single Agent and Guarded Multi-Agent. The successful authorized run above used a 12-call ceiling, so its exact aggregate ceiling was `3 * 2 * 12 = 72`; the earlier four-call/24-total attempt was invalid and is retained only as failure provenance. The prepared rerun uses 14 calls per case, an exact aggregate call ceiling of `3 * 2 * 14 = 84`, and `ECOM_AGENT_BENCHMARK_MAX_OUTPUT_TOKENS=2048`. The runner injects that value only into its dedicated Spring context as `spring.ai.openai.chat.options.max-tokens`; the production `application.yml` default is unchanged. This limits completion tokens per provider call. `84 * 2048` is only a completion-token ceiling and must not be reported as a total-token ceiling because input tokens remain separate and are controlled by the fixed dataset, tools, candidate bounds and prompts. PILOT/FULL additionally require `ECOM_AGENT_BENCHMARK_SMOKE_PASSED=true`. Explicit `ECOM_AGENT_BENCHMARK_ARMS=FULL` runs all six arms, including parallel-off. Budget mismatch fails with `LIVE_AGENT_BENCHMARK_BUDGET` before execution. Runtime `llm_budget_exhausted` or `llm_budget_unavailable` cases are marked invalid rather than counted as model business failures. A human must select every later per-case budget and matching aggregate ceiling from observed evidence plus an explicit margin; the framework does not infer prices or budgets.
 
 PILOT provenance is selection-specific: the report contains a manifest reference hashed from the full dataset hash and the exact nine selected case IDs listed above. The loader rejects a PILOT that does not contain exactly nine cases, cover all three scenes, and include every required category. The complete 36-case complex resource remains a source reference but is marked `includedInJavaMetrics=false`; FULL continues to report the complete suite hashes.
 
@@ -106,11 +110,13 @@ $env:ECOM_RECOMMEND_MODE = "LLM"
 $env:ECOM_RECOMMEND_LIVE_ENABLED = "true"
 $env:ECOM_LLM_API_KEY = "<key>"
 $env:ECOM_LLM_MODEL = "<exact-model-id>"
-$env:ECOM_RECOMMEND_LLM_PROVIDER = "openai-compatible"
+$env:ECOM_RECOMMEND_LLM_PROVIDER = "deepseek"
 $env:ECOM_RECOMMEND_LLM_TIMEOUT_MS = "30000"
-$env:ECOM_RECOMMEND_MAX_LLM_CALLS = "12"
-$env:ECOM_SUPERVISOR_MAX_LLM_CALLS = "12"
-$env:ECOM_AGENT_BENCHMARK_MAX_TOTAL_LLM_CALLS = "72"
+$env:ECOM_AGENT_RUN_TIMEOUT = "90s"
+$env:ECOM_RECOMMEND_MAX_LLM_CALLS = "14"
+$env:ECOM_SUPERVISOR_MAX_LLM_CALLS = "14"
+$env:ECOM_AGENT_BENCHMARK_MAX_TOTAL_LLM_CALLS = "84"
+$env:ECOM_AGENT_BENCHMARK_MAX_OUTPUT_TOKENS = "2048"
 $env:ECOM_AGENT_BENCHMARK_SEED = "20261030"
 $env:SPRING_DATASOURCE_URL = "jdbc:postgresql://localhost:5432/ecommerce_agent"
 $env:SPRING_DATASOURCE_USERNAME = "<db-user>"
@@ -118,6 +124,6 @@ $env:SPRING_DATASOURCE_PASSWORD = "<db-password>"
 mvn -Plive-agent-benchmark test
 ```
 
-After a SMOKE report is reviewed and accepted, set `ECOM_AGENT_BENCHMARK_SMOKE_PASSED=true` before changing the scope to `PILOT`. If an authorized PILOT retained the shown 12-call CORE ceiling, its exact aggregate ceiling would be `9 * 2 * 12 = 216`; this is arithmetic guidance, not authorization to execute it. The flag is an explicit operator attestation, and the framework does not silently promote scopes.
+After a SMOKE report is reviewed and accepted, set `ECOM_AGENT_BENCHMARK_SMOKE_PASSED=true` before changing the scope to `PILOT`. The observed SMOKE P95 was 11 provider calls for Single and 10 for Guarded Multi. The prepared CORE PILOT therefore uses a human-selected ceiling of 14 calls per case (three calls above the higher observed P95), a 2048-token per-call completion cap, a 30-second provider timeout, and the exact aggregate call ceiling `9 * 2 * 14 = 252`. Product reranking may make two sequential provider calls, so its outer deadline is `2 * providerTimeout + 2s` (62 seconds for this configuration). Live preflight now requires `ECOM_AGENT_RUN_TIMEOUT` to be strictly greater than that deadline; the prepared command uses 90 seconds so the global run deadline cannot cut off the bounded repair attempt. Set both per-case budget variables to `14`, set `ECOM_AGENT_BENCHMARK_MAX_TOTAL_LLM_CALLS=252`, keep `ECOM_AGENT_BENCHMARK_MAX_OUTPUT_TOKENS=2048`, retain `ECOM_AGENT_BENCHMARK_ARMS=CORE`, and change the scope to `PILOT` only after separate authorization. The framework does not infer this margin, silently promote scopes, sample cases or share budget across arms.
 
-The live report records scope and arm mode, provider/model, LLM/provider call counts, RULES fallback detection, actual token/cost availability, P50/P95, tool trace, and failure reason. The evaluator requires provider-backed model planning, no silent RULES fallback, an LLM final business decision for completed outcomes, and persisted run/model/LLM latency and usage/tool/terminal/final-decision trace. Token metrics remain null unless every call returns usage. Cost remains null unless complete usage and explicit input/output USD-per-million-token rates are supplied. The authorized SMOKE above supplies observed provider-call and token data, but no PILOT/FULL result or provider-priced cost claim.
+The live report records scope and arm mode, provider/model, LLM/provider call counts, the shared per-call output-token cap, RULES fallback detection, actual token/cost availability, P50/P95, tool trace, and failure reason. Fair-control validation requires the output cap to match across arms. The evaluator requires provider-backed model planning, no silent RULES fallback, an LLM final business decision for completed outcomes, and persisted run/model/LLM latency and usage/tool/terminal/final-decision trace. Token metrics remain null unless every call returns usage. Cost remains null unless complete usage and explicit input/output USD-per-million-token rates are supplied. The authorized SMOKE above supplies observed provider-call and token data, but no PILOT/FULL result or provider-priced cost claim.

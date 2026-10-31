@@ -454,10 +454,15 @@ public class AutonomousAgentLoopService {
                     stopReason = "tool_failed";
                     break;
                 }
+                Map<String, Object> toolTrace = new LinkedHashMap<>();
+                toolTrace.put("step", step);
+                toolTrace.put("topology", "single");
+                toolTrace.put("tool", action);
+                toolTrace.put("evidenceIds", execution.observation().getEvidenceIds());
+                Map<String, Object> rerankDiagnostics = rerankTraceDiagnostics(execution.observation());
+                if (!rerankDiagnostics.isEmpty()) toolTrace.put("rerankDiagnostics", rerankDiagnostics);
                 emit(safeEventSink, context, eventSequence, "tool_completed", "tool.completed", "success",
-                        execution.observation().getSummary(),
-                        Map.of("step", step, "topology", "single", "tool", action,
-                                "evidenceIds", execution.observation().getEvidenceIds()), start);
+                        execution.observation().getSummary(), toolTrace, start);
                 observations.add(execution.observation());
                 execution.evidences().forEach(evidence -> evidences.put(evidence.getEvidenceId(), evidence));
                 if (!evaluation.vetoEnabled()
@@ -822,10 +827,17 @@ public class AutonomousAgentLoopService {
                         call.getStatus(), call.getResultSummary() == null ? call.getToolName() : call.getResultSummary(),
                         trace, start);
                 if (observation != null) {
+                    Map<String, Object> observationTrace = new LinkedHashMap<>();
+                    observationTrace.put("step", call.getSequence());
+                    observationTrace.put("tool", observation.getToolName());
+                    observationTrace.put("agent", agent.name());
+                    observationTrace.put("evidenceIds", observation.getEvidenceIds());
+                    Map<String, Object> rerankDiagnostics = rerankTraceDiagnostics(observation);
+                    if (!rerankDiagnostics.isEmpty()) {
+                        observationTrace.put("rerankDiagnostics", rerankDiagnostics);
+                    }
                     emit(eventSink, context, eventSequence, "retrieval_completed", "observation", "success",
-                            observation.getSummary(), Map.of("step", call.getSequence(),
-                                    "tool", observation.getToolName(), "agent", agent.name(),
-                                    "evidenceIds", observation.getEvidenceIds()), start);
+                            observation.getSummary(), observationTrace, start);
                 }
             }
         };
@@ -1545,6 +1557,24 @@ public class AutonomousAgentLoopService {
                 .data(data == null ? Map.of() : data)
                 .elapsedMs((System.nanoTime() - start) / 1_000_000.0)
                 .build());
+    }
+
+    static Map<String, Object> rerankTraceDiagnostics(ToolObservation observation) {
+        if (observation == null || !RecommendationPipelineExecutor.RERANK.equals(observation.getToolName())
+                || observation.getData() == null
+                || !(observation.getData().get("rerankDiagnostics") instanceof Map<?, ?> source)) {
+            return Map.of();
+        }
+        Set<String> allowed = Set.of("status", "fallbackUsed", "firstFailureReason", "finalFailureReason",
+                "retrySkippedReason", "retryCount", "candidateCount", "invalidIdCount", "selectedCount");
+        Map<String, Object> sanitized = new LinkedHashMap<>();
+        for (String key : allowed) {
+            Object value = source.get(key);
+            if (value instanceof String || value instanceof Number || value instanceof Boolean) {
+                sanitized.put(key, value);
+            }
+        }
+        return Map.copyOf(sanitized);
     }
     private record ToolExecution(
             ToolCallRecord record,

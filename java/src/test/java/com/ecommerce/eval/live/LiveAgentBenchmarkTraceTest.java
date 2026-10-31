@@ -14,10 +14,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 class LiveAgentBenchmarkTraceTest {
     @Test
     void liveRunnerLeavesLlmTimeoutToApplicationEnvironmentBinding() throws IOException {
-        assertThat(LiveAgentBenchmarkRunnerTest.applicationProperties(12))
+        assertThat(LiveAgentBenchmarkRunnerTest.applicationProperties(12, 2048))
                 .doesNotContainKey("agent.recommend.llm-timeout-ms")
+                .doesNotContainKey("spring.ai.openai.api-key")
                 .containsEntry("agent.recommend.max-llm-calls", 12)
-                .containsEntry("agent.supervisor.max-llm-calls", 12);
+                .containsEntry("agent.supervisor.max-llm-calls", 12)
+                .containsEntry("spring.ai.openai.chat.options.max-tokens", 2048);
 
         try (var stream = getClass().getResourceAsStream("/application.yml")) {
             assertThat(stream).isNotNull();
