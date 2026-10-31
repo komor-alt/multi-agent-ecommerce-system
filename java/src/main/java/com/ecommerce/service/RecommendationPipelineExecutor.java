@@ -541,6 +541,15 @@ public class RecommendationPipelineExecutor {
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("evidenceId", evidenceId);
         data.put("source", source);
+        if (result.getData() != null) {
+            data.put("analysisSource", result.getData().getOrDefault("analysis_source", "unknown"));
+            if (result.getData().get("profile_diagnostics") instanceof Map<?, ?> diagnostics) {
+                data.put("profileDiagnostics", diagnostics);
+            }
+            if (result.getData().get("llm_fallback_reason") instanceof String reason) {
+                data.put("llmFallbackReason", reason);
+            }
+        }
         data.put("crossBorder", crossBorderState(context.getRequest()));
         return ToolObservation.builder()
                 .toolName(GET_USER_PROFILE)

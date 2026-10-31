@@ -31,7 +31,8 @@ class AgentExecutionTimeoutTest {
                 mock(RecommendationDataService.class), llmClient);
         MarketingCopyAgent copy = new MarketingCopyAgent(builder, mode, llmClient);
 
-        assertThat(profile.executionTimeoutMs()).isEqualTo(llmTimeoutMs + 2_000L).isGreaterThan(llmTimeoutMs);
+        assertThat(profile.executionTimeoutMs()).isEqualTo(llmTimeoutMs * 2 + 2_000L)
+                .isGreaterThan(llmTimeoutMs * 2);
         assertThat(products.executionTimeoutMs()).isEqualTo(llmTimeoutMs * 2 + 2_000L)
                 .isGreaterThan(llmTimeoutMs * 2);
         assertThat(copy.executionTimeoutMs()).isEqualTo(llmTimeoutMs + 2_000L).isGreaterThan(llmTimeoutMs);
@@ -43,14 +44,17 @@ class AgentExecutionTimeoutTest {
     }
 
     @Test
-    void productOuterTimeoutSaturatesInsteadOfOverflowing() {
+    void retryCapableAgentOuterTimeoutsSaturateInsteadOfOverflowing() {
         TracedRecommendationLlmClient llmClient = mock(TracedRecommendationLlmClient.class);
         when(llmClient.timeoutMs()).thenReturn(Long.MAX_VALUE);
         ProductRecAgent products = new ProductRecAgent(mock(ChatClient.Builder.class), List.of(),
                 new RecommendationModeResolver("LLM", "test-key"),
                 mock(RecommendationDataService.class), llmClient);
+        UserProfileAgent profile = new UserProfileAgent(mock(ChatClient.Builder.class),
+                mock(RedisFeatureStoreService.class), new RecommendationModeResolver("LLM", "test-key"), llmClient);
 
         assertThat(products.executionTimeoutMs()).isEqualTo(Long.MAX_VALUE);
+        assertThat(profile.executionTimeoutMs()).isEqualTo(Long.MAX_VALUE);
     }
 
     @Test

@@ -111,6 +111,7 @@ class ProductRecAgentRerankTest {
         assertThat(diagnostics(result)).containsEntry("status", "safe_fallback")
                 .containsEntry("firstFailureReason", "empty_rerank_selection")
                 .containsEntry("finalFailureReason", "invalid_json")
+                .containsEntry("retrySkippedReason", null)
                 .containsEntry("retryCount", 1)
                 .containsEntry("candidateCount", 2)
                 .containsEntry("selectedCount", 2);
@@ -121,6 +122,59 @@ class ProductRecAgentRerankTest {
             assertThat(trace.providerInvoked()).isTrue();
             assertThat(trace.status()).isEqualTo("fallback");
         });
+    }
+
+    @Test
+    void reportsRetryAsSkippedWhenConcurrentCallExhaustsBudgetBeforeReservation() throws Exception {
+        LlmCallBudget budget = new LlmCallBudget(2);
+        TracedRecommendationLlmClient llm = scriptedLlm(
+                "[]",
+                new BeforeReserve(() -> assertThat(budget.reserve("other_phase", "concurrent-call").acquired()).isTrue(),
+                        "{\"productIds\":[\"P-2\"]}"));
+        List<LlmCallBudget.CallTrace> traces = new ArrayList<>();
+        budget.setTraceListener(traces::add);
+
+        AgentResult result = execute(llm, budget);
+
+        assertThat(productIds(result)).containsExactly("P-1", "P-2");
+        assertThat(diagnostics(result)).containsEntry("status", "safe_fallback")
+                .containsEntry("firstFailureReason", "empty_rerank_selection")
+                .containsEntry("finalFailureReason", "empty_rerank_selection")
+                .containsEntry("retrySkippedReason", "llm_budget_exhausted")
+                .containsEntry("retryCount", 0);
+        assertThat(budget.snapshot()).containsEntry("llmCallCount", 2)
+                .containsEntry("providerCallCount", 1)
+                .containsEntry("budgetBlockedCalls", 1);
+        assertThat(traces).hasSize(2);
+        assertThat(traces.get(1).asMap()).containsEntry("providerInvoked", false)
+                .containsEntry("fallbackReason", "llm_budget_exhausted");
+    }
+
+    @Test
+    void reportsRetryAsSkippedWhenRetryFingerprintWasReservedConcurrently() throws Exception {
+        LlmCallBudget budget = new LlmCallBudget(3);
+        TracedRecommendationLlmClient llm = scriptedLlm(
+                "[]",
+                new BeforeReserve(() -> assertThat(budget.reserve(
+                                "product_rerank", "product_rerank:test:retry:1").acquired()).isTrue(),
+                        "{\"productIds\":[\"P-2\"]}"));
+        List<LlmCallBudget.CallTrace> traces = new ArrayList<>();
+        budget.setTraceListener(traces::add);
+
+        AgentResult result = execute(llm, budget);
+
+        assertThat(productIds(result)).containsExactly("P-1", "P-2");
+        assertThat(diagnostics(result)).containsEntry("status", "safe_fallback")
+                .containsEntry("firstFailureReason", "empty_rerank_selection")
+                .containsEntry("finalFailureReason", "empty_rerank_selection")
+                .containsEntry("retrySkippedReason", "duplicate_call_blocked")
+                .containsEntry("retryCount", 0);
+        assertThat(budget.snapshot()).containsEntry("llmCallCount", 2)
+                .containsEntry("providerCallCount", 1)
+                .containsEntry("duplicateCallsBlocked", 1);
+        assertThat(traces).hasSize(2);
+        assertThat(traces.get(1).asMap()).containsEntry("providerInvoked", false)
+                .containsEntry("fallbackReason", "duplicate_call_blocked");
     }
 
     @Test
@@ -268,7 +322,7 @@ class ProductRecAgentRerankTest {
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
-    private TracedRecommendationLlmClient scriptedLlm(String... responses) {
+    private TracedRecommendationLlmClient scriptedLlm(Object... responses) {
         TracedRecommendationLlmClient client = mock(TracedRecommendationLlmClient.class);
         AtomicInteger index = new AtomicInteger();
         when(client.timeoutMs()).thenReturn(15_000L);
@@ -285,13 +339,18 @@ class ProductRecAgentRerankTest {
             LlmCallBudget budget = invocation.getArgument(3);
             String fingerprint = invocation.getArgument(4);
             TracedRecommendationLlmClient.OutputParser parser = invocation.getArgument(5);
+            Object response = responses[Math.min(index.getAndIncrement(), responses.length - 1)];
+            if (response instanceof BeforeReserve beforeReserve) {
+                beforeReserve.action().run();
+                response = beforeReserve.response();
+            }
             LlmCallBudget.Reservation reservation = budget.reserve(phase, fingerprint);
             if (!reservation.acquired()) {
+                budget.recordTrace(trace("fallback", reservation.reason(), false));
                 throw new TracedRecommendationLlmClient.TracedLlmException(reservation.reason());
             }
-            String response = responses[Math.min(index.getAndIncrement(), responses.length - 1)];
             try {
-                Object parsed = parser.parse(response);
+                Object parsed = parser.parse(String.valueOf(response));
                 budget.recordTrace(trace("success", null));
                 return parsed;
             } catch (TracedRecommendationLlmClient.OutputValidationException validation) {
@@ -328,7 +387,13 @@ class ProductRecAgentRerankTest {
     }
 
     private LlmCallBudget.CallTrace trace(String status, String reason) {
-        return new LlmCallBudget.CallTrace("product_rerank", "test", "test", 1,
-                status, reason, null, null, null, "unavailable", true);
+        return trace(status, reason, true);
     }
+
+    private LlmCallBudget.CallTrace trace(String status, String reason, boolean providerInvoked) {
+        return new LlmCallBudget.CallTrace("product_rerank", "test", "test", 1,
+                status, reason, null, null, null, "unavailable", providerInvoked);
+    }
+
+    private record BeforeReserve(Runnable action, String response) {}
 }

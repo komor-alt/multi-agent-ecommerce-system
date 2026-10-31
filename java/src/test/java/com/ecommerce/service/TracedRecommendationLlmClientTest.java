@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
+import org.springframework.ai.chat.metadata.ChatGenerationMetadata;
 import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.model.ChatResponse;
@@ -151,6 +152,53 @@ class TracedRecommendationLlmClientTest {
         });
     }
 
+    @Test
+    void emptyOutputTraceDistinguishesAbsentContentAndRecordsLimitFacts() {
+        TracedRecommendationLlmClient configured = new TracedRecommendationLlmClient(
+                mock(ChatClient.class), "test-provider", "configured-model", 1000,
+                2048, executor, meters);
+        ChatResponse response = responseWithOutput("length", 321, 2048, 2369, null, false);
+        LlmCallBudget budget = new LlmCallBudget(1);
+        List<LlmCallBudget.CallTrace> traces = new ArrayList<>();
+        budget.setTraceListener(traces::add);
+
+        assertThatThrownBy(() -> configured.completeResponse("user_profile", budget, "opaque",
+                raw -> raw, () -> response))
+                .isInstanceOf(TracedRecommendationLlmClient.TracedLlmException.class)
+                .hasMessage("empty_model_output");
+
+        assertThat(traces).singleElement().satisfies(trace -> {
+            assertThat(trace.fallbackReason()).isEqualTo("empty_model_output");
+            assertThat(trace.diagnostics()).containsEntry("contentState", "absent")
+                    .containsEntry("finishReason", "length")
+                    .containsEntry("usagePresent", true)
+                    .containsEntry("completionAtConfiguredLimit", true)
+                    .containsEntry("configuredMaxOutputTokens", 2048);
+            assertThat(trace.asMap().toString()).doesNotContain("private prompt", "raw output", "sk-secret");
+        });
+    }
+
+    @Test
+    void emptyOutputTraceDistinguishesBlankContentWithoutInferringTokenCause() {
+        ChatResponse response = responseWithOutput("stop", null, null, null, "   ", true);
+        LlmCallBudget budget = new LlmCallBudget(1);
+        List<LlmCallBudget.CallTrace> traces = new ArrayList<>();
+        budget.setTraceListener(traces::add);
+
+        assertThatThrownBy(() -> client.completeResponse("user_profile", budget, "opaque",
+                raw -> raw, () -> response))
+                .isInstanceOf(TracedRecommendationLlmClient.TracedLlmException.class)
+                .hasMessage("empty_model_output");
+
+        assertThat(traces).singleElement().satisfies(trace -> {
+            assertThat(trace.fallbackReason()).isEqualTo("empty_model_output");
+            assertThat(trace.diagnostics()).containsEntry("contentState", "blank")
+                    .containsEntry("finishReason", "stop")
+                    .containsEntry("usagePresent", true)
+                    .containsEntry("completionAtConfiguredLimit", false);
+        });
+    }
+
     private ChatResponse response(String model, int promptTokens, int completionTokens,
                                   int totalTokens, String output) {
         ChatResponse response = mock(ChatResponse.class);
@@ -167,6 +215,33 @@ class TracedRecommendationLlmClientTest {
         when(response.getResult()).thenReturn(generation);
         when(generation.getOutput()).thenReturn(message);
         when(message.getText()).thenReturn(output);
+        return response;
+    }
+
+    private ChatResponse responseWithOutput(String finishReason, Integer promptTokens,
+                                            Integer completionTokens, Integer totalTokens,
+                                            String output, boolean outputPresent) {
+        ChatResponse response = mock(ChatResponse.class);
+        ChatResponseMetadata metadata = mock(ChatResponseMetadata.class);
+        Usage usage = mock(Usage.class);
+        Generation generation = mock(Generation.class);
+        ChatGenerationMetadata generationMetadata = mock(ChatGenerationMetadata.class);
+        when(response.getMetadata()).thenReturn(metadata);
+        when(metadata.getModel()).thenReturn("provider-model");
+        when(metadata.getUsage()).thenReturn(usage);
+        when(usage.getPromptTokens()).thenReturn(promptTokens);
+        when(usage.getCompletionTokens()).thenReturn(completionTokens);
+        when(usage.getTotalTokens()).thenReturn(totalTokens);
+        when(response.getResult()).thenReturn(generation);
+        when(generation.getMetadata()).thenReturn(generationMetadata);
+        when(generationMetadata.getFinishReason()).thenReturn(finishReason);
+        if (outputPresent) {
+            AssistantMessage message = mock(AssistantMessage.class);
+            when(generation.getOutput()).thenReturn(message);
+            when(message.getText()).thenReturn(output);
+        } else {
+            when(generation.getOutput()).thenReturn(null);
+        }
         return response;
     }
 }

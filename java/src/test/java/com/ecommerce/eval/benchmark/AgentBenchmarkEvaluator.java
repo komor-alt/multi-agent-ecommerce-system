@@ -171,7 +171,7 @@ public final class AgentBenchmarkEvaluator {
             boolean invoked = providerCalls > 0;
             boolean fallback = number(metrics.get("fallbackCount")) > 0
                     || llmCalls != providerCalls;
-            if (fallback && onlyRecoveredRerankFailures(response, calls, number(metrics.get("fallbackCount")))) {
+            if (fallback && onlyRecoveredFailures(response, calls, number(metrics.get("fallbackCount")))) {
                 fallback = false;
             }
             return new TraceUsage(invoked, llmCalls, providerCalls, fallback,
@@ -184,7 +184,7 @@ public final class AgentBenchmarkEvaluator {
         boolean invoked = eventProviderCalls > 0;
         boolean fallback = eventLlmCalls != eventProviderCalls || calls.stream().anyMatch(call ->
                 call.containsKey("status") && !"success".equals(call.get("status")));
-        if (fallback && onlyRecoveredRerankFailures(response, calls, failedCalls(calls).size())) {
+        if (fallback && onlyRecoveredFailures(response, calls, failedCalls(calls).size())) {
             fallback = false;
         }
         boolean complete = !calls.isEmpty() && calls.stream().allMatch(call ->
@@ -218,17 +218,27 @@ public final class AgentBenchmarkEvaluator {
         return null;
     }
 
-    private static boolean onlyRecoveredRerankFailures(
+    private static boolean onlyRecoveredFailures(
             AgentLoopResponse response, List<Map<String, Object>> calls, double reportedFallbackCount) {
-        long recoveredCount = response == null || response.getObservations() == null ? 0
+        long recoveredRerankCount = response == null || response.getObservations() == null ? 0
                 : response.getObservations().stream().filter(AgentBenchmarkEvaluator::recoveredRerank).count();
+        long recoveredProfileCount = response == null || response.getObservations() == null ? 0
+                : response.getObservations().stream().filter(AgentBenchmarkEvaluator::recoveredProfile).count();
+        long recoveredCount = recoveredRerankCount + recoveredProfileCount;
         List<Map<String, Object>> failures = failedCalls(calls);
         if (recoveredCount == 0 || reportedFallbackCount != failures.size()
                 || failures.size() != recoveredCount) return false;
-        return failures.stream().allMatch(call -> Boolean.TRUE.equals(call.get("providerInvoked"))
+        long rerankFailures = failures.stream().filter(call -> Boolean.TRUE.equals(call.get("providerInvoked"))
                 && "product_rerank".equals(call.get("phase"))
                 && Set.of("empty_rerank_selection", "invalid_json", "invalid_model_output")
-                .contains(String.valueOf(call.get("fallbackReason"))));
+                .contains(String.valueOf(call.get("fallbackReason")))).count();
+        long profileFailures = failures.stream().filter(call -> Boolean.TRUE.equals(call.get("providerInvoked"))
+                && "user_profile".equals(call.get("phase"))
+                && Set.of("empty_model_output", "invalid_json", "invalid_profile_root",
+                "invalid_profile_list", "invalid_profile_price_range", "invalid_profile_rfm",
+                "invalid_profile_tags").contains(String.valueOf(call.get("fallbackReason")))).count();
+        return rerankFailures == recoveredRerankCount && profileFailures == recoveredProfileCount
+                && rerankFailures + profileFailures == failures.size();
     }
 
     private static List<Map<String, Object>> failedCalls(List<Map<String, Object>> calls) {
@@ -238,6 +248,15 @@ public final class AgentBenchmarkEvaluator {
     private static boolean recoveredRerank(com.ecommerce.model.ToolObservation observation) {
         if (observation == null || observation.getData() == null
                 || !(observation.getData().get("rerankDiagnostics") instanceof Map<?, ?> diagnostics)) {
+            return false;
+        }
+        return "llm_retry_success".equals(diagnostics.get("status"))
+                && Boolean.FALSE.equals(diagnostics.get("fallbackUsed"));
+    }
+
+    private static boolean recoveredProfile(com.ecommerce.model.ToolObservation observation) {
+        if (observation == null || observation.getData() == null
+                || !(observation.getData().get("profileDiagnostics") instanceof Map<?, ?> diagnostics)) {
             return false;
         }
         return "llm_retry_success".equals(diagnostics.get("status"))

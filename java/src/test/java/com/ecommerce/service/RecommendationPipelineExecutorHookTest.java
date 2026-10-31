@@ -45,7 +45,13 @@ class RecommendationPipelineExecutorHookTest {
         AgentResult profileResult = AgentResult.builder()
                 .agentName("user_profile")
                 .success(true)
-                .data(Map.of("profile", UserProfile.builder().userId("user_001").build()))
+                .data(Map.of(
+                        "profile", UserProfile.builder().userId("user_001").build(),
+                        "feature_source", "postgresql+redis",
+                        "analysis_source", "llm_retry",
+                        "profile_diagnostics", Map.of(
+                                "status", "llm_retry_success", "fallbackUsed", false,
+                                "retryCount", 1, "firstFailureReason", "invalid_profile_list")))
                 .build();
         when(userProfileAgent.runAsync(anyMap(), any(Executor.class)))
                 .thenReturn(CompletableFuture.completedFuture(profileResult));
@@ -57,6 +63,13 @@ class RecommendationPipelineExecutorHookTest {
         ToolObservation observation = executor.executeTool(RecommendationPipelineExecutor.GET_USER_PROFILE, state);
 
         assertThat(observation.getEvidenceIds()).containsExactly("profile:user_001");
+        assertThat(observation.getData()).containsEntry("analysisSource", "llm_retry")
+                .containsEntry("source", "postgresql+redis")
+                .containsKey("profileDiagnostics");
+        Map<?, ?> profileDiagnostics = (Map<?, ?>) observation.getData().get("profileDiagnostics");
+        assertThat(profileDiagnostics.get("status")).isEqualTo("llm_retry_success");
+        assertThat(profileDiagnostics.get("fallbackUsed")).isEqualTo(false);
+        assertThat(profileDiagnostics.get("retryCount")).isEqualTo(1);
         assertThat(state.getAgentResults()).containsKey(RecommendationPipelineExecutor.USER_PROFILE_RESULT);
         assertThat(executor.registeredToolNames()).contains("search_products", "check_inventory");
         assertThat(hook.beforeTools).containsExactly(RecommendationPipelineExecutor.GET_USER_PROFILE);

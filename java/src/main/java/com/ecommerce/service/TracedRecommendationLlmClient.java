@@ -12,6 +12,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
@@ -26,6 +29,7 @@ public class TracedRecommendationLlmClient {
     private final String provider;
     private final String configuredModel;
     private final long timeoutMs;
+    private final int configuredMaxOutputTokens;
     private final ThreadPoolExecutor executor;
     private final MeterRegistry meters;
 
@@ -35,26 +39,35 @@ public class TracedRecommendationLlmClient {
             @Value("${agent.recommend.provider:openai-compatible}") String provider,
             @Value("${spring.ai.openai.chat.options.model:unknown}") String model,
             @Value("${agent.recommend.llm-timeout-ms:15000}") long timeoutMs,
+            @Value("${spring.ai.openai.chat.options.max-tokens:0}") int configuredMaxOutputTokens,
             MeterRegistry meters) {
-        this(chatClientBuilder.build(), provider, model, timeoutMs, createExecutor(), meters);
+        this(chatClientBuilder.build(), provider, model, timeoutMs, configuredMaxOutputTokens,
+                createExecutor(), meters);
     }
 
     public TracedRecommendationLlmClient(ChatClient.Builder chatClientBuilder, String provider,
                                          String model, long timeoutMs) {
-        this(chatClientBuilder.build(), provider, model, timeoutMs, createExecutor(), null);
+        this(chatClientBuilder.build(), provider, model, timeoutMs, 0, createExecutor(), null);
     }
 
     TracedRecommendationLlmClient(ChatClient chatClient, String provider, String model,
                                   long timeoutMs, ThreadPoolExecutor executor) {
-        this(chatClient, provider, model, timeoutMs, executor, null);
+        this(chatClient, provider, model, timeoutMs, 0, executor, null);
     }
 
     TracedRecommendationLlmClient(ChatClient chatClient, String provider, String model,
                                   long timeoutMs, ThreadPoolExecutor executor, MeterRegistry meters) {
+        this(chatClient, provider, model, timeoutMs, 0, executor, meters);
+    }
+
+    TracedRecommendationLlmClient(ChatClient chatClient, String provider, String model,
+                                  long timeoutMs, int configuredMaxOutputTokens,
+                                  ThreadPoolExecutor executor, MeterRegistry meters) {
         this.chatClient = chatClient;
         this.provider = safeLabel(provider, "openai-compatible");
         this.configuredModel = safeLabel(model, "unknown");
         this.timeoutMs = Math.max(1, timeoutMs);
+        this.configuredMaxOutputTokens = Math.max(0, configuredMaxOutputTokens);
         this.executor = executor;
         this.meters = meters;
     }
@@ -110,6 +123,7 @@ public class TracedRecommendationLlmClient {
         Future<ChatResponse> future = null;
         ChatResponse response = null;
         Usage usage = null;
+        Map<String, Object> responseDiagnostics = Map.of();
         String model = configuredModel;
         boolean providerInvoked = false;
         try {
@@ -125,19 +139,22 @@ public class TracedRecommendationLlmClient {
             String text = response == null || response.getResult() == null
                     || response.getResult().getOutput() == null
                     ? null : response.getResult().getOutput().getText();
+            responseDiagnostics = responseDiagnostics(response, usage, text);
             if (text == null || text.isBlank()) {
-                throw new TracedLlmException("empty_model_output");
+                throw new TracedLlmException("empty_model_output", responseDiagnostics);
             }
             T parsed;
             try {
                 parsed = parser.parse(text);
             } catch (OutputValidationException validation) {
-                throw new TracedLlmException(validation.reason());
+                throw new TracedLlmException(validation.reason(),
+                        mergeDiagnostics(responseDiagnostics, validation.diagnostics()));
             } catch (Exception parseFailure) {
                 throw new TracedLlmException(parseFailure instanceof com.fasterxml.jackson.core.JsonProcessingException
-                        ? "invalid_json" : "invalid_model_output");
+                        ? "invalid_json" : "invalid_model_output", responseDiagnostics);
             }
-            recordTrace(budget, trace(safePhase, model, start, "success", null, usage, true));
+            recordTrace(budget, trace(safePhase, model, start, "success", null, usage, true,
+                    responseDiagnostics));
             return parsed;
         } catch (TimeoutException timeout) {
             if (future != null) future.cancel(true);
@@ -156,7 +173,8 @@ public class TracedRecommendationLlmClient {
             recordFailure(budget, safePhase, model, start, "llm_executor_saturated", usage, false);
             throw new TracedLlmException("llm_executor_saturated");
         } catch (TracedLlmException failure) {
-            recordFailure(budget, safePhase, model, start, failure.reason(), usage, providerInvoked);
+            recordFailure(budget, safePhase, model, start, failure.reason(), usage, providerInvoked,
+                    failure.diagnostics());
             throw failure;
         } catch (RuntimeException failure) {
             recordFailure(budget, safePhase, model, start, "provider_error", usage, providerInvoked);
@@ -165,7 +183,8 @@ public class TracedRecommendationLlmClient {
     }
 
     private LlmCallBudget.CallTrace trace(String phase, String model, long start, String status,
-                                          String reason, Usage usage, boolean providerInvoked) {
+                                          String reason, Usage usage, boolean providerInvoked,
+                                          Map<String, Object> diagnostics) {
         Integer promptTokens = usage == null ? null : usage.getPromptTokens();
         Integer completionTokens = usage == null ? null : usage.getCompletionTokens();
         Integer totalTokens = usage == null ? null : usage.getTotalTokens();
@@ -175,12 +194,65 @@ public class TracedRecommendationLlmClient {
         String usageStatus = promptTokens == null && completionTokens == null && totalTokens == null
                 ? "unavailable" : "available";
         return new LlmCallBudget.CallTrace(phase, provider, model, elapsedMs(start), status,
-                reason, promptTokens, completionTokens, totalTokens, usageStatus, providerInvoked);
+                reason, promptTokens, completionTokens, totalTokens, usageStatus, providerInvoked,
+                safeDiagnostics(diagnostics));
     }
 
     private void recordFailure(LlmCallBudget budget, String phase, String model, long start,
                                String reason, Usage usage, boolean providerInvoked) {
-        recordTrace(budget, trace(phase, model, start, "fallback", reason, usage, providerInvoked));
+        recordFailure(budget, phase, model, start, reason, usage, providerInvoked, Map.of());
+    }
+
+    private void recordFailure(LlmCallBudget budget, String phase, String model, long start,
+                               String reason, Usage usage, boolean providerInvoked,
+                               Map<String, Object> diagnostics) {
+        recordTrace(budget, trace(phase, model, start, "fallback", reason, usage, providerInvoked,
+                diagnostics));
+    }
+
+    private Map<String, Object> responseDiagnostics(ChatResponse response, Usage usage, String text) {
+        Map<String, Object> diagnostics = new LinkedHashMap<>();
+        diagnostics.put("contentState", text == null ? "absent" : text.isBlank() ? "blank" : "present");
+        String finishReason = null;
+        if (response != null && response.getResult() != null && response.getResult().getMetadata() != null) {
+            finishReason = response.getResult().getMetadata().getFinishReason();
+        }
+        diagnostics.put("finishReason", safeLabel(finishReason, "unavailable"));
+        diagnostics.put("usagePresent", usage != null);
+        Integer completionTokens = usage == null ? null : usage.getCompletionTokens();
+        diagnostics.put("completionAtConfiguredLimit", configuredMaxOutputTokens > 0
+                && completionTokens != null && completionTokens >= configuredMaxOutputTokens);
+        if (configuredMaxOutputTokens > 0) {
+            diagnostics.put("configuredMaxOutputTokens", configuredMaxOutputTokens);
+        }
+        return safeDiagnostics(diagnostics);
+    }
+
+    private static Map<String, Object> mergeDiagnostics(Map<String, Object> first,
+                                                         Map<String, Object> second) {
+        Map<String, Object> merged = new LinkedHashMap<>();
+        if (first != null) merged.putAll(first);
+        if (second != null) merged.putAll(second);
+        return safeDiagnostics(merged);
+    }
+
+    private static final Set<String> SAFE_DIAGNOSTIC_KEYS = Set.of(
+            "contentState", "finishReason", "usagePresent", "completionAtConfiguredLimit",
+            "configuredMaxOutputTokens", "validationField", "validationIssue",
+            "unexpectedFieldCount");
+
+    private static Map<String, Object> safeDiagnostics(Map<String, ?> raw) {
+        if (raw == null || raw.isEmpty()) return Map.of();
+        Map<String, Object> safe = new LinkedHashMap<>();
+        raw.forEach((key, value) -> {
+            if (!SAFE_DIAGNOSTIC_KEYS.contains(key) || value == null) return;
+            if (value instanceof Boolean || value instanceof Number) {
+                safe.put(key, value);
+            } else {
+                safe.put(key, safeLabel(String.valueOf(value), "unavailable"));
+            }
+        });
+        return safe.isEmpty() ? Map.of() : Map.copyOf(safe);
     }
 
     private void recordTrace(LlmCallBudget budget, LlmCallBudget.CallTrace trace) {
@@ -243,7 +315,10 @@ public class TracedRecommendationLlmClient {
     private static String metricFailureReason(String value) {
         if (value != null && java.util.Set.of("provider_timeout", "provider_error", "llm_executor_saturated",
                 "call_interrupted", "empty_model_output", "invalid_json", "invalid_model_output",
-                 "empty_rerank_selection", "product_outside_candidate_set",
+                "invalid_profile_list", "invalid_profile_root", "invalid_profile_price_range",
+                "invalid_profile_rfm", "invalid_profile_tags", "invalid_profile_content",
+                "unexpected_profile_fields", "profile_reserved_context_override",
+                "empty_rerank_selection", "product_outside_candidate_set",
                 "tool_outside_candidate_set", "unexpected_decision_fields", "invalid_decision_summary",
                 "invalid_product_reasons", "product_outside_final_selection").contains(value)) return value;
         return "other";
@@ -287,27 +362,47 @@ public class TracedRecommendationLlmClient {
 
     public static final class OutputValidationException extends RuntimeException {
         private final String reason;
+        private final Map<String, Object> diagnostics;
 
         public OutputValidationException(String reason) {
+            this(reason, Map.of());
+        }
+
+        public OutputValidationException(String reason, Map<String, Object> diagnostics) {
             super(reason);
             this.reason = safeLabel(reason, "invalid_model_output");
+            this.diagnostics = safeDiagnostics(diagnostics);
         }
 
         public String reason() {
             return reason;
+        }
+
+        public Map<String, Object> diagnostics() {
+            return diagnostics;
         }
     }
 
     public static final class TracedLlmException extends RuntimeException {
         private final String reason;
+        private final Map<String, Object> diagnostics;
 
         public TracedLlmException(String reason) {
+            this(reason, Map.of());
+        }
+
+        public TracedLlmException(String reason, Map<String, Object> diagnostics) {
             super(reason);
             this.reason = safeLabel(reason, "llm_call_failed");
+            this.diagnostics = safeDiagnostics(diagnostics);
         }
 
         public String reason() {
             return reason;
+        }
+
+        public Map<String, Object> diagnostics() {
+            return diagnostics;
         }
     }
 }

@@ -366,6 +366,56 @@ class AgentBenchmarkFrameworkTest {
     }
 
     @Test
+    void distinguishesRecoveredProfileFormatRetryFromFinalRulesFallback() {
+        AgentBenchmarkDataset.Case testCase = complexCase("complex-homepage-001");
+        AgentLoopResponse response = completedResponse(testCase, List.of(
+                "get_user_profile", "search_products", "check_inventory", "rerank", "final_answer"));
+        response.setLlmMetrics(Map.of("llmCallCount", 2, "providerCallCount", 2,
+                "fallbackCount", 1, "usageStatus", "available",
+                "promptTokens", 20, "completionTokens", 10, "totalTokens", 30));
+        response.setObservations(List.of(ToolObservation.builder().toolName("get_user_profile")
+                .data(Map.of("profileDiagnostics", Map.of(
+                        "status", "llm_retry_success", "fallbackUsed", false,
+                        "firstFailureReason", "invalid_profile_list", "retryCount", 1)))
+                .build()));
+        List<AgentRunEvent> events = List.of(
+                llmCall(true, "fallback", "invalid_profile_list", "user_profile"),
+                llmCall(true, "success", null, "user_profile"));
+
+        AgentBenchmark.CaseObservation observation = AgentBenchmarkEvaluator.evaluate(testCase, response,
+                null, events, 12.0, true, true, new AgentBenchmark.PriceConfig(null, null));
+
+        assertThat(observation.fallbackDetected()).isFalse();
+        assertThat(observation.expectedBehaviorMatch()).isTrue();
+        assertThat(observation.llmCallCount()).isEqualTo(2);
+        assertThat(observation.providerCallCount()).isEqualTo(2);
+    }
+
+    @Test
+    void keepsFinalProfileRulesFallbackVisibleAfterFailedRetry() {
+        AgentBenchmarkDataset.Case testCase = complexCase("complex-homepage-001");
+        AgentLoopResponse response = completedResponse(testCase, List.of(
+                "get_user_profile", "search_products", "check_inventory", "rerank", "final_answer"));
+        response.setLlmMetrics(Map.of("llmCallCount", 2, "providerCallCount", 2,
+                "fallbackCount", 2, "usageStatus", "unavailable"));
+        response.setObservations(List.of(ToolObservation.builder().toolName("get_user_profile")
+                .data(Map.of("profileDiagnostics", Map.of(
+                        "status", "safe_fallback", "fallbackUsed", true,
+                        "firstFailureReason", "invalid_profile_list",
+                        "finalFailureReason", "invalid_profile_list", "retryCount", 1)))
+                .build()));
+        List<AgentRunEvent> events = List.of(
+                llmCall(true, "fallback", "invalid_profile_list", "user_profile"),
+                llmCall(true, "fallback", "invalid_profile_list", "user_profile"));
+
+        AgentBenchmark.CaseObservation observation = AgentBenchmarkEvaluator.evaluate(testCase, response,
+                null, events, 12.0, true, true, new AgentBenchmark.PriceConfig(null, null));
+
+        assertThat(observation.fallbackDetected()).isTrue();
+        assertThat(observation.expectedBehaviorMatch()).isFalse();
+    }
+
+    @Test
     void keepsFinalRerankRulesFallbackVisibleAfterAFailedRetry() {
         AgentBenchmarkDataset.Case testCase = complexCase("complex-homepage-001");
         AgentLoopResponse response = completedResponse(testCase, List.of(

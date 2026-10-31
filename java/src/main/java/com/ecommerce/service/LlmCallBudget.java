@@ -132,7 +132,20 @@ public final class LlmCallBudget {
     public record CallTrace(String phase, String provider, String model, long latencyMs,
                             String status, String fallbackReason, Integer promptTokens,
                             Integer completionTokens, Integer totalTokens, String usageStatus,
-                            boolean providerInvoked) {
+                            boolean providerInvoked, Map<String, Object> diagnostics) {
+        public CallTrace {
+            diagnostics = diagnostics == null || diagnostics.isEmpty()
+                    ? Map.of() : Map.copyOf(diagnostics);
+        }
+
+        public CallTrace(String phase, String provider, String model, long latencyMs,
+                         String status, String fallbackReason, Integer promptTokens,
+                         Integer completionTokens, Integer totalTokens, String usageStatus,
+                         boolean providerInvoked) {
+            this(phase, provider, model, latencyMs, status, fallbackReason, promptTokens,
+                    completionTokens, totalTokens, usageStatus, providerInvoked, Map.of());
+        }
+
         public Map<String, Object> asMap() {
             Map<String, Object> value = new LinkedHashMap<>();
             value.put("phase", phase);
@@ -146,6 +159,7 @@ public final class LlmCallBudget {
             value.put("totalTokens", totalTokens);
             value.put("usageStatus", usageStatus);
             value.put("providerInvoked", providerInvoked);
+            if (!diagnostics.isEmpty()) value.put("diagnostics", diagnostics);
             return value;
         }
     }

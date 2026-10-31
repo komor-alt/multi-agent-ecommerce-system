@@ -193,10 +193,15 @@ public class ProductRecAgent extends BaseAgent {
                                 1, candidates.size(), invalidIdCount + retryAttempt.invalidIdCount());
                     } catch (TracedRecommendationLlmClient.TracedLlmException retryFailure) {
                         invalidIdCount += retryAttempt.invalidIdCount();
-                        log.warn("LLM rerank retry fell back; firstReason={}, finalReason={}, candidateCount={}, invalidIdCount={}",
-                                firstReason, retryFailure.reason(), candidates.size(), invalidIdCount);
-                        return fallbackOutcome(safeOrder, firstReason, retryFailure.reason(), null,
-                                1, candidates.size(), invalidIdCount);
+                        boolean retryBlocked = isBudgetReason(retryFailure.reason());
+                        String finalReason = retryBlocked ? firstReason : retryFailure.reason();
+                        String retrySkippedReasonAfterReserve = retryBlocked ? retryFailure.reason() : null;
+                        int retryCount = retryBlocked ? 0 : 1;
+                        log.warn("LLM rerank retry fell back; firstReason={}, finalReason={}, retrySkippedReason={}, candidateCount={}, invalidIdCount={}",
+                                firstReason, finalReason, retrySkippedReasonAfterReserve,
+                                candidates.size(), invalidIdCount);
+                        return fallbackOutcome(safeOrder, firstReason, finalReason,
+                                retrySkippedReasonAfterReserve, retryCount, candidates.size(), invalidIdCount);
                     }
                 }
                 llmClient.recordLocalFallback("product_rerank", budget, retrySkippedReason);
@@ -307,6 +312,12 @@ public class ProductRecAgent extends BaseAgent {
 
     private boolean recoverableRerankFailure(String reason) {
         return Set.of("empty_rerank_selection", "invalid_json", "invalid_model_output").contains(reason);
+    }
+
+    private boolean isBudgetReason(String reason) {
+        return "llm_budget_exhausted".equals(reason)
+                || "llm_budget_unavailable".equals(reason)
+                || "duplicate_call_blocked".equals(reason);
     }
 
     private String retryUnavailableReason(LlmCallBudget budget) {
