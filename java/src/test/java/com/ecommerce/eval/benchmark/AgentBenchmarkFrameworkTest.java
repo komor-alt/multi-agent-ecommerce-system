@@ -147,8 +147,24 @@ class AgentBenchmarkFrameworkTest {
 
         assertThat(supported).extracting(AgentBenchmark.Variant::id)
                 .containsExactly("java-single-agent-veto-on-path-on", AgentBenchmark.RUNNABLE_VARIANT,
+                        "java-guarded-multi-agent-parallel-off",
                         "java-guarded-multi-agent-veto-off", "java-guarded-multi-agent-path-off",
                         "java-guarded-multi-agent-veto-off-path-off");
+    }
+
+    @Test
+    void parallelOffAblationChangesOnlyParallelSchedulingFromGuardedMulti() {
+        AgentBenchmark.Variant guarded = AgentBenchmark.variants().stream()
+                .filter(item -> AgentBenchmark.RUNNABLE_VARIANT.equals(item.id())).findFirst().orElseThrow();
+        AgentBenchmark.Variant parallelOff = AgentBenchmark.variants().stream()
+                .filter(item -> "java-guarded-multi-agent-parallel-off".equals(item.id()))
+                .findFirst().orElseThrow();
+
+        assertThat(parallelOff.topology()).isEqualTo(guarded.topology());
+        assertThat(parallelOff.vetoEnabled()).isEqualTo(guarded.vetoEnabled()).isTrue();
+        assertThat(parallelOff.pathConstraint()).isEqualTo(guarded.pathConstraint()).isTrue();
+        assertThat(guarded.parallelScheduling()).isTrue();
+        assertThat(parallelOff.parallelScheduling()).isFalse();
     }
 
     @Test
@@ -162,6 +178,7 @@ class AgentBenchmarkFrameworkTest {
 
         AgentBenchmark.Metrics metrics = AgentBenchmark.summarize(cases, prices);
         assertThat(metrics.businessTaskSuccessRate()).isEqualTo(0.5);
+        assertThat(metrics.safeTaskSuccessRate()).isEqualTo(0.5);
         assertThat(metrics.expectedBehaviorMatchRate()).isEqualTo(0.5);
         assertThat(metrics.ruleViolationRate()).isEqualTo(0.25);
         assertThat(metrics.averageProviderCalls()).isEqualTo(2.5);
@@ -174,7 +191,7 @@ class AgentBenchmarkFrameworkTest {
 
         List<AgentBenchmark.CaseObservation> incomplete = List.of(cases.get(0),
                 new AgentBenchmark.CaseObservation("no-usage", "regression", "normal", "basic",
-                        "completed", "completed", true, true, true, false, 1, 9,
+                        "completed", "completed", true, true, true, true, false, true, null, 1, 9,
                         true, 1, 1, false, "unavailable", null, null, null, null,
                         List.of(), List.of(), List.of(), null, null));
         AgentBenchmark.Metrics noGuess = AgentBenchmark.summarize(incomplete, prices);
@@ -196,6 +213,7 @@ class AgentBenchmarkFrameworkTest {
 
         assertThat(observation.expectedBehaviorMatch()).isTrue();
         assertThat(observation.businessTaskSuccess()).isFalse();
+        assertThat(observation.safeTaskSuccess()).isFalse();
         assertThat(observation.completed()).isFalse();
         assertThat(observation.ruleViolation()).isFalse();
     }
@@ -211,6 +229,7 @@ class AgentBenchmarkFrameworkTest {
                 null, List.of(), 12.0, false, true, new AgentBenchmark.PriceConfig(null, null));
 
         assertThat(observation.businessTaskSuccess()).isTrue();
+        assertThat(observation.safeTaskSuccess()).isFalse();
         assertThat(observation.expectedBehaviorMatch()).isFalse();
         assertThat(observation.ruleViolation()).isTrue();
         assertThat(observation.expectationMismatch()).isEqualTo("rule_violation");
@@ -226,9 +245,62 @@ class AgentBenchmarkFrameworkTest {
                 null, List.of(), 12.0, true, false, new AgentBenchmark.PriceConfig(null, null));
 
         assertThat(observation.businessTaskSuccess()).isTrue();
+        assertThat(observation.safeTaskSuccess()).isTrue();
         assertThat(observation.expectedBehaviorMatch()).isFalse();
         assertThat(observation.ruleViolation()).isFalse();
         assertThat(observation.expectationMismatch()).isEqualTo("provider_not_invoked");
+    }
+
+    @Test
+    void completedWithInvalidOutputIsNeitherBusinessNorSafeSuccess() {
+        AgentBenchmarkDataset.Case testCase = complexCase("complex-homepage-001");
+        AgentLoopResponse response = AgentLoopResponse.builder()
+                .status("completed")
+                .toolCalls(List.of(ToolCallRecord.builder().toolName("final_answer")
+                        .status("completed").build()))
+                .build();
+
+        AgentBenchmark.CaseObservation observation = AgentBenchmarkEvaluator.evaluate(testCase, response,
+                null, List.of(), 12.0, false, true, new AgentBenchmark.PriceConfig(null, null));
+
+        assertThat(observation.completed()).isTrue();
+        assertThat(observation.businessTaskSuccess()).isFalse();
+        assertThat(observation.safeTaskSuccess()).isFalse();
+        assertThat(observation.ruleViolation()).isTrue();
+        assertThat(observation.validExperiment()).isTrue();
+    }
+
+    @Test
+    void budgetInvalidCasesAreExcludedWhileProviderErrorsRemainValidFailures() {
+        AgentBenchmarkDataset.Case testCase = complexCase("complex-homepage-001");
+        AgentLoopResponse successful = completedResponse(testCase, List.of(
+                "get_user_profile", "search_products", "check_inventory", "rerank", "final_answer"));
+        AgentBenchmark.CaseObservation budgetInvalid = AgentBenchmarkEvaluator.evaluate(testCase, successful,
+                null, List.of(llmCall(false, "rules_fallback", "llm_budget_exhausted")),
+                12.0, false, true, new AgentBenchmark.PriceConfig(null, null));
+        AgentBenchmark.CaseObservation providerFailure = AgentBenchmarkEvaluator.evaluate(testCase, null,
+                new IllegalStateException("provider_error"),
+                List.of(llmCall(true, "provider_error", "provider_error")),
+                13.0, false, true, new AgentBenchmark.PriceConfig(null, null));
+        AgentBenchmark.CaseObservation validSuccess = AgentBenchmarkEvaluator.evaluate(testCase, successful,
+                null, List.of(llmCall(true, "success", null)),
+                14.0, false, true, new AgentBenchmark.PriceConfig(null, null));
+
+        assertThat(budgetInvalid.businessTaskSuccess()).isTrue();
+        assertThat(budgetInvalid.validExperiment()).isFalse();
+        assertThat(budgetInvalid.invalidReason()).isEqualTo("llm_budget_exhausted");
+        assertThat(providerFailure.validExperiment()).isTrue();
+        assertThat(providerFailure.businessTaskSuccess()).isFalse();
+
+        AgentBenchmark.Metrics metrics = AgentBenchmark.summarize(
+                List.of(budgetInvalid, providerFailure, validSuccess), new AgentBenchmark.PriceConfig(null, null));
+        assertThat(metrics.caseCount()).isEqualTo(3);
+        assertThat(metrics.validCaseCount()).isEqualTo(2);
+        assertThat(metrics.invalidCaseCount()).isEqualTo(1);
+        assertThat(metrics.invalidCaseRate()).isEqualTo(1.0 / 3.0);
+        assertThat(metrics.businessTaskSuccessRate()).isEqualTo(0.5);
+        assertThat(metrics.safeTaskSuccessRate()).isEqualTo(0.5);
+        assertThat(metrics.expectedBehaviorMatchRate()).isEqualTo(0.5);
     }
 
     @Test
@@ -294,7 +366,7 @@ class AgentBenchmarkFrameworkTest {
                 .filter(v -> AgentBenchmark.RUNNABLE_VARIANT.equals(v.id())).findFirst().orElseThrow();
         AgentBenchmark.CaseObservation observation = new AgentBenchmark.CaseObservation(
                 "fixture", "regression", "normal", "basic", "completed", "failed",
-                false, false, false, false, 2, 12, false, 0, 0, false, "unavailable",
+                false, false, false, false, false, true, null, 2, 12, false, 0, 0, false, "unavailable",
                 null, null, null, null, List.of(), List.of(), List.of(), "tool_failed", "offline_only");
         AgentBenchmark.VariantRun offline = new AgentBenchmark.VariantRun(variant.id(), variant.label(),
                 variant.status(), AgentBenchmark.ExecutionKind.OFFLINE_SIMULATION, false,
@@ -307,13 +379,31 @@ class AgentBenchmarkFrameworkTest {
                 "test-revision", controls,
                 AgentBenchmarkDataset.load().references(), List.of(offline), false, "No paired live arms.");
 
-        new AgentBenchmarkReportWriter().write(report, temporaryDirectory);
-        String json = Files.readString(temporaryDirectory.resolve("agent-benchmark-report.json"));
-        String markdown = Files.readString(temporaryDirectory.resolve("agent-benchmark-report.md"));
+        AgentBenchmark.Report liveReport = new AgentBenchmark.Report("test", "LIVE_SMOKE_CORE", "fixed",
+                "test-revision", controls,
+                AgentBenchmarkDataset.load().references(), List.of(offline), false, "No paired live arms.");
+        Path offlineDirectory = AgentBenchmarkReportWriter.offlineReportDirectory(temporaryDirectory);
+        Path liveDirectory = AgentBenchmarkReportWriter.liveReportDirectory(temporaryDirectory, "SMOKE", "CORE");
+        AgentBenchmarkReportWriter writer = new AgentBenchmarkReportWriter();
+        writer.write(report, offlineDirectory);
+        writer.write(liveReport, liveDirectory);
+
+        String json = Files.readString(offlineDirectory.resolve("agent-benchmark-report.json"));
+        String markdown = Files.readString(offlineDirectory.resolve("agent-benchmark-report.md"));
+        String liveJson = Files.readString(liveDirectory.resolve("agent-benchmark-report.json"));
+        String liveMarkdown = Files.readString(liveDirectory.resolve("agent-benchmark-report.md"));
+        assertThat(offlineDirectory).isEqualTo(temporaryDirectory.resolve("target/agent-benchmark"));
+        assertThat(liveDirectory).isEqualTo(offlineDirectory.resolve("live-smoke-core"));
+        assertThat(json).contains("\"scope\" : \"OFFLINE_FULL\"").doesNotContain("LIVE_SMOKE_CORE");
+        assertThat(liveJson).contains("\"scope\" : \"LIVE_SMOKE_CORE\"").doesNotContain("OFFLINE_FULL");
+        assertThat(markdown).contains("- Scope: `OFFLINE_FULL`");
+        assertThat(liveMarkdown).contains("- Scope: `LIVE_SMOKE_CORE`");
         assertThat(json).contains("OFFLINE_SIMULATION", "providerInvoked", "datasetHash", "toolsetHash",
                 "faultPlanHash", "maxCallsPerCase", "maxTotalCalls", "maxSteps", "seed",
                 "topology", "pathConstraint", "vetoEnabled", "parallelScheduling",
-                "businessTaskSuccess", "expectedBehaviorMatch", "suiteHashes",
+                "businessTaskSuccess", "safeTaskSuccess", "safeTaskSuccessRate",
+                "expectedBehaviorMatch", "validExperiment", "invalidReason",
+                "invalidCaseCount", "invalidCaseRate", "suiteHashes",
                 "providerCallCount", "averageProviderCalls", "p95ProviderCalls");
         assertThat(markdown).contains("Failure Analysis", "Grouped Metrics", "Per-Case Results",
                         "EXTERNAL_REFERENCE", "false")
@@ -324,7 +414,8 @@ class AgentBenchmarkFrameworkTest {
                                                               int calls, double latency, long prompt, long completion,
                                                               long total, AgentBenchmark.PriceConfig prices) {
         return new AgentBenchmark.CaseObservation(id, "regression", "normal", "basic",
-                "completed", "completed", true, success, success, violation, calls, latency,
+                "completed", "completed", true, success, success && !violation, success, violation,
+                true, null, calls, latency,
                 true, calls, calls, false, "available", prompt, completion, total,
                 prices.costUsd(prompt, completion, "available"), List.of(), List.of(), List.of(), null, null);
     }
@@ -340,9 +431,18 @@ class AgentBenchmarkFrameworkTest {
     }
 
     private static AgentRunEvent llmCall(boolean providerInvoked, String status) {
-        return AgentRunEvent.builder().name("llm.call").data(Map.of(
-                "providerInvoked", providerInvoked, "status", status,
-                "promptTokens", 10, "completionTokens", 5, "totalTokens", 15)).build();
+        return llmCall(providerInvoked, status, null);
+    }
+
+    private static AgentRunEvent llmCall(boolean providerInvoked, String status, String fallbackReason) {
+        Map<String, Object> data = new java.util.LinkedHashMap<>();
+        data.put("providerInvoked", providerInvoked);
+        data.put("status", status);
+        data.put("fallbackReason", fallbackReason);
+        data.put("promptTokens", 10);
+        data.put("completionTokens", 5);
+        data.put("totalTokens", 15);
+        return AgentRunEvent.builder().name("llm.call").data(data).build();
     }
 
     private static AgentBenchmarkDataset.Case complexCase(String id) {

@@ -4,12 +4,29 @@ import com.ecommerce.eval.benchmark.AgentBenchmark;
 import com.ecommerce.eval.benchmark.AgentBenchmarkDataset;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 class LiveAgentBenchmarkTraceTest {
+    @Test
+    void liveRunnerLeavesLlmTimeoutToApplicationEnvironmentBinding() throws IOException {
+        assertThat(LiveAgentBenchmarkRunnerTest.applicationProperties(12))
+                .doesNotContainKey("agent.recommend.llm-timeout-ms")
+                .containsEntry("agent.recommend.max-llm-calls", 12)
+                .containsEntry("agent.supervisor.max-llm-calls", 12);
+
+        try (var stream = getClass().getResourceAsStream("/application.yml")) {
+            assertThat(stream).isNotNull();
+            String applicationYaml = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+            assertThat(applicationYaml)
+                    .contains("llm-timeout-ms: ${ECOM_RECOMMEND_LLM_TIMEOUT_MS:15000}");
+        }
+    }
+
     @Test
     void completedOutcomeRequiresPersistedFinalDecisionFromConfiguredProviderModel() {
         AgentBenchmarkDataset.Case completed = AgentBenchmarkDataset.loadComplex().cases().stream()
@@ -70,7 +87,7 @@ class LiveAgentBenchmarkTraceTest {
         assertThat(references).filteredOn(AgentBenchmark.DataReference::includedInJavaMetrics)
                 .singleElement().satisfies(reference -> {
                     assertThat(reference.id())
-                            .isEqualTo("java-recommendation-complex-business-pilot-selection");
+                            .isEqualTo("java-recommendation-pilot-selection");
                     assertThat(reference.sha256()).isEqualTo(selectedHash);
                     assertThat(reference.note()).contains("Selected 9 of 36");
                     selected.forEach(item -> assertThat(reference.note()).contains(item.id()));
@@ -79,6 +96,25 @@ class LiveAgentBenchmarkTraceTest {
                         reference.id().equals("java-recommendation-complex-business"))
                 .singleElement().satisfies(reference ->
                         assertThat(reference.includedInJavaMetrics()).isFalse());
+    }
+
+    @Test
+    void smokeUsesItsOwnThreeCaseManifestAndDoesNotClaimTheRegressionSuite() {
+        AgentBenchmarkDataset.Loaded dataset = AgentBenchmarkDataset.loadAll();
+        List<AgentBenchmarkDataset.Case> selected = LiveAgentBenchmarkRunnerTest.selectedCases(
+                dataset, LiveAgentBenchmarkGuard.Scope.SMOKE);
+        String selectedHash = LiveAgentBenchmarkRunnerTest.selectedDatasetHash(
+                dataset.sha256(), selected, LiveAgentBenchmarkGuard.Scope.SMOKE);
+        List<AgentBenchmark.DataReference> references = LiveAgentBenchmarkRunnerTest.scopedReferences(
+                dataset.references(), LiveAgentBenchmarkGuard.Scope.SMOKE, selected, selectedHash);
+
+        assertThat(selected).extracting(AgentBenchmarkDataset.Case::expectedScene)
+                .containsExactly("homepage", "campaign", "retention");
+        assertThat(references).filteredOn(AgentBenchmark.DataReference::includedInJavaMetrics)
+                .singleElement().satisfies(reference -> {
+                    assertThat(reference.id()).isEqualTo("java-recommendation-smoke-selection");
+                    assertThat(reference.note()).contains("Selected 3 of 66 regression cases");
+                });
     }
 
     private static Map<String, Object> event(String name) {

@@ -9,13 +9,24 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.stream.Collectors;
 
 /** Writes independent Java benchmark artifacts; external references remain provenance-only. */
 public final class AgentBenchmarkReportWriter {
     public static final Path REPORT_DIR = Path.of("target", "agent-benchmark");
     private final ObjectMapper mapper = new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
+
+    public static Path offlineReportDirectory(Path projectDirectory) {
+        return Objects.requireNonNull(projectDirectory, "projectDirectory").resolve(REPORT_DIR);
+    }
+
+    public static Path liveReportDirectory(Path projectDirectory, String scope, String arms) {
+        return offlineReportDirectory(projectDirectory).resolve(
+                "live-" + stableSegment(scope, "scope") + "-" + stableSegment(arms, "arms"));
+    }
 
     public void write(AgentBenchmark.Report report, Path directory) {
         try {
@@ -47,11 +58,11 @@ public final class AgentBenchmarkReportWriter {
         md.append("- Parallel policy: `").append(report.controls().parallelPolicy()).append("`\n");
         md.append("- Cross-variant comparison available: **").append(report.crossVariantComparisonAvailable())
                 .append("**. ").append(nullSafe(report.comparisonLimitation())).append("\n\n");
-        md.append("`businessTaskSuccessRate` counts completed outputs that satisfy business invariants, independent of execution-path or provenance compliance. `expectedBehaviorMatchRate` checks the declared outcome, capability contract, and live provenance and also credits an expected safe failure or block. `ruleViolationRate` independently records forbidden capabilities, guard rejections, and hard business-constraint violations, while `completionRate` records terminal completion. Provider-call statistics are observed counts, not inferred budgets.\n\n");
+        md.append("`businessTaskSuccessRate` counts completed outputs that satisfy business invariants, independent of execution-path or provenance compliance. `safeTaskSuccessRate` additionally requires that business success has no recorded rule violation. `expectedBehaviorMatchRate` checks the declared outcome, capability contract, and live provenance and also credits an expected safe failure or block. These rates, completion, and rule violation use only valid experiment cases. A case with an explicit `llm_budget_exhausted` or `llm_budget_unavailable` trace is reported as invalid and excluded from those denominators; provider errors and timeouts remain valid failures. Provider-call statistics are observed counts, not inferred budgets.\n\n");
 
         md.append("## Variant Results\n\n");
-        md.append("| Variant | Topology | Status | Execution | Provider Invoked | VETO | Path Constraint | Parallel | Business Success | Expected Match | Completion | Rule Violation | Avg/P95 Provider Calls | Tool Calls | P50/P95 ms | Tokens | Cost/task USD |\n");
-        md.append("|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+        md.append("| Variant | Topology | Status | Execution | Provider Invoked | VETO | Path Constraint | Parallel | Cases | Valid | Invalid/Rate | Business Success | Safe Success | Expected Match | Completion | Rule Violation | Avg/P95 Provider Calls | Tool Calls | P50/P95 ms | Tokens | Cost/task USD |\n");
+        md.append("|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
         for (AgentBenchmark.VariantRun variant : report.variants()) {
             AgentBenchmark.Metrics m = variant.metrics();
             md.append("| ").append(variant.variantLabel()).append(" | ").append(variant.topology())
@@ -59,7 +70,11 @@ public final class AgentBenchmarkReportWriter {
                     .append(" | ").append(variant.executionKind()).append(" | ").append(variant.providerInvoked())
                     .append(" | ").append(variant.vetoEnabled()).append(" | ").append(variant.pathConstraint())
                     .append(" | ").append(variant.parallelScheduling())
+                    .append(" | ").append(m.caseCount()).append(" | ").append(m.validCaseCount())
+                    .append(" | ").append(m.invalidCaseCount()).append("/")
+                    .append(value(m.invalidCaseRate()))
                     .append(" | ").append(value(m.businessTaskSuccessRate())).append(" | ")
+                    .append(value(m.safeTaskSuccessRate())).append(" | ")
                     .append(value(m.expectedBehaviorMatchRate())).append(" | ")
                     .append(value(m.completionRate())).append(" | ").append(value(m.ruleViolationRate()))
                     .append(" | ").append(value(m.averageProviderCalls())).append("/")
@@ -71,14 +86,17 @@ public final class AgentBenchmarkReportWriter {
         }
 
         md.append("\n## Grouped Metrics\n\n");
-        md.append("| Variant | Dimension | Value | Cases | Business Success | Expected Match | Completion | Rule Violation | Avg/P95 Provider Calls | Tool Calls | P50/P95 ms |\n");
-        md.append("|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+        md.append("| Variant | Dimension | Value | Cases | Valid | Invalid/Rate | Business Success | Safe Success | Expected Match | Completion | Rule Violation | Avg/P95 Provider Calls | Tool Calls | P50/P95 ms |\n");
+        md.append("|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
         for (AgentBenchmark.VariantRun variant : report.variants()) {
             for (AgentBenchmark.GroupMetrics group : variant.groupedMetrics()) {
                 AgentBenchmark.Metrics m = group.metrics();
                 md.append("| ").append(variant.variantId()).append(" | ").append(group.dimension())
                         .append(" | ").append(group.value()).append(" | ").append(m.caseCount())
+                        .append(" | ").append(m.validCaseCount()).append(" | ")
+                        .append(m.invalidCaseCount()).append("/").append(value(m.invalidCaseRate()))
                         .append(" | ").append(value(m.businessTaskSuccessRate()))
+                        .append(" | ").append(value(m.safeTaskSuccessRate()))
                         .append(" | ").append(value(m.expectedBehaviorMatchRate()))
                         .append(" | ").append(value(m.completionRate()))
                         .append(" | ").append(value(m.ruleViolationRate()))
@@ -91,8 +109,8 @@ public final class AgentBenchmarkReportWriter {
         }
 
         md.append("\n## Per-Case Results\n\n");
-        md.append("| Variant | Case | Suite | Category | Complexity | Expected/Actual | Execution | Provider Invoked | LLM Calls | Provider Calls | Completed | Business Success | Expected Match | Rule Violation | Tool Calls | Latency ms | Capabilities | Tool Trace | Tokens | Cost USD | Observed failure | Expectation mismatch |\n");
-        md.append("|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---:|---:|---|---|\n");
+        md.append("| Variant | Case | Suite | Category | Complexity | Expected/Actual | Execution | Valid | Invalid reason | Provider Invoked | LLM Calls | Provider Calls | Completed | Business Success | Safe Success | Expected Match | Rule Violation | Tool Calls | Latency ms | Capabilities | Tool Trace | Tokens | Cost USD | Observed failure | Expectation mismatch |\n");
+        md.append("|---|---|---|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---:|---:|---|---|\n");
         for (AgentBenchmark.VariantRun variant : report.variants()) {
             for (AgentBenchmark.CaseObservation item : variant.cases()) {
                 Long tokens = item.totalTokens();
@@ -100,9 +118,12 @@ public final class AgentBenchmarkReportWriter {
                         .append(" | ").append(item.suite()).append(" | ").append(item.category())
                         .append(" | ").append(item.complexity()).append(" | ")
                         .append(item.expectedOutcome()).append("/").append(item.actualOutcome())
-                        .append(" | ").append(variant.executionKind()).append(" | ").append(item.providerInvoked())
+                        .append(" | ").append(variant.executionKind()).append(" | ").append(item.validExperiment())
+                        .append(" | ").append(nullSafe(item.invalidReason()))
+                        .append(" | ").append(item.providerInvoked())
                         .append(" | ").append(item.llmCallCount()).append(" | ").append(item.providerCallCount())
                         .append(" | ").append(item.completed()).append(" | ").append(item.businessTaskSuccess())
+                        .append(" | ").append(item.safeTaskSuccess())
                         .append(" | ").append(item.expectedBehaviorMatch())
                         .append(" | ").append(item.ruleViolation()).append(" | ").append(item.toolCalls())
                         .append(" | ").append(item.latencyMs()).append(" | ")
@@ -143,4 +164,14 @@ public final class AgentBenchmarkReportWriter {
 
     private static String value(Object value) { return value == null ? "unavailable" : value.toString(); }
     private static String nullSafe(String value) { return value == null ? "-" : value.replace('|', '/').replace('\n', ' '); }
+
+    private static String stableSegment(String value, String label) {
+        String normalized = value == null ? "" : value.trim().toLowerCase(Locale.ROOT)
+                .replaceAll("[^a-z0-9]+", "-").replaceAll("(^-+|-+$)", "");
+        if (normalized.isBlank()) {
+            throw new IllegalArgumentException("BENCHMARK_REPORT_"
+                    + label.toUpperCase(Locale.ROOT) + "_REQUIRED");
+        }
+        return normalized;
+    }
 }

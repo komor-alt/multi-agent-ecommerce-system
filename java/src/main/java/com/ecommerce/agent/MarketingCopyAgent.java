@@ -25,6 +25,8 @@ import java.util.stream.Collectors;
 @Component
 public class MarketingCopyAgent extends BaseAgent {
 
+    private static final long LLM_OUTER_TIMEOUT_MARGIN_MS = 2_000L;
+
     private final TracedRecommendationLlmClient llmClient;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final RecommendationModeResolver modeResolver;
@@ -56,6 +58,11 @@ public class MarketingCopyAgent extends BaseAgent {
         super("marketing_copy", 10.0, 1);
         this.llmClient = llmClient;
         this.modeResolver = modeResolver;
+    }
+
+    @Override
+    protected long executionTimeoutMs() {
+        return timeoutWithMargin(llmClient.timeoutMs(), LLM_OUTER_TIMEOUT_MARGIN_MS);
     }
 
     @Override

@@ -39,7 +39,7 @@ public abstract class BaseAgent {
     }
 
     public CompletableFuture<AgentResult> runAsync(Map<String, Object> params, Executor executor) {
-        long timeoutMs = Math.max(1L, Math.round(timeoutSeconds * 1000));
+        long timeoutMs = executionTimeoutMs();
         try {
             return CompletableFuture.supplyAsync(() -> runWithRetry(params), executor)
                     .orTimeout(timeoutMs, TimeUnit.MILLISECONDS)
@@ -103,6 +103,19 @@ public abstract class BaseAgent {
     public double getErrorRate() {
         int calls = callCount.get();
         return calls == 0 ? 0.0 : (double) errorCount.get() / calls;
+    }
+
+    /** Effective outer execution timeout. LLM-backed agents override this using the client timeout. */
+    protected long executionTimeoutMs() {
+        return Math.max(1L, Math.round(timeoutSeconds * 1000));
+    }
+
+    protected static long timeoutWithMargin(long innerTimeoutMs, long marginMs) {
+        long normalizedTimeout = Math.max(1L, innerTimeoutMs);
+        long normalizedMargin = Math.max(1L, marginMs);
+        return normalizedTimeout > Long.MAX_VALUE - normalizedMargin
+                ? Long.MAX_VALUE
+                : normalizedTimeout + normalizedMargin;
     }
 
     private Throwable unwrap(Throwable error) {

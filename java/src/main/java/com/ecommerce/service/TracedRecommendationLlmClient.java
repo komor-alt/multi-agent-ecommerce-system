@@ -59,6 +59,11 @@ public class TracedRecommendationLlmClient {
         this.meters = meters;
     }
 
+    /** Effective provider wait timeout after constructor normalization. */
+    public long timeoutMs() {
+        return timeoutMs;
+    }
+
     public <T> T complete(String phase, String systemPrompt, String userPrompt,
                           LlmCallBudget budget, String fingerprint, OutputParser<T> parser) {
         return completeResponse(phase, budget, fingerprint, parser, () -> chatClient.prompt()

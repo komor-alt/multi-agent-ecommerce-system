@@ -105,14 +105,18 @@ class AgentBenchmarkOfflineRunnerTest {
         assertThat(dataset.cases()).filteredOn(item -> "regression".equals(item.suite())).hasSize(66);
         assertThat(dataset.cases()).filteredOn(item -> "complex-business".equals(item.suite())).hasSize(36);
         List<String> expectedCaseOrder = orderedCases.stream().map(AgentBenchmarkDataset.Case::id).toList();
-        assertThat(results).hasSize(5).allSatisfy(result -> {
+        assertThat(results).hasSize(6).allSatisfy(result -> {
             assertThat(result.metrics().caseCount()).isEqualTo(dataset.cases().size());
             assertThat(result.metrics().averageProviderCalls()).isZero();
             assertThat(result.metrics().p95ProviderCalls()).isZero();
+            assertThat(result.metrics().validCaseCount()).isEqualTo(dataset.cases().size());
+            assertThat(result.metrics().invalidCaseCount()).isZero();
             assertThat(result.cases()).hasSize(dataset.cases().size());
             assertThat(result.cases()).allSatisfy(item -> {
                 assertThat(item.llmCallCount()).isZero();
                 assertThat(item.providerCallCount()).isZero();
+                assertThat(item.validExperiment()).isTrue();
+                assertThat(item.invalidReason()).isNull();
             });
             assertThat(result.cases().stream().map(AgentBenchmark.CaseObservation::caseId).toList())
                     .containsExactlyElementsOf(expectedCaseOrder);

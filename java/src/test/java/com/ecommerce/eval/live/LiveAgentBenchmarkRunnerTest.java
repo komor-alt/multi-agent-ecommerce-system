@@ -49,21 +49,21 @@ class LiveAgentBenchmarkRunnerTest {
         AgentBenchmarkDataset.Loaded dataset = AgentBenchmarkDataset.loadAll();
         List<AgentBenchmark.Variant> variants = LiveAgentBenchmarkGuard.selectedVariants(System.getenv());
         int pilotCount = (int) dataset.cases().stream().filter(AgentBenchmarkDataset.Case::pilot).count();
+        int smokeCount = AgentBenchmarkDataset.selectSmoke(dataset.cases()).size();
         LiveAgentBenchmarkGuard.Settings settings = LiveAgentBenchmarkGuard.requireConfiguration(
-                System.getenv(), dataset.cases().size(), pilotCount, variants.size());
-        List<AgentBenchmarkDataset.Case> selectedCases = settings.scope() == LiveAgentBenchmarkGuard.Scope.PILOT
-                ? dataset.cases().stream().filter(AgentBenchmarkDataset.Case::pilot).toList()
-                : dataset.cases();
+                System.getenv(), dataset.cases().size(), pilotCount, smokeCount, variants.size());
+        List<AgentBenchmarkDataset.Case> selectedCases = selectedCases(dataset, settings.scope());
         LiveRecommendationE2EGuard.verifyPostgres(settings.live());
         String toolsetHash = AgentBenchmarkDataset.sha256(String.join("\n",
                 ScenePathEnforcer.DEFAULT_WHITELIST.stream().sorted().toList()).getBytes(StandardCharsets.UTF_8));
         String selectedHash = selectedDatasetHash(dataset.sha256(), selectedCases, settings.scope());
-        Map<String, String> suiteHashes = settings.scope() == LiveAgentBenchmarkGuard.Scope.PILOT
-                ? Map.of("complex-business-pilot", selectedHash) : dataset.suiteHashes();
+        Map<String, String> suiteHashes = settings.scope() == LiveAgentBenchmarkGuard.Scope.FULL
+                ? dataset.suiteHashes()
+                : Map.of("recommendation-" + settings.scope().name().toLowerCase(), selectedHash);
         AgentBenchmark.Controls controls = new AgentBenchmark.Controls(settings.provider(), settings.model(),
                 selectedHash, suiteHashes, toolsetHash, selectedFaultPlanHash(selectedCases),
                 settings.maxCallsPerCase(), settings.maxTotalCalls(), MAX_STEPS, settings.seed(),
-                "single=false;multi=true");
+                "variant-recorded;single-topology=false");
         AgentBenchmark.requireFairControls(Collections.nCopies(variants.size(), controls));
 
         System.setProperty(AgentEvaluationProfile.ENABLE_PROPERTY, "true");
@@ -75,15 +75,7 @@ class LiveAgentBenchmarkRunnerTest {
         try (ConfigurableApplicationContext app = new SpringApplicationBuilder(
                 MultiAgentApplication.class, FaultConfiguration.class)
                 .web(WebApplicationType.NONE)
-                .properties(Map.of(
-                        "agent.recommend.mode", "LLM",
-                        "agent.recommend.live-enabled", "true",
-                        "agent.recommend.max-llm-calls", settings.maxCallsPerCase(),
-                        "agent.supervisor.max-llm-calls", settings.maxCallsPerCase(),
-                        "agent.embedding.live-enabled", "false",
-                        "agent.embedding.max-calls", "0",
-                        "agent.recommend.llm-timeout-ms", "15000",
-                        "spring.datasource.driver-class-name", "org.postgresql.Driver"))
+                .properties(applicationProperties(settings.maxCallsPerCase()))
                 .run()) {
             AutonomousAgentLoopService agent = app.getBean(AutonomousAgentLoopService.class);
             RecommendationRunRepository runs = app.getBean(RecommendationRunRepository.class);
@@ -138,14 +130,15 @@ class LiveAgentBenchmarkRunnerTest {
                     AgentBenchmark.groupMetrics(observations, settings.prices()), List.copyOf(observations));
         }).toList();
 
-        AgentBenchmark.Report report = new AgentBenchmark.Report("java-recommendation-agent-ablation-v3",
+        AgentBenchmark.Report report = new AgentBenchmark.Report("java-recommendation-agent-ablation-v4",
                 "LIVE_" + settings.scope() + "_" + settings.armSet(),
                 java.time.Instant.now().toString(), revision(), controls,
                 scopedReferences(dataset.references(), settings.scope(), selectedCases, selectedHash),
                 List.copyOf(results), true,
                 "All runnable arms use identical provider/model, dataset, toolset, fault plan, per-case budget, max steps and seed.");
         new AgentBenchmarkReportWriter().write(report,
-                Path.of(System.getProperty("user.dir")).resolve(AgentBenchmarkReportWriter.REPORT_DIR));
+                AgentBenchmarkReportWriter.liveReportDirectory(Path.of(System.getProperty("user.dir")),
+                        settings.scope().name(), settings.armSet().name()));
         assertThat(results).hasSize(variants.size()).allSatisfy(result -> {
             assertThat(result.cases()).hasSize(selectedCases.size());
             assertThat(result.cases().stream().map(AgentBenchmark.CaseObservation::caseId).toList())
@@ -153,6 +146,26 @@ class LiveAgentBenchmarkRunnerTest {
             assertThat(result.cases()).allSatisfy(item -> assertThat(item.providerInvoked())
                     .as("provider invocation for %s/%s", result.variantId(), item.caseId()).isTrue());
         });
+    }
+
+    static Map<String, Object> applicationProperties(int maxCallsPerCase) {
+        return Map.of(
+                "agent.recommend.mode", "LLM",
+                "agent.recommend.live-enabled", "true",
+                "agent.recommend.max-llm-calls", maxCallsPerCase,
+                "agent.supervisor.max-llm-calls", maxCallsPerCase,
+                "agent.embedding.live-enabled", "false",
+                "agent.embedding.max-calls", "0",
+                "spring.datasource.driver-class-name", "org.postgresql.Driver");
+    }
+
+    static List<AgentBenchmarkDataset.Case> selectedCases(
+            AgentBenchmarkDataset.Loaded dataset, LiveAgentBenchmarkGuard.Scope scope) {
+        return switch (scope) {
+            case SMOKE -> AgentBenchmarkDataset.selectSmoke(dataset.cases());
+            case PILOT -> dataset.cases().stream().filter(AgentBenchmarkDataset.Case::pilot).toList();
+            case FULL -> dataset.cases();
+        };
     }
 
     private ToolLoopRequest request(String runId, AgentBenchmarkDataset.Case testCase) {
@@ -201,7 +214,7 @@ class LiveAgentBenchmarkRunnerTest {
                                       LiveAgentBenchmarkGuard.Scope scope) {
         if (scope == LiveAgentBenchmarkGuard.Scope.FULL) return fullHash;
         String manifest = cases.stream().map(AgentBenchmarkDataset.Case::id)
-                .collect(java.util.stream.Collectors.joining("\n", "PILOT\n" + fullHash + "\n", "\n"));
+                .collect(java.util.stream.Collectors.joining("\n", scope.name() + "\n" + fullHash + "\n", "\n"));
         return AgentBenchmarkDataset.sha256(manifest.getBytes(StandardCharsets.UTF_8));
     }
 
@@ -222,12 +235,16 @@ class LiveAgentBenchmarkRunnerTest {
                 false, reference.note())).toList());
         String caseIds = selectedCases.stream().map(AgentBenchmarkDataset.Case::id)
                 .collect(java.util.stream.Collectors.joining(","));
+        boolean smoke = scope == LiveAgentBenchmarkGuard.Scope.SMOKE;
+        String selectionName = scope.name().toLowerCase();
         scoped.add(new AgentBenchmark.DataReference(
-                "java-recommendation-complex-business-pilot-selection",
+                "java-recommendation-" + selectionName + "-selection",
                 AgentBenchmark.ExecutionKind.LIVE_LLM,
-                "java/src/test/resources/" + AgentBenchmarkDataset.COMPLEX_RESOURCE + "#pilot-selection",
+                "java/src/test/resources/" + (smoke ? AgentBenchmarkDataset.RESOURCE
+                        : AgentBenchmarkDataset.COMPLEX_RESOURCE) + "#" + selectionName + "-selection",
                 selectedHash, true,
-                "Selected " + selectedCases.size() + " of 36 complex-business cases; manifest includes "
+                "Selected " + selectedCases.size() + " of " + (smoke ? 66 : 36)
+                        + (smoke ? " regression" : " complex-business") + " cases; manifest includes "
                         + "the full-dataset hash and these case IDs: " + caseIds));
         return List.copyOf(scoped);
     }

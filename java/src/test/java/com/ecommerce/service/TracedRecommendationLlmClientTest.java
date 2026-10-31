@@ -5,6 +5,8 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
 import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -41,6 +43,20 @@ class TracedRecommendationLlmClientTest {
     void tearDown() {
         executor.shutdownNow();
         meters.close();
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {15_000L, 30_000L})
+    void exposesEffectiveConfiguredTimeoutAsReadOnlyValue(long timeoutMs) {
+        ThreadPoolExecutor localExecutor = new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS,
+                new java.util.concurrent.ArrayBlockingQueue<>(1));
+        try {
+            TracedRecommendationLlmClient configured = new TracedRecommendationLlmClient(
+                    mock(ChatClient.class), "test-provider", "configured-model", timeoutMs, localExecutor);
+            assertThat(configured.timeoutMs()).isEqualTo(timeoutMs);
+        } finally {
+            localExecutor.shutdownNow();
+        }
     }
 
     @Test

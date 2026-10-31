@@ -27,6 +27,8 @@ import java.util.stream.Collectors;
 @Component
 public class ProductRecAgent extends BaseAgent {
 
+    private static final long LLM_OUTER_TIMEOUT_MARGIN_MS = 2_000L;
+
     private final TracedRecommendationLlmClient llmClient;
     private final List<CommerceConnector> connectors;
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -61,6 +63,11 @@ public class ProductRecAgent extends BaseAgent {
         this.connectors = connectors == null ? List.of() : connectors;
         this.modeResolver = modeResolver;
         this.recommendationDataService = recommendationDataService;
+    }
+
+    @Override
+    protected long executionTimeoutMs() {
+        return timeoutWithMargin(llmClient.timeoutMs(), LLM_OUTER_TIMEOUT_MARGIN_MS);
     }
 
     @Override

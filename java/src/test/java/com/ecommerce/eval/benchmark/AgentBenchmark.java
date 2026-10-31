@@ -22,6 +22,8 @@ public final class AgentBenchmark {
                         VariantStatus.SUPPORTED, null),
                 new Variant(RUNNABLE_VARIANT, "Existing Java Guarded Multi-Agent", "multi", true, true, true, true,
                         VariantStatus.SUPPORTED, null),
+                new Variant("java-guarded-multi-agent-parallel-off", "Guarded Multi-Agent, parallel off", "multi", true, true, true, false,
+                        VariantStatus.SUPPORTED, null),
                 new Variant("java-guarded-multi-agent-veto-off", "Guarded Multi-Agent, VETO off", "multi", true, false, true, true,
                         VariantStatus.SUPPORTED, null),
                 new Variant("java-guarded-multi-agent-path-off", "Guarded Multi-Agent, path constraint off", "multi", true, true, false, true,
@@ -64,8 +66,10 @@ public final class AgentBenchmark {
 
     public record CaseObservation(String caseId, String suite, String category, String complexity,
                                   String expectedOutcome, String actualOutcome, boolean completed,
-                                  boolean businessTaskSuccess, boolean expectedBehaviorMatch,
-                                  boolean ruleViolation, int toolCalls, double latencyMs,
+                                  boolean businessTaskSuccess, boolean safeTaskSuccess,
+                                  boolean expectedBehaviorMatch,
+                                  boolean ruleViolation, boolean validExperiment, String invalidReason,
+                                  int toolCalls, double latencyMs,
                                   boolean providerInvoked, int llmCallCount, int providerCallCount,
                                   boolean fallbackDetected, String usageStatus,
                                   Long promptTokens, Long completionTokens, Long totalTokens,
@@ -74,7 +78,8 @@ public final class AgentBenchmark {
                                   String observedFailureReason,
                                   String expectationMismatch) {}
 
-    public record Metrics(int caseCount, Double businessTaskSuccessRate,
+    public record Metrics(int caseCount, int validCaseCount, int invalidCaseCount, Double invalidCaseRate,
+                          Double businessTaskSuccessRate, Double safeTaskSuccessRate,
                           Double expectedBehaviorMatchRate, Double completionRate,
                           Double ruleViolationRate, Double fallbackRate,
                           Double averageProviderCalls, Double p95ProviderCalls,
@@ -128,14 +133,19 @@ public final class AgentBenchmark {
 
     public static Metrics summarize(List<CaseObservation> cases, PriceConfig prices) {
         if (cases == null || cases.isEmpty()) {
-            return new Metrics(0, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
+            return new Metrics(0, 0, 0, null, null, null, null, null, null, null, null, null,
+                    null, null, null, null, null, null, null,
                     "unavailable_no_cases", "unavailable_no_cases");
         }
         int count = cases.size();
-        double businessSuccesses = cases.stream().filter(CaseObservation::businessTaskSuccess).count();
-        double behaviorMatches = cases.stream().filter(CaseObservation::expectedBehaviorMatch).count();
-        double completions = cases.stream().filter(CaseObservation::completed).count();
-        double violations = cases.stream().filter(CaseObservation::ruleViolation).count();
+        List<CaseObservation> validCases = cases.stream().filter(CaseObservation::validExperiment).toList();
+        int validCount = validCases.size();
+        int invalidCount = count - validCount;
+        double businessSuccesses = validCases.stream().filter(CaseObservation::businessTaskSuccess).count();
+        double safeSuccesses = validCases.stream().filter(CaseObservation::safeTaskSuccess).count();
+        double behaviorMatches = validCases.stream().filter(CaseObservation::expectedBehaviorMatch).count();
+        double completions = validCases.stream().filter(CaseObservation::completed).count();
+        double violations = validCases.stream().filter(CaseObservation::ruleViolation).count();
         double fallbacks = cases.stream().filter(CaseObservation::fallbackDetected).count();
         double averageProviderCalls = cases.stream().mapToInt(CaseObservation::providerCallCount)
                 .average().orElse(0);
@@ -152,8 +162,14 @@ public final class AgentBenchmark {
         boolean completeCosts = completeUsage && prices != null && "configured".equals(prices.status())
                 && cases.stream().allMatch(c -> c.costUsd() != null);
         Double totalCost = completeCosts ? cases.stream().mapToDouble(CaseObservation::costUsd).sum() : null;
-        return new Metrics(count, businessSuccesses / count, behaviorMatches / count,
-                completions / count, violations / count, fallbacks / count,
+        Double businessRate = validCount == 0 ? null : businessSuccesses / validCount;
+        Double safeRate = validCount == 0 ? null : safeSuccesses / validCount;
+        Double behaviorRate = validCount == 0 ? null : behaviorMatches / validCount;
+        Double completionRate = validCount == 0 ? null : completions / validCount;
+        Double violationRate = validCount == 0 ? null : violations / validCount;
+        return new Metrics(count, validCount, invalidCount, invalidCount / (double) count,
+                businessRate, safeRate, behaviorRate,
+                completionRate, violationRate, fallbacks / count,
                 averageProviderCalls, percentile(providerCalls, 95), averageCalls,
                 percentile(latencies, 50), percentile(latencies, 95), tokens, averageTokens,
                 totalCost, totalCost == null ? null : totalCost / count, usageStatus,

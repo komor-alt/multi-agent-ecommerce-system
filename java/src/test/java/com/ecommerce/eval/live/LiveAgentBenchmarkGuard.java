@@ -12,11 +12,12 @@ final class LiveAgentBenchmarkGuard {
     static final String RUN_ENV = "ECOM_RUN_LIVE_AGENT_BENCHMARK";
     static final String SCOPE_ENV = "ECOM_AGENT_BENCHMARK_SCOPE";
     static final String ARM_SET_ENV = "ECOM_AGENT_BENCHMARK_ARMS";
+    static final String SMOKE_PASSED_ENV = "ECOM_AGENT_BENCHMARK_SMOKE_PASSED";
     static final String TOTAL_BUDGET_ENV = "ECOM_AGENT_BENCHMARK_MAX_TOTAL_LLM_CALLS";
     static final String SEED_ENV = "ECOM_AGENT_BENCHMARK_SEED";
     static final String INPUT_PRICE_ENV = "ECOM_AGENT_BENCHMARK_INPUT_USD_PER_1M";
     static final String OUTPUT_PRICE_ENV = "ECOM_AGENT_BENCHMARK_OUTPUT_USD_PER_1M";
-    enum Scope { PILOT, FULL }
+    enum Scope { SMOKE, PILOT, FULL }
     enum ArmSet { CORE, FULL }
     private LiveAgentBenchmarkGuard() {}
 
@@ -31,15 +32,22 @@ final class LiveAgentBenchmarkGuard {
     }
 
     static Settings requireConfiguration(Map<String, String> env, int fullCaseCount,
-                                         int pilotCaseCount, int variantCount) {
+                                         int pilotCaseCount, int smokeCaseCount, int variantCount) {
         if (!"true".equalsIgnoreCase(value(env, RUN_ENV))) throw fail(RUN_ENV + " must be true");
         Scope scope;
         try {
             scope = Scope.valueOf(value(env, SCOPE_ENV).toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException error) {
-            throw fail(SCOPE_ENV + " must be explicitly PILOT or FULL");
+            throw fail(SCOPE_ENV + " must be explicitly SMOKE, PILOT or FULL");
         }
-        int caseCount = scope == Scope.PILOT ? pilotCaseCount : fullCaseCount;
+        if (scope != Scope.SMOKE && !"true".equalsIgnoreCase(value(env, SMOKE_PASSED_ENV))) {
+            throw fail(SMOKE_PASSED_ENV + " must be true before PILOT or FULL");
+        }
+        int caseCount = switch (scope) {
+            case SMOKE -> smokeCaseCount;
+            case PILOT -> pilotCaseCount;
+            case FULL -> fullCaseCount;
+        };
         if (caseCount <= 0) throw fail("selected scope has no executable cases");
         ArmSet armSet = armSet(env);
         int expectedVariantCount = selectedVariants(env).size();
@@ -55,7 +63,7 @@ final class LiveAgentBenchmarkGuard {
         int maxTotal = positiveInt(env, TOTAL_BUDGET_ENV);
         long required = Math.multiplyExact(Math.multiplyExact((long) modeBudget, caseCount), variantCount);
         if (required > Integer.MAX_VALUE || maxTotal != required) {
-            throw fail(TOTAL_BUDGET_ENV + " must equal caseCount * runnableVariantCount * perCaseBudget (required "
+            throw budgetFail(TOTAL_BUDGET_ENV + " must equal caseCount * runnableVariantCount * perCaseBudget (required "
                     + required + "); samples and budgets are not shared or truncated");
         }
         long seed;
@@ -111,6 +119,10 @@ final class LiveAgentBenchmarkGuard {
 
     private static IllegalStateException fail(String reason) {
         return new IllegalStateException("LIVE_AGENT_BENCHMARK_PREFLIGHT: " + reason);
+    }
+
+    private static IllegalStateException budgetFail(String reason) {
+        return new IllegalStateException("LIVE_AGENT_BENCHMARK_BUDGET: " + reason);
     }
 
     record Settings(LiveRecommendationE2EGuard.Settings live, Scope scope, ArmSet armSet,

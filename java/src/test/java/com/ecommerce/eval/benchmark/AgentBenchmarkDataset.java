@@ -24,6 +24,8 @@ public final class AgentBenchmarkDataset {
     public static final String RESOURCE = "recommendation-agent-benchmark.jsonl";
     public static final String COMPLEX_RESOURCE = "recommendation-agent-complex-business.jsonl";
     public static final String AFTER_SALES_OFFLINE_RESOURCE = "after-sales-eval.jsonl";
+    private static final List<String> SMOKE_CASE_IDS = List.of(
+            "homepage-my-002", "campaign-th-002", "retention-vn-002");
     private static final String TAU3_SUMMARY = "benchmarks/tau3-retail/published/retail-base-single-trial/summary.json";
     private static final String TAU3_METADATA = "benchmarks/tau3-retail/published/retail-base-single-trial/metadata.json";
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -67,6 +69,19 @@ public final class AgentBenchmarkDataset {
 
     public static Loaded loadAll() {
         return loadSuites(true);
+    }
+
+    public static List<Case> selectSmoke(List<Case> cases) {
+        Map<String, Case> byId = cases.stream().collect(java.util.stream.Collectors.toMap(
+                Case::id, item -> item, (left, right) -> left, LinkedHashMap::new));
+        List<Case> selected = SMOKE_CASE_IDS.stream().map(byId::get).toList();
+        if (selected.stream().anyMatch(java.util.Objects::isNull)
+                || selected.stream().anyMatch(item -> !"normal".equals(item.category())
+                || !"completed".equals(item.expectedOutcome()))
+                || selected.stream().map(Case::expectedScene).distinct().count() != 3) {
+            throw new IllegalArgumentException("BENCHMARK_SMOKE_SELECTION_INVALID");
+        }
+        return List.copyOf(selected);
     }
 
     private static Loaded loadSuites(boolean includeComplex) {

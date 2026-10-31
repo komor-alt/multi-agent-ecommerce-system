@@ -23,6 +23,8 @@ import java.util.Map;
 @Component
 public class UserProfileAgent extends BaseAgent {
 
+    private static final long LLM_OUTER_TIMEOUT_MARGIN_MS = 2_000L;
+
     private final TracedRecommendationLlmClient llmClient;
     private final RedisFeatureStoreService featureStoreService;
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -56,6 +58,11 @@ public class UserProfileAgent extends BaseAgent {
         this.llmClient = llmClient;
         this.featureStoreService = featureStoreService;
         this.modeResolver = modeResolver;
+    }
+
+    @Override
+    protected long executionTimeoutMs() {
+        return timeoutWithMargin(llmClient.timeoutMs(), LLM_OUTER_TIMEOUT_MARGIN_MS);
     }
 
     @Override

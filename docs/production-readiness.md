@@ -1,6 +1,6 @@
 # 生产化加固与验收手册
 
-更新日期：2026-10-30。这里区分**已实现机制、已验证证据、仍未完成/验证的生产能力**。
+更新日期：2026-10-31。这里区分**已实现机制、已验证证据、仍未完成/验证的生产能力**。
 
 此前的验收过程见 [历史验证记录](production-verification-2026-09-25.md)，其中结果不代表当前工作区。本轮的精确测试命令与结果记录在本文末尾。
 
@@ -8,7 +8,7 @@
 
 不存在一套通用的“互联网大厂上线指标”。SLO 必须结合流量、模型延迟、上游服务能力和业务损失确定。本轮采用现有 Spring Actuator / Micrometer / Prometheus、NestJS JWT / bcrypt / Throttler、PostgreSQL 事务与租约、k6，补关键运行保障，不另造服务框架。
 
-## 当前验收状态（2026-10-30）
+## 当前验收状态（2026-10-31）
 
 “已实现”表示源码存在机制；“已验证”必须对应当前工作区的测试或运行记录。配置阈值、脚本存在和历史报告都不能代替本轮实测。
 
@@ -20,10 +20,10 @@
 | SSE 断线恢复 | Java 数据库游标及 Gateway `Last-Event-ID` / `lastEventId` 回放和去重 | Java 事件测试、Gateway SSE 回归测试；Mock 测试不等于跨实例网络演练 | 本地 k6 若未运行，不宣称已压测重连；完整浏览器/Gateway/多实例场景待验 |
 | Gateway / Java 内部认证 | Gateway Session/JWT/RBAC/Origin；Java 内部服务 Token 默认拒绝 | Gateway HTTP auth tests、Java filter tests（以本轮结果为准） | 单租户；无企业 SSO、即时 JWT 撤销和全局限流 |
 | k6 / 资源恢复 | 固定到达率、P95/成功率/业务约束/恢复 gauge；独立 SSE resume 脚本 | 只记录实际运行脚本的原始结果 | 未运行时不得引用脚本阈值或历史负载作为当前性能结论 |
-| 模型与工具指标 | Micrometer 调用、失败、耗时、Token usage、预算拒绝 | 单测验证指标与标签边界 | Live provider usage/cost 和生产告警阈值未验证 |
-| Java Agent 评测 | 66 条原始 regression + 36 条独立 complex-business；Single/Multi、VETO、Path Guard 消融；按 suite/category/complexity 报告 | H2 + RULES 零预算执行 102×5 次，原始 JSON/Markdown 位于 `java/target/agent-benchmark/` | 未执行付费 Live；离线延迟和 lexical fallback 不能代表 provider/PostgreSQL/pgvector 生产表现 |
+| 模型与工具指标 | Micrometer 调用、失败、耗时、Token usage、预算拒绝 | 单测验证指标与标签边界；2026-10-31 Live SMOKE 记录了 provider calls、Token 和延迟 | 未配置 provider 单价，成本为 `unavailable_price_not_configured`；生产告警阈值未验证 |
+| Java Agent 评测 | 66 条原始 regression + 36 条独立 complex-business；Single/Multi、VETO、Path Guard 消融；按 suite/category/complexity 报告 | H2 + RULES 零预算执行 102×6 次；另完成 DeepSeek `LIVE_SMOKE_CORE` 3 cases×2 arms，报告位于 `java/target/agent-benchmark/live-smoke-core/` | Live 只覆盖 3 条正常 case，不能代表 PILOT/FULL、生产质量或 Multi-Agent 优势；PILOT 尚未授权/执行 |
 
-本轮命令、测试数量与环境记录在文末“2026-10-30 验收记录”。Docker、PostgreSQL 或 k6 不可用时写明未运行及原因，不以 H2 或旧报告替代。
+本轮命令、测试数量与环境记录在文末“2026-10-30 至 2026-10-31 验收记录”。Docker、PostgreSQL 或 k6 不可用时写明未运行及原因，不以 H2 或旧报告替代。
 
 ## 1. 本轮具体改变
 
@@ -145,7 +145,9 @@ $env:ECOM_POSTGRES_TEST_PASSWORD = '<test password>'
 mvn -q '-Dtest=RecommendationPostgresPersistenceTest,RecommendationExecutionLeasePostgresTest,RecommendationRecoveryProcessTest' test
 ```
 
-Java 推荐 Agent Benchmark 默认只运行 RULES 模式，且模型/Embedding 预算均为零。原始 66 条 regression suite 不变，另有 36 条复杂业务任务；复杂任务的 completed 契约要求返回 `numItems` 数量，completed_empty 要求为 0，loader 会拒绝宽松或矛盾契约。评估断言、case ID 和故障计划不会进入 Runtime 请求或模型上下文；故障通过 test-only runId registry 注入并在 `finally` 清理，异步 Specialist 也会显式传递并清理评测配置。报告分别记录 suite hash，并独立计算业务成功、期望行为匹配、完成、规则违规和真实 LLM/provider 调用次数。Live runner 必须显式选择 `PILOT` 或 `FULL`，并按实际 case 数 × 所选实验臂 × 单案例调用预算精确配置总预算；PILOT 默认只比较 Single 与 Guarded Multi 两臂，完整五臂需要显式配置。PILOT 使用独立 selection manifest hash 和 9 个 case ID，FULL 的单案例预算只能在真实 PILOT 后由人工根据观测到的 `p95ProviderCalls` 加合理余量设置，框架不自动推断预算或价格。本轮未授权也未执行 Live，详见 [Java Agent Benchmark](../java/docs/agent-benchmark.md)。
+Java 推荐 Agent Benchmark 默认仍运行 RULES 模式，模型/Embedding 预算为零。原始 66 条 regression suite 不变，另有 36 条复杂业务任务；复杂任务的 completed 契约要求返回 `numItems` 数量，completed_empty 要求为 0。报告独立计算业务成功、安全成功、期望行为匹配、完成、规则违规和真实 LLM/provider 调用次数；明确预算耗尽的 case 标为无效实验并从质量指标分母排除，provider timeout/error 仍计为有效失败。六臂离线运行的 102 条 case 均有效。新增 parallel-off 隔离臂不改变 VETO/path guard。Live runner 先执行三条正常 case 的 `SMOKE`，默认仍只比较 Single 与 Guarded Multi；通过后才能执行 9 条 PILOT，完整六臂需要显式 `FULL` arm set，所有阶段均按 case 数 × 实验臂 × 单案例调用预算精确校验。`conversationTurns` 仍是单请求夹具；另有 H2 跨轮集成测试读取前一 Run 的持久化请求、RunView tasks/artifacts、终态事件游标和 Run 修订元数据，生成下一轮显式输入并验证覆盖与失败接续。Recovery Worker 重放完整的持久化 normalized request，不从中间 pipeline checkpoint 续跑；生产 API 也没有自动跨 Run 继承/记忆契约。
+
+2026-10-31 经用户单独授权执行了 DeepSeek `LIVE_SMOKE_CORE`：provider/model 为 `deepseek/deepseek-flash`，依赖 PostgreSQL + Redis，Embedding live 关闭；3 个 case、2 个 arm、每 case 最多 12 次调用，总 ceiling 72。实际发生 53 次 provider 调用、消耗 52,396 tokens；因未配置 provider 单价，成本状态为 `unavailable_price_not_configured`。Single 与 Guarded Multi 的 3 个 case 均有效，Business/Safe/Completion 都是 100%，规则违规率都是 0；Single 的 Expected Match 为 100%，Guarded Multi 为 33.33%。后者在 retention/homepage 上因 `empty_rerank_selection` 使用 RULES fallback，业务结果仍安全成功，但不满足纯真实模型行为契约。样本只有三条，不能据此宣称 Multi-Agent 更优。有效报告位于 `java/target/agent-benchmark/live-smoke-core/`；首轮 24-call ceiling 因预算耗尽及 Live runner 硬编码 15 秒 timeout 而无效，归档于 `live-smoke-core-attempt-1/`，相关预算、Agent 外层 timeout 与环境变量配置问题均已修复。PILOT 尚未授权或执行，完整指标见 [Java Agent Benchmark](../java/docs/agent-benchmark.md)。
 
 CI 的 `.github/workflows/runtime-contract.yml` 配置 PostgreSQL 16 临时服务运行同一契约，另外用真正的 promtool 检查规则和抓取配置。本地 Docker 不可用不等于 PostgreSQL 测试通过。
 
@@ -186,21 +188,21 @@ k6 run -e BASE_URL=http://127.0.0.1:8080 -e JAVA_INTERNAL_SERVICE_TOKEN='<test t
 1. 推荐恢复是**重新执行整个只读推荐代次**，不是从任意工具步骤精确续跑。它保存旧 Task/Artifact/Event，新代次使用新任务 ID；不自动复用旧库存结果，也不重放发券等售后副作用。双 JVM 持久化边界强杀测试已通过，但完整 HTTP/Gateway/SSE 链路的进程故障演练仍需补齐。旧版无完整执行配置的 Run 不会被自动接管。
 2. Outbox 默认 Local Transport 只在本进程发布；它是至少一次投递，不是跨服务 exactly-once。仓库不包含跨实例外部传输实现；本轮不建议为了验收引入消息中间件。未来若增加传输，消费者仍须按 `dedupKey` 持久去重。
 3. 售后真实平台连接器/真实发券凭证核对、未知结果人工对账、库存预占与真实订单一致性，需要实际平台接口和业务规则验收；不能用 Mock 测试代替。
-4. 未完成整套多租户隔离、企业 SSO、生产级全局限流、数据库备份恢复演练、事件表保留/归档策略、Java 全依赖漏洞扫描及真实模型质量回归。
+4. 未完成整套多租户隔离、企业 SSO、生产级全局限流、数据库备份恢复演练、事件表保留/归档策略、Java 全依赖漏洞扫描及完整真实模型质量回归；当前 Live 证据仅为 3-case SMOKE。
 5. 未完成真实 PostgreSQL/Redis 多实例持续压测、网络故障注入、完整服务滚动发布、长时间 soak 和备份恢复。因此这里只能说“生产化机制已补强”，不能说“达到大厂容量/任意极端情况都能处理”。
 
-## 7. 2026-10-30 验收记录
+## 7. 2026-10-30 至 2026-10-31 验收记录
 
 本轮在 Windows 工作区执行。测试结果只覆盖下列命令和环境，不等同于生产环境验收。
 
 | 范围 | 执行结果 | 证据与边界 |
 |---|---|---|
 | Gateway | `npm run build`、`npm run typecheck` 通过；`npm run test:auth`：14 passed、0 failed | 本地 Nest 构建、认证与 SSE 单元/契约测试；不是多实例 HTTP 演练 |
-| Java 离线全量 | `mvn -B test`：621 tests、0 failures、0 errors、22 skipped | H2、Mock、offline 为主；22 个 opt-in PostgreSQL 测试在该命令中跳过，不能计入 PostgreSQL 通过数 |
+| Java 离线全量 | `mvn -B test`：627 tests、0 failures、0 errors、22 skipped | H2、Mock、offline 为主；22 个 opt-in PostgreSQL 测试在该命令中跳过，不能计入 PostgreSQL 通过数 |
 | Java + PostgreSQL | `./deploy/validation/Run-PostgresValidation.ps1`：PostgreSQL 16.14，22 tests、0 failures、0 errors、0 skipped | 隔离临时 Docker Compose 项目；包含 PostgreSQL 持久化/租约并发及双 JVM 恢复契约。脚本清理了本次专属容器与网络；不是正式库、备份恢复或多实例网络分区验收 |
 | SSE 游标 | Gateway SSE 回归包含 cursor header/query 优先级、历史读取期间实时事件竞态去重和终态关闭；Java 现有事件测试纳入全量套件 | 测试覆盖应用层游标和竞态；没有真实浏览器断网、反向代理缓冲或多 Gateway 实例压测 |
 | k6 / Prometheus rules | 未运行 | 本环境 `k6` 与 `promtool` 均未安装；Docker/PostgreSQL 可用且 PostgreSQL 测试已运行。脚本阈值仅为可运行门槛，不是本轮实测数据 |
-| 真实付费/外部写操作 | 未运行 | 未调用真实 LLM/Embedding，未执行 Shopify 写操作；符合本轮安全范围 |
+| 真实 LLM / 外部写操作 | 2026-10-31 DeepSeek `LIVE_SMOKE_CORE`：6 个 arm-case observation 全部有效，53 provider calls、52,396 tokens | 仅 3 case；成本因未配置价格不可用。未调用真实 Embedding，未执行 Shopify 写操作；PILOT/FULL 未运行 |
 
 2026-10-30 使用 `npm audit --omit=dev` 复核并完成低风险修复：Backend 保持 Nest 11.2.6，通过 overrides 升级 `multer 2.5.0`、`body-parser 2.4.0`、`proxy-addr 2.0.8`、`qs 6.17.1`；Frontend 保持 Vite 6.x，实际安装 `vite 6.4.5` 与 `source-map-js 1.2.2`。两端生产依赖审计均为 0。Backend 不带 `--omit=dev` 的完整审计仍报告 5 项开发依赖漏洞（3 low、1 moderate、1 high），未使用 `--force` 或跨 Nest 主版本升级。Frontend build/typecheck、Gateway build/typecheck/14 项测试均通过。未执行 commit/push。
 

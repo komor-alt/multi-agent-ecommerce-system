@@ -41,6 +41,7 @@ public final class AgentBenchmarkEvaluator {
         boolean ruleViolation = forbidden || forbiddenCapability || guardViolation || !invariants.valid();
         String observedFailure = completed ? null : observedFailure(response, error);
         TraceUsage traceUsage = traceUsage(response, events);
+        String invalidReason = experimentInvalidReason(traceUsage, error);
         String mismatch = expectationMismatch(testCase, response, actualOutcome, observedFailure,
                 requiredTools, requiredCapabilities, forbidden || forbiddenCapability || guardViolation,
                 invariants, requireProvider, durableTraceVerified, traceUsage);
@@ -49,6 +50,7 @@ public final class AgentBenchmarkEvaluator {
                 && "completed".equals(actualOutcome)
                 && invariants.valid()
                 && productCount(response) >= minProducts(testCase);
+        boolean safeTaskSuccess = businessTaskSuccess && !ruleViolation;
         boolean providerInvoked = traceUsage.providerInvoked();
         Long prompt = traceUsage.promptTokens();
         Long completion = traceUsage.completionTokens();
@@ -57,7 +59,8 @@ public final class AgentBenchmarkEvaluator {
         Double cost = prices == null ? null : prices.costUsd(prompt, completion, usage);
         return new AgentBenchmark.CaseObservation(testCase.id(), testCase.suite(), testCase.category(),
                 testCase.complexity(), testCase.expectedOutcome(), actualOutcome, completed,
-                businessTaskSuccess, expectedBehaviorMatch, ruleViolation, tools.size(), latencyMs,
+                businessTaskSuccess, safeTaskSuccess, expectedBehaviorMatch, ruleViolation,
+                invalidReason == null, invalidReason, tools.size(), latencyMs,
                 providerInvoked, traceUsage.llmCallCount(), traceUsage.providerCallCount(),
                 traceUsage.fallbackDetected(), usage,
                 prompt, completion, total, cost, testCase.requiredCapabilities(), capabilities, tools,
@@ -171,7 +174,8 @@ public final class AgentBenchmarkEvaluator {
                     longValue(metrics.get("promptTokens")),
                     longValue(metrics.get("completionTokens")), longValue(metrics.get("totalTokens")),
                     String.valueOf(metrics.getOrDefault("usageStatus",
-                            invoked ? "unavailable" : "unavailable_provider_not_invoked")));
+                            invoked ? "unavailable" : "unavailable_provider_not_invoked")),
+                    budgetInvalidReason(calls, metrics));
         }
         boolean invoked = eventProviderCalls > 0;
         boolean fallback = eventLlmCalls != eventProviderCalls || calls.stream().anyMatch(call ->
@@ -183,7 +187,28 @@ public final class AgentBenchmarkEvaluator {
         Long completion = complete ? calls.stream().mapToLong(call -> ((Number) call.get("completionTokens")).longValue()).sum() : null;
         Long total = complete ? calls.stream().mapToLong(call -> ((Number) call.get("totalTokens")).longValue()).sum() : null;
         return new TraceUsage(invoked, eventLlmCalls, eventProviderCalls, fallback, prompt, completion, total,
-                complete ? "available" : invoked ? "partial_or_unavailable" : "unavailable_provider_not_invoked");
+                complete ? "available" : invoked ? "partial_or_unavailable" : "unavailable_provider_not_invoked",
+                budgetInvalidReason(calls, Map.of()));
+    }
+
+    private static String budgetInvalidReason(List<Map<String, Object>> calls, Map<String, Object> metrics) {
+        for (Map<String, Object> call : calls) {
+            String reason = String.valueOf(call.getOrDefault("fallbackReason", ""));
+            if ("llm_budget_exhausted".equals(reason) || "llm_budget_unavailable".equals(reason)) {
+                return reason;
+            }
+        }
+        if (number(metrics.get("budgetBlockedCalls")) > 0) return "llm_budget_exhausted";
+        return null;
+    }
+
+    private static String experimentInvalidReason(TraceUsage traceUsage, RuntimeException error) {
+        if (traceUsage.invalidReason() != null) return traceUsage.invalidReason();
+        String message = error == null ? null : error.getMessage();
+        if ("llm_budget_exhausted".equals(message) || "llm_budget_unavailable".equals(message)) {
+            return message;
+        }
+        return null;
     }
 
     @SuppressWarnings("unchecked")
@@ -302,7 +327,7 @@ public final class AgentBenchmarkEvaluator {
     private record TraceUsage(boolean providerInvoked, int llmCallCount, int providerCallCount,
                               boolean fallbackDetected,
                               Long promptTokens, Long completionTokens, Long totalTokens,
-                              String usageStatus) {}
+                              String usageStatus, String invalidReason) {}
 
     private record InvariantResult(boolean valid, String reason) {
         static InvariantResult ok() { return new InvariantResult(true, null); }
