@@ -59,7 +59,7 @@ class AgentBenchmarkOfflineRunnerTest {
 
     @Test
     void executesAllSupportedArmsAndWritesReportsFromObservedRuns() {
-        AgentBenchmarkDataset.Loaded dataset = AgentBenchmarkDataset.load();
+        AgentBenchmarkDataset.Loaded dataset = AgentBenchmarkDataset.loadAll();
         String toolsetHash = AgentBenchmarkDataset.sha256(String.join("\n",
                 ScenePathEnforcer.DEFAULT_WHITELIST.stream().sorted().toList())
                 .getBytes(StandardCharsets.UTF_8));
@@ -69,8 +69,9 @@ class AgentBenchmarkOfflineRunnerTest {
         List<AgentBenchmarkDataset.Case> orderedCases = new ArrayList<>(dataset.cases());
         Collections.shuffle(orderedCases, new Random(SEED));
         AgentBenchmark.Controls controls = new AgentBenchmark.Controls(
-                "offline-rules", "deterministic-rules", dataset.sha256(), toolsetHash,
-                dataset.faultPlanHash(), 0, 0, MAX_STEPS, SEED);
+                "offline-rules", "deterministic-rules", dataset.sha256(), dataset.suiteHashes(),
+                toolsetHash, dataset.faultPlanHash(), 0, 0, MAX_STEPS, SEED,
+                "single=false;multi=true");
         AgentBenchmark.requireFairControls(Collections.nCopies(variants.size(), controls));
 
         Map<String, List<AgentBenchmark.CaseObservation>> observationsByVariant = new LinkedHashMap<>();
@@ -88,22 +89,31 @@ class AgentBenchmarkOfflineRunnerTest {
                     controls.provider(), controls.model(), controls.datasetHash(), controls.toolsetHash(),
                     controls.faultPlanHash(), controls.maxCallsPerCase(), controls.maxTotalCalls(),
                     controls.maxSteps(), controls.seed(), variant.topology(), variant.pathConstraint(),
-                    variant.vetoEnabled(), null, AgentBenchmark.summarize(observations, null),
-                    List.copyOf(observations));
+                    variant.vetoEnabled(), variant.parallelScheduling(), null,
+                    AgentBenchmark.summarize(observations, null),
+                    AgentBenchmark.groupMetrics(observations, null), List.copyOf(observations));
         }).toList();
 
-        AgentBenchmark.Report report = new AgentBenchmark.Report("java-recommendation-agent-ablation-v2",
-                java.time.Instant.now().toString(), "working-tree", controls, dataset.references(),
+        AgentBenchmark.Report report = new AgentBenchmark.Report("java-recommendation-agent-ablation-v3",
+                "OFFLINE_FULL", java.time.Instant.now().toString(), "working-tree", controls, dataset.references(),
                 List.copyOf(results), true,
                 "Offline RULES results compare executable topology/VETO/path-guard arms; they are not live LLM scores.");
         new AgentBenchmarkReportWriter().write(report,
                 Path.of(System.getProperty("user.dir")).resolve(AgentBenchmarkReportWriter.REPORT_DIR));
 
-        assertThat(dataset.cases()).hasSizeBetween(60, 72);
+        assertThat(dataset.cases()).hasSize(102);
+        assertThat(dataset.cases()).filteredOn(item -> "regression".equals(item.suite())).hasSize(66);
+        assertThat(dataset.cases()).filteredOn(item -> "complex-business".equals(item.suite())).hasSize(36);
         List<String> expectedCaseOrder = orderedCases.stream().map(AgentBenchmarkDataset.Case::id).toList();
         assertThat(results).hasSize(5).allSatisfy(result -> {
             assertThat(result.metrics().caseCount()).isEqualTo(dataset.cases().size());
+            assertThat(result.metrics().averageProviderCalls()).isZero();
+            assertThat(result.metrics().p95ProviderCalls()).isZero();
             assertThat(result.cases()).hasSize(dataset.cases().size());
+            assertThat(result.cases()).allSatisfy(item -> {
+                assertThat(item.llmCallCount()).isZero();
+                assertThat(item.providerCallCount()).isZero();
+            });
             assertThat(result.cases().stream().map(AgentBenchmark.CaseObservation::caseId).toList())
                     .containsExactlyElementsOf(expectedCaseOrder);
         });
@@ -111,26 +121,22 @@ class AgentBenchmarkOfflineRunnerTest {
 
     private AgentBenchmark.CaseObservation execute(
             AgentBenchmark.Variant variant, AgentBenchmarkDataset.Case testCase) {
-        Map<String, Object> context = new LinkedHashMap<>(testCase.constraints());
-        context.put("intentText", testCase.intentText());
-        context.put("benchmarkCaseId", testCase.id());
-        context.put("benchmarkFaultPlan", Map.of(
-                "type", testCase.faultPlan().type(), "tool", testCase.faultPlan().tool(),
-                "triggerCount", testCase.faultPlan().triggerCount()));
         RecommendationRequest request = RecommendationRequest.builder().userId(testCase.userId())
-                .scene(testCase.expectedScene()).numItems(testCase.numItems()).country(testCase.country())
+                .scene(AgentBenchmarkExecutionInput.offlineScene(testCase)).numItems(testCase.numItems())
+                .country(testCase.country())
                 .region(testCase.region()).locale(testCase.locale()).currency(testCase.currency())
-                .platform(testCase.platform()).context(context).build();
+                .platform(testCase.platform()).context(AgentBenchmarkExecutionInput.context(testCase)).build();
         String runId = ("bench-" + variant.id() + "-" + testCase.id()).replaceAll("[^A-Za-z0-9_-]", "_");
         List<AgentRunEvent> events = new ArrayList<>();
         AgentLoopResponse response = null;
         RuntimeException failure = null;
         long start = System.nanoTime();
-        try {
+        try (AgentBenchmarkFaultRegistry.Scope ignored =
+                     AgentBenchmarkFaultRegistry.bind(runId, testCase.faultPlan())) {
             AgentEvaluationProfile.Settings profile = new AgentEvaluationProfile.Settings(
                     "single".equals(variant.topology()) ? AgentEvaluationProfile.Topology.SINGLE
                             : AgentEvaluationProfile.Topology.MULTI,
-                    variant.vetoEnabled(), variant.pathConstraint(), SEED);
+                    variant.vetoEnabled(), variant.pathConstraint(), variant.parallelScheduling(), SEED);
             response = AgentEvaluationProfile.run(profile, () -> agent.run(
                     ToolLoopRequest.builder().runId(runId).request(request)
                             .config(ToolLoopConfig.builder().maxSteps(MAX_STEPS)
@@ -139,6 +145,7 @@ class AgentBenchmarkOfflineRunnerTest {
         } catch (RuntimeException error) {
             failure = error;
         }
+        assertThat(AgentBenchmarkFaultRegistry.activeBindings()).isZero();
         double latencyMs = (System.nanoTime() - start) / 1_000_000.0;
         return AgentBenchmarkEvaluator.evaluate(testCase, response, failure, events, latencyMs,
                 false, true, new AgentBenchmark.PriceConfig(null, null));

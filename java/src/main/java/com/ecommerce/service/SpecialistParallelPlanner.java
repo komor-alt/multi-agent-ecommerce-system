@@ -33,12 +33,23 @@ public class SpecialistParallelPlanner {
             RecommendationPipelineState state,
             List<String> whitelist,
             int remainingToolBudget) {
-        if (!properties.isParallelEnabled() || remainingToolBudget < 2
+        return plan(state, whitelist, remainingToolBudget, true, properties.isParallelEnabled());
+    }
+
+    public List<PlannedSpecialistAction> plan(
+            RecommendationPipelineState state,
+            List<String> whitelist,
+            int remainingToolBudget,
+            boolean pathGuardEnabled,
+            boolean parallelSchedulingEnabled) {
+        if (!parallelSchedulingEnabled || !properties.isParallelEnabled() || remainingToolBudget < 2
                 || properties.getMaxParallelSpecialists() < 2) {
             return List.of();
         }
 
-        AgentId expected = pathEnforcer.expectedNextAgent(state.getRequest().getScene(), state);
+        AgentId expected = pathGuardEnabled
+                ? pathEnforcer.expectedNextAgent(state.getRequest().getScene(), state)
+                : AgentId.SUPERVISOR;
         LinkedHashSet<AgentId> orderedAgents = new LinkedHashSet<>();
         if (expected != AgentId.SUPERVISOR) {
             orderedAgents.add(expected);
@@ -47,7 +58,8 @@ public class SpecialistParallelPlanner {
 
         List<PlannedSpecialistAction> selected = new ArrayList<>();
         for (AgentId agent : orderedAgents) {
-            List<String> executable = pathEnforcer.executableTools(agent, state.getRequest().getScene(), state);
+            List<String> executable = pathEnforcer.executableTools(
+                    agent, state.getRequest().getScene(), state, pathGuardEnabled);
             String action = executable.stream()
                     .filter(whitelist::contains)
                     .filter(this::parallelEligible)

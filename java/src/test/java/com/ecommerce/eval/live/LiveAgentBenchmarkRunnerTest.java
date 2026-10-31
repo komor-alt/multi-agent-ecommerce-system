@@ -4,7 +4,9 @@ import com.ecommerce.MultiAgentApplication;
 import com.ecommerce.eval.benchmark.AgentBenchmark;
 import com.ecommerce.eval.benchmark.AgentBenchmarkDataset;
 import com.ecommerce.eval.benchmark.AgentBenchmarkEvaluator;
+import com.ecommerce.eval.benchmark.AgentBenchmarkExecutionInput;
 import com.ecommerce.eval.benchmark.AgentBenchmarkFaultHook;
+import com.ecommerce.eval.benchmark.AgentBenchmarkFaultRegistry;
 import com.ecommerce.eval.benchmark.AgentBenchmarkReportWriter;
 import com.ecommerce.model.AgentLoopResponse;
 import com.ecommerce.model.AgentRunEvent;
@@ -44,23 +46,30 @@ class LiveAgentBenchmarkRunnerTest {
 
     @Test
     void runsTheSameFairMatrixWithoutSamplingOrSharedBudgets() {
-        AgentBenchmarkDataset.Loaded dataset = AgentBenchmarkDataset.load();
-        List<AgentBenchmark.Variant> variants = AgentBenchmark.variants().stream()
-                .filter(item -> item.status() == AgentBenchmark.VariantStatus.SUPPORTED).toList();
+        AgentBenchmarkDataset.Loaded dataset = AgentBenchmarkDataset.loadAll();
+        List<AgentBenchmark.Variant> variants = LiveAgentBenchmarkGuard.selectedVariants(System.getenv());
+        int pilotCount = (int) dataset.cases().stream().filter(AgentBenchmarkDataset.Case::pilot).count();
         LiveAgentBenchmarkGuard.Settings settings = LiveAgentBenchmarkGuard.requireConfiguration(
-                System.getenv(), dataset.cases().size(), variants.size());
+                System.getenv(), dataset.cases().size(), pilotCount, variants.size());
+        List<AgentBenchmarkDataset.Case> selectedCases = settings.scope() == LiveAgentBenchmarkGuard.Scope.PILOT
+                ? dataset.cases().stream().filter(AgentBenchmarkDataset.Case::pilot).toList()
+                : dataset.cases();
         LiveRecommendationE2EGuard.verifyPostgres(settings.live());
         String toolsetHash = AgentBenchmarkDataset.sha256(String.join("\n",
                 ScenePathEnforcer.DEFAULT_WHITELIST.stream().sorted().toList()).getBytes(StandardCharsets.UTF_8));
+        String selectedHash = selectedDatasetHash(dataset.sha256(), selectedCases, settings.scope());
+        Map<String, String> suiteHashes = settings.scope() == LiveAgentBenchmarkGuard.Scope.PILOT
+                ? Map.of("complex-business-pilot", selectedHash) : dataset.suiteHashes();
         AgentBenchmark.Controls controls = new AgentBenchmark.Controls(settings.provider(), settings.model(),
-                dataset.sha256(), toolsetHash, dataset.faultPlanHash(), settings.maxCallsPerCase(),
-                settings.maxTotalCalls(), MAX_STEPS, settings.seed());
+                selectedHash, suiteHashes, toolsetHash, selectedFaultPlanHash(selectedCases),
+                settings.maxCallsPerCase(), settings.maxTotalCalls(), MAX_STEPS, settings.seed(),
+                "single=false;multi=true");
         AgentBenchmark.requireFairControls(Collections.nCopies(variants.size(), controls));
 
         System.setProperty(AgentEvaluationProfile.ENABLE_PROPERTY, "true");
         Map<String, List<AgentBenchmark.CaseObservation>> observationsByVariant = new LinkedHashMap<>();
         variants.forEach(variant -> observationsByVariant.put(variant.id(), new ArrayList<>()));
-        List<AgentBenchmarkDataset.Case> orderedCases = new ArrayList<>(dataset.cases());
+        List<AgentBenchmarkDataset.Case> orderedCases = new ArrayList<>(selectedCases);
         Collections.shuffle(orderedCases, new Random(settings.seed()));
         String runPrefix = "live-bench-" + UUID.randomUUID().toString().substring(0, 8);
         try (ConfigurableApplicationContext app = new SpringApplicationBuilder(
@@ -90,11 +99,13 @@ class LiveAgentBenchmarkRunnerTest {
                     AgentLoopResponse response = null;
                     RuntimeException failure = null;
                     long start = System.nanoTime();
-                    try {
+                    try (AgentBenchmarkFaultRegistry.Scope ignored =
+                                 AgentBenchmarkFaultRegistry.bind(runId, testCase.faultPlan())) {
                         AgentEvaluationProfile.Settings profile = new AgentEvaluationProfile.Settings(
                                 "single".equals(variant.topology()) ? AgentEvaluationProfile.Topology.SINGLE
                                         : AgentEvaluationProfile.Topology.MULTI,
-                                variant.vetoEnabled(), variant.pathConstraint(), settings.seed());
+                                variant.vetoEnabled(), variant.pathConstraint(),
+                                variant.parallelScheduling(), settings.seed());
                         response = AgentEvaluationProfile.run(profile, () -> agent.run(
                                 request(runId, testCase), emitted::add));
                     } catch (RuntimeException error) {
@@ -103,7 +114,7 @@ class LiveAgentBenchmarkRunnerTest {
                     double latencyMs = (System.nanoTime() - start) / 1_000_000.0;
                     List<Map<String, Object>> persisted = eventStore.history(runId);
                     boolean durable = runs.findById(runId).isPresent()
-                            && hasPersistedExecutionTrace(persisted)
+                            && hasPersistedExecutionTrace(persisted, testCase)
                             && configuredModelOnly(persisted, settings.model());
                     observationsByVariant.get(variant.id()).add(AgentBenchmarkEvaluator.evaluate(
                             testCase, response, failure,
@@ -122,18 +133,21 @@ class LiveAgentBenchmarkRunnerTest {
                     controls.provider(), controls.model(), controls.datasetHash(), controls.toolsetHash(),
                     controls.faultPlanHash(), controls.maxCallsPerCase(), controls.maxTotalCalls(),
                     controls.maxSteps(), controls.seed(), variant.topology(), variant.pathConstraint(),
-                    variant.vetoEnabled(), null, AgentBenchmark.summarize(observations, settings.prices()),
-                    List.copyOf(observations));
+                    variant.vetoEnabled(), variant.parallelScheduling(), null,
+                    AgentBenchmark.summarize(observations, settings.prices()),
+                    AgentBenchmark.groupMetrics(observations, settings.prices()), List.copyOf(observations));
         }).toList();
 
-        AgentBenchmark.Report report = new AgentBenchmark.Report("java-recommendation-agent-ablation-v2",
-                java.time.Instant.now().toString(), revision(), controls, dataset.references(),
+        AgentBenchmark.Report report = new AgentBenchmark.Report("java-recommendation-agent-ablation-v3",
+                "LIVE_" + settings.scope() + "_" + settings.armSet(),
+                java.time.Instant.now().toString(), revision(), controls,
+                scopedReferences(dataset.references(), settings.scope(), selectedCases, selectedHash),
                 List.copyOf(results), true,
                 "All runnable arms use identical provider/model, dataset, toolset, fault plan, per-case budget, max steps and seed.");
         new AgentBenchmarkReportWriter().write(report,
                 Path.of(System.getProperty("user.dir")).resolve(AgentBenchmarkReportWriter.REPORT_DIR));
         assertThat(results).hasSize(variants.size()).allSatisfy(result -> {
-            assertThat(result.cases()).hasSize(dataset.cases().size());
+            assertThat(result.cases()).hasSize(selectedCases.size());
             assertThat(result.cases().stream().map(AgentBenchmark.CaseObservation::caseId).toList())
                     .containsExactlyElementsOf(orderedCases.stream().map(AgentBenchmarkDataset.Case::id).toList());
             assertThat(result.cases()).allSatisfy(item -> assertThat(item.providerInvoked())
@@ -142,27 +156,83 @@ class LiveAgentBenchmarkRunnerTest {
     }
 
     private ToolLoopRequest request(String runId, AgentBenchmarkDataset.Case testCase) {
-        Map<String, Object> context = new LinkedHashMap<>(testCase.constraints());
-        context.put("intentText", testCase.intentText());
-        context.put("benchmarkCaseId", testCase.id());
-        context.put("benchmarkFaultPlan", Map.of("type", testCase.faultPlan().type(),
-                "tool", testCase.faultPlan().tool(), "triggerCount", testCase.faultPlan().triggerCount()));
         RecommendationRequest request = RecommendationRequest.builder().userId(testCase.userId())
                 .scene("auto").numItems(testCase.numItems()).country(testCase.country())
                 .region(testCase.region()).locale(testCase.locale()).currency(testCase.currency())
-                .platform(testCase.platform()).context(context).build();
+                .platform(testCase.platform()).context(AgentBenchmarkExecutionInput.context(testCase)).build();
         return ToolLoopRequest.builder().runId(runId).request(request)
                 .config(ToolLoopConfig.builder().maxSteps(MAX_STEPS)
                         .toolWhitelist(ScenePathEnforcer.DEFAULT_WHITELIST).build()).build();
     }
 
-    private static boolean hasPersistedExecutionTrace(List<Map<String, Object>> events) {
+    static boolean hasPersistedExecutionTrace(List<Map<String, Object>> events,
+                                              AgentBenchmarkDataset.Case testCase) {
         List<String> names = events.stream().map(event -> String.valueOf(event.get("name"))).toList();
+        List<? extends Map<?, ?>> llmCalls = events.stream()
+                .filter(event -> "llm.call".equals(event.get("name")))
+                .map(event -> event.get("data")).filter(Map.class::isInstance)
+                .map(value -> (Map<?, ?>) value)
+                .toList();
+        boolean completeLlmTrace = !llmCalls.isEmpty() && llmCalls.stream().allMatch(data ->
+                data.containsKey("phase") && data.containsKey("model")
+                        && data.containsKey("providerInvoked") && data.containsKey("latencyMs")
+                        && data.containsKey("status") && data.containsKey("usageStatus")
+                        && data.containsKey("promptTokens") && data.containsKey("completionTokens")
+                        && data.containsKey("totalTokens") && data.containsKey("fallbackReason"));
+        boolean modelPlanned = llmCalls.stream().anyMatch(data ->
+                "supervisor".equals(data.get("phase")) || "single_agent".equals(data.get("phase")));
+        boolean finalDecision = llmCalls.stream()
+                .anyMatch(data -> "final_decision".equals(data.get("phase")));
+        boolean terminal = names.contains("run.completed") || names.contains("run.failed");
+        boolean finalTraceSatisfied = !testCase.expectedOutcome().startsWith("completed") || finalDecision;
+        boolean failureReasonPresent = testCase.expectedOutcome().startsWith("completed")
+                || events.stream().filter(event -> "run.failed".equals(event.get("name")))
+                .map(event -> event.get("data")).filter(Map.class::isInstance)
+                .map(value -> (Map<?, ?>) value).anyMatch(data -> nonBlank(data.get("stopReason")));
         return names.contains("run.started") && names.contains("tool.started")
-                && (names.contains("run.completed") || names.contains("run.failed"));
+                && completeLlmTrace && modelPlanned && terminal && finalTraceSatisfied && failureReasonPresent;
     }
 
-    private static boolean configuredModelOnly(List<Map<String, Object>> events, String expectedModel) {
+    private static boolean nonBlank(Object value) {
+        return value != null && !String.valueOf(value).isBlank();
+    }
+
+    static String selectedDatasetHash(String fullHash, List<AgentBenchmarkDataset.Case> cases,
+                                      LiveAgentBenchmarkGuard.Scope scope) {
+        if (scope == LiveAgentBenchmarkGuard.Scope.FULL) return fullHash;
+        String manifest = cases.stream().map(AgentBenchmarkDataset.Case::id)
+                .collect(java.util.stream.Collectors.joining("\n", "PILOT\n" + fullHash + "\n", "\n"));
+        return AgentBenchmarkDataset.sha256(manifest.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String selectedFaultPlanHash(List<AgentBenchmarkDataset.Case> cases) {
+        String manifest = cases.stream().map(item -> item.id() + ":" + item.faultPlan().type() + ":"
+                        + item.faultPlan().tool() + ":" + item.faultPlan().triggerCount())
+                .collect(java.util.stream.Collectors.joining("\n"));
+        return AgentBenchmarkDataset.sha256(manifest.getBytes(StandardCharsets.UTF_8));
+    }
+
+    static List<AgentBenchmark.DataReference> scopedReferences(
+            List<AgentBenchmark.DataReference> references, LiveAgentBenchmarkGuard.Scope scope,
+            List<AgentBenchmarkDataset.Case> selectedCases, String selectedHash) {
+        if (scope == LiveAgentBenchmarkGuard.Scope.FULL) return references;
+        List<AgentBenchmark.DataReference> scoped = new ArrayList<>(references.stream()
+                .map(reference -> new AgentBenchmark.DataReference(reference.id(),
+                reference.executionKind(), reference.path(), reference.sha256(),
+                false, reference.note())).toList());
+        String caseIds = selectedCases.stream().map(AgentBenchmarkDataset.Case::id)
+                .collect(java.util.stream.Collectors.joining(","));
+        scoped.add(new AgentBenchmark.DataReference(
+                "java-recommendation-complex-business-pilot-selection",
+                AgentBenchmark.ExecutionKind.LIVE_LLM,
+                "java/src/test/resources/" + AgentBenchmarkDataset.COMPLEX_RESOURCE + "#pilot-selection",
+                selectedHash, true,
+                "Selected " + selectedCases.size() + " of 36 complex-business cases; manifest includes "
+                        + "the full-dataset hash and these case IDs: " + caseIds));
+        return List.copyOf(scoped);
+    }
+
+    static boolean configuredModelOnly(List<Map<String, Object>> events, String expectedModel) {
         List<? extends Map<?, ?>> calls = events.stream().filter(event -> "llm.call".equals(event.get("name")))
                 .map(event -> event.get("data")).filter(Map.class::isInstance)
                 .map(value -> (Map<?, ?>) value).filter(data -> Boolean.TRUE.equals(data.get("providerInvoked"))).toList();

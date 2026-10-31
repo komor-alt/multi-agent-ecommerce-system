@@ -69,6 +69,16 @@ class SpecialistParallelPlannerTest {
         assertThat(planner.plan(state("campaign"), ScenePathEnforcer.DEFAULT_WHITELIST, 8)).isEmpty();
     }
 
+    @Test
+    void evaluationParallelSwitchIsIndependentFromPathGuard() {
+        SpecialistParallelPlanner planner = planner();
+
+        assertThat(planner.plan(state("campaign"), ScenePathEnforcer.DEFAULT_WHITELIST, 8,
+                false, true)).hasSizeGreaterThan(1);
+        assertThat(planner.plan(state("campaign"), ScenePathEnforcer.DEFAULT_WHITELIST, 8,
+                false, false)).isEmpty();
+    }
+
     private SpecialistParallelPlanner planner() {
         return new SpecialistParallelPlanner(pathEnforcer, new RecommendationOrchestrationProperties());
     }

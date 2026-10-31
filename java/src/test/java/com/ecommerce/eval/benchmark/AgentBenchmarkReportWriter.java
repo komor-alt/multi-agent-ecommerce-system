@@ -32,49 +32,82 @@ public final class AgentBenchmarkReportWriter {
         StringBuilder md = new StringBuilder("# Java Agent Benchmark\n\n");
         md.append("- Generated: `").append(report.generatedAt()).append("`\n");
         md.append("- Java revision: `").append(nullSafe(report.javaRevision())).append("`\n");
+        md.append("- Scope: `").append(report.scope()).append("`\n");
         md.append("- Execution kind is recorded per variant; only `LIVE_LLM` rows may claim provider-backed Java results.\n");
         md.append("- Provider/model: `").append(report.controls().provider()).append("` / `")
                 .append(report.controls().model()).append("`\n");
         md.append("- Dataset SHA-256: `").append(report.controls().datasetHash()).append("`\n");
+        report.controls().suiteHashes().forEach((suite, hash) -> md.append("  - Suite `")
+                .append(suite).append("`: `").append(hash).append("`\n"));
         md.append("- Toolset SHA-256: `").append(report.controls().toolsetHash()).append("`\n");
         md.append("- Fault-plan SHA-256: `").append(report.controls().faultPlanHash()).append("`\n");
         md.append("- Budget: `").append(report.controls().maxCallsPerCase()).append("` LLM calls/case; total ceiling `")
                 .append(report.controls().maxTotalCalls()).append("`; max steps `")
                 .append(report.controls().maxSteps()).append("`; seed `").append(report.controls().seed()).append("`\n");
+        md.append("- Parallel policy: `").append(report.controls().parallelPolicy()).append("`\n");
         md.append("- Cross-variant comparison available: **").append(report.crossVariantComparisonAvailable())
                 .append("**. ").append(nullSafe(report.comparisonLimitation())).append("\n\n");
-        md.append("`taskSuccessRate` is expected-behavior match rate: an intentionally injected failure counts as a match only when outcome, failure reason, required tools and constraints match the case contract. It is not the rate of product-producing runs; use `completionRate` for that.\n\n");
+        md.append("`businessTaskSuccessRate` counts completed outputs that satisfy business invariants, independent of execution-path or provenance compliance. `expectedBehaviorMatchRate` checks the declared outcome, capability contract, and live provenance and also credits an expected safe failure or block. `ruleViolationRate` independently records forbidden capabilities, guard rejections, and hard business-constraint violations, while `completionRate` records terminal completion. Provider-call statistics are observed counts, not inferred budgets.\n\n");
 
         md.append("## Variant Results\n\n");
-        md.append("| Variant | Topology | Status | Execution | Provider Invoked | VETO | Path Constraint | Expected-behavior match | Completion | Rule Violation | Tool Calls | P50/P95 ms | Tokens | Cost/task USD |\n");
-        md.append("|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+        md.append("| Variant | Topology | Status | Execution | Provider Invoked | VETO | Path Constraint | Parallel | Business Success | Expected Match | Completion | Rule Violation | Avg/P95 Provider Calls | Tool Calls | P50/P95 ms | Tokens | Cost/task USD |\n");
+        md.append("|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
         for (AgentBenchmark.VariantRun variant : report.variants()) {
             AgentBenchmark.Metrics m = variant.metrics();
             md.append("| ").append(variant.variantLabel()).append(" | ").append(variant.topology())
                     .append(" | ").append(variant.status())
                     .append(" | ").append(variant.executionKind()).append(" | ").append(variant.providerInvoked())
                     .append(" | ").append(variant.vetoEnabled()).append(" | ").append(variant.pathConstraint())
-                    .append(" | ").append(value(m.taskSuccessRate())).append(" | ")
+                    .append(" | ").append(variant.parallelScheduling())
+                    .append(" | ").append(value(m.businessTaskSuccessRate())).append(" | ")
+                    .append(value(m.expectedBehaviorMatchRate())).append(" | ")
                     .append(value(m.completionRate())).append(" | ").append(value(m.ruleViolationRate()))
+                    .append(" | ").append(value(m.averageProviderCalls())).append("/")
+                    .append(value(m.p95ProviderCalls()))
                     .append(" | ").append(value(m.averageToolCalls())).append(" | ")
                     .append(value(m.p50LatencyMs())).append("/").append(value(m.p95LatencyMs())).append(" | ")
                     .append(value(m.totalTokens())).append(" | ").append(value(m.costPerTaskUsd())).append(" |\n");
             if (variant.unsupportedReason() != null) md.append("  - Unsupported: ").append(variant.unsupportedReason()).append("\n");
         }
 
+        md.append("\n## Grouped Metrics\n\n");
+        md.append("| Variant | Dimension | Value | Cases | Business Success | Expected Match | Completion | Rule Violation | Avg/P95 Provider Calls | Tool Calls | P50/P95 ms |\n");
+        md.append("|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+        for (AgentBenchmark.VariantRun variant : report.variants()) {
+            for (AgentBenchmark.GroupMetrics group : variant.groupedMetrics()) {
+                AgentBenchmark.Metrics m = group.metrics();
+                md.append("| ").append(variant.variantId()).append(" | ").append(group.dimension())
+                        .append(" | ").append(group.value()).append(" | ").append(m.caseCount())
+                        .append(" | ").append(value(m.businessTaskSuccessRate()))
+                        .append(" | ").append(value(m.expectedBehaviorMatchRate()))
+                        .append(" | ").append(value(m.completionRate()))
+                        .append(" | ").append(value(m.ruleViolationRate()))
+                        .append(" | ").append(value(m.averageProviderCalls())).append("/")
+                        .append(value(m.p95ProviderCalls()))
+                        .append(" | ").append(value(m.averageToolCalls()))
+                        .append(" | ").append(value(m.p50LatencyMs())).append("/")
+                        .append(value(m.p95LatencyMs())).append(" |\n");
+            }
+        }
+
         md.append("\n## Per-Case Results\n\n");
-        md.append("| Variant | Case | Category | Expected/Actual | Execution | Provider Invoked | Completed | Expected-behavior match | Rule Violation | Tool Calls | Latency ms | Tokens | Cost USD | Observed failure | Expectation mismatch |\n");
-        md.append("|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|\n");
+        md.append("| Variant | Case | Suite | Category | Complexity | Expected/Actual | Execution | Provider Invoked | LLM Calls | Provider Calls | Completed | Business Success | Expected Match | Rule Violation | Tool Calls | Latency ms | Capabilities | Tool Trace | Tokens | Cost USD | Observed failure | Expectation mismatch |\n");
+        md.append("|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---:|---:|---|---|\n");
         for (AgentBenchmark.VariantRun variant : report.variants()) {
             for (AgentBenchmark.CaseObservation item : variant.cases()) {
                 Long tokens = item.totalTokens();
                 md.append("| ").append(variant.variantId()).append(" | ").append(item.caseId())
-                        .append(" | ").append(item.category()).append(" | ")
+                        .append(" | ").append(item.suite()).append(" | ").append(item.category())
+                        .append(" | ").append(item.complexity()).append(" | ")
                         .append(item.expectedOutcome()).append("/").append(item.actualOutcome())
                         .append(" | ").append(variant.executionKind()).append(" | ").append(item.providerInvoked())
-                        .append(" | ").append(item.completed()).append(" | ").append(item.taskSuccess())
+                        .append(" | ").append(item.llmCallCount()).append(" | ").append(item.providerCallCount())
+                        .append(" | ").append(item.completed()).append(" | ").append(item.businessTaskSuccess())
+                        .append(" | ").append(item.expectedBehaviorMatch())
                         .append(" | ").append(item.ruleViolation()).append(" | ").append(item.toolCalls())
-                        .append(" | ").append(item.latencyMs()).append(" | ").append(value(tokens))
+                        .append(" | ").append(item.latencyMs()).append(" | ")
+                        .append(nullSafe(String.join(",", item.observedCapabilities()))).append(" | ")
+                        .append(nullSafe(String.join(",", item.observedTools()))).append(" | ").append(value(tokens))
                         .append(" | ").append(value(item.costUsd())).append(" | ")
                         .append(nullSafe(item.observedFailureReason())).append(" | ")
                         .append(nullSafe(item.expectationMismatch())).append(" |\n");

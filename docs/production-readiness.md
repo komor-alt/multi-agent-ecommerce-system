@@ -21,6 +21,7 @@
 | Gateway / Java 内部认证 | Gateway Session/JWT/RBAC/Origin；Java 内部服务 Token 默认拒绝 | Gateway HTTP auth tests、Java filter tests（以本轮结果为准） | 单租户；无企业 SSO、即时 JWT 撤销和全局限流 |
 | k6 / 资源恢复 | 固定到达率、P95/成功率/业务约束/恢复 gauge；独立 SSE resume 脚本 | 只记录实际运行脚本的原始结果 | 未运行时不得引用脚本阈值或历史负载作为当前性能结论 |
 | 模型与工具指标 | Micrometer 调用、失败、耗时、Token usage、预算拒绝 | 单测验证指标与标签边界 | Live provider usage/cost 和生产告警阈值未验证 |
+| Java Agent 评测 | 66 条原始 regression + 36 条独立 complex-business；Single/Multi、VETO、Path Guard 消融；按 suite/category/complexity 报告 | H2 + RULES 零预算执行 102×5 次，原始 JSON/Markdown 位于 `java/target/agent-benchmark/` | 未执行付费 Live；离线延迟和 lexical fallback 不能代表 provider/PostgreSQL/pgvector 生产表现 |
 
 本轮命令、测试数量与环境记录在文末“2026-10-30 验收记录”。Docker、PostgreSQL 或 k6 不可用时写明未运行及原因，不以 H2 或旧报告替代。
 
@@ -144,6 +145,8 @@ $env:ECOM_POSTGRES_TEST_PASSWORD = '<test password>'
 mvn -q '-Dtest=RecommendationPostgresPersistenceTest,RecommendationExecutionLeasePostgresTest,RecommendationRecoveryProcessTest' test
 ```
 
+Java 推荐 Agent Benchmark 默认只运行 RULES 模式，且模型/Embedding 预算均为零。原始 66 条 regression suite 不变，另有 36 条复杂业务任务；复杂任务的 completed 契约要求返回 `numItems` 数量，completed_empty 要求为 0，loader 会拒绝宽松或矛盾契约。评估断言、case ID 和故障计划不会进入 Runtime 请求或模型上下文；故障通过 test-only runId registry 注入并在 `finally` 清理，异步 Specialist 也会显式传递并清理评测配置。报告分别记录 suite hash，并独立计算业务成功、期望行为匹配、完成、规则违规和真实 LLM/provider 调用次数。Live runner 必须显式选择 `PILOT` 或 `FULL`，并按实际 case 数 × 所选实验臂 × 单案例调用预算精确配置总预算；PILOT 默认只比较 Single 与 Guarded Multi 两臂，完整五臂需要显式配置。PILOT 使用独立 selection manifest hash 和 9 个 case ID，FULL 的单案例预算只能在真实 PILOT 后由人工根据观测到的 `p95ProviderCalls` 加合理余量设置，框架不自动推断预算或价格。本轮未授权也未执行 Live，详见 [Java Agent Benchmark](../java/docs/agent-benchmark.md)。
+
 CI 的 `.github/workflows/runtime-contract.yml` 配置 PostgreSQL 16 临时服务运行同一契约，另外用真正的 promtool 检查规则和抓取配置。本地 Docker 不可用不等于 PostgreSQL 测试通过。
 
 ### 监控
@@ -193,7 +196,7 @@ k6 run -e BASE_URL=http://127.0.0.1:8080 -e JAVA_INTERNAL_SERVICE_TOKEN='<test t
 | 范围 | 执行结果 | 证据与边界 |
 |---|---|---|
 | Gateway | `npm run build`、`npm run typecheck` 通过；`npm run test:auth`：14 passed、0 failed | 本地 Nest 构建、认证与 SSE 单元/契约测试；不是多实例 HTTP 演练 |
-| Java 离线全量 | `mvn -B test`：601 tests、0 failures、0 errors、22 skipped | H2、Mock、offline 为主；22 个 opt-in PostgreSQL 测试在该命令中跳过，不能计入 PostgreSQL 通过数 |
+| Java 离线全量 | `mvn -B test`：621 tests、0 failures、0 errors、22 skipped | H2、Mock、offline 为主；22 个 opt-in PostgreSQL 测试在该命令中跳过，不能计入 PostgreSQL 通过数 |
 | Java + PostgreSQL | `./deploy/validation/Run-PostgresValidation.ps1`：PostgreSQL 16.14，22 tests、0 failures、0 errors、0 skipped | 隔离临时 Docker Compose 项目；包含 PostgreSQL 持久化/租约并发及双 JVM 恢复契约。脚本清理了本次专属容器与网络；不是正式库、备份恢复或多实例网络分区验收 |
 | SSE 游标 | Gateway SSE 回归包含 cursor header/query 优先级、历史读取期间实时事件竞态去重和终态关闭；Java 现有事件测试纳入全量套件 | 测试覆盖应用层游标和竞态；没有真实浏览器断网、反向代理缓冲或多 Gateway 实例压测 |
 | k6 / Prometheus rules | 未运行 | 本环境 `k6` 与 `promtool` 均未安装；Docker/PostgreSQL 可用且 PostgreSQL 测试已运行。脚本阈值仅为可运行门槛，不是本轮实测数据 |

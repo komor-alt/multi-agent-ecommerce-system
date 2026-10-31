@@ -4,19 +4,49 @@ import com.ecommerce.eval.benchmark.AgentBenchmark;
 
 import java.math.BigDecimal;
 import java.util.Locale;
+import java.util.List;
 import java.util.Map;
 
 /** Additional opt-in, aggregate-budget and pricing guard for the paid Java benchmark. */
 final class LiveAgentBenchmarkGuard {
     static final String RUN_ENV = "ECOM_RUN_LIVE_AGENT_BENCHMARK";
+    static final String SCOPE_ENV = "ECOM_AGENT_BENCHMARK_SCOPE";
+    static final String ARM_SET_ENV = "ECOM_AGENT_BENCHMARK_ARMS";
     static final String TOTAL_BUDGET_ENV = "ECOM_AGENT_BENCHMARK_MAX_TOTAL_LLM_CALLS";
     static final String SEED_ENV = "ECOM_AGENT_BENCHMARK_SEED";
     static final String INPUT_PRICE_ENV = "ECOM_AGENT_BENCHMARK_INPUT_USD_PER_1M";
     static final String OUTPUT_PRICE_ENV = "ECOM_AGENT_BENCHMARK_OUTPUT_USD_PER_1M";
+    enum Scope { PILOT, FULL }
+    enum ArmSet { CORE, FULL }
     private LiveAgentBenchmarkGuard() {}
 
-    static Settings requireConfiguration(Map<String, String> env, int caseCount, int variantCount) {
+    static List<AgentBenchmark.Variant> selectedVariants(Map<String, String> env) {
+        ArmSet armSet = armSet(env);
+        List<AgentBenchmark.Variant> supported = AgentBenchmark.variants().stream()
+                .filter(item -> item.status() == AgentBenchmark.VariantStatus.SUPPORTED).toList();
+        if (armSet == ArmSet.FULL) return supported;
+        return supported.stream().filter(item ->
+                "java-single-agent-veto-on-path-on".equals(item.id())
+                        || AgentBenchmark.RUNNABLE_VARIANT.equals(item.id())).toList();
+    }
+
+    static Settings requireConfiguration(Map<String, String> env, int fullCaseCount,
+                                         int pilotCaseCount, int variantCount) {
         if (!"true".equalsIgnoreCase(value(env, RUN_ENV))) throw fail(RUN_ENV + " must be true");
+        Scope scope;
+        try {
+            scope = Scope.valueOf(value(env, SCOPE_ENV).toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException error) {
+            throw fail(SCOPE_ENV + " must be explicitly PILOT or FULL");
+        }
+        int caseCount = scope == Scope.PILOT ? pilotCaseCount : fullCaseCount;
+        if (caseCount <= 0) throw fail("selected scope has no executable cases");
+        ArmSet armSet = armSet(env);
+        int expectedVariantCount = selectedVariants(env).size();
+        if (variantCount != expectedVariantCount) {
+            throw fail("variantCount must match " + ARM_SET_ENV + "=" + armSet
+                    + " (required " + expectedVariantCount + ")");
+        }
         LiveRecommendationE2EGuard.Settings live = LiveRecommendationE2EGuard.requireConfiguration(env);
         int modeBudget = positiveInt(env, LiveRecommendationE2EGuard.BUDGET_ENV);
         if (live.maxLlmCalls() != modeBudget) {
@@ -42,8 +72,17 @@ final class LiveAgentBenchmarkGuard {
         String inputPrice = value(env, INPUT_PRICE_ENV);
         String outputPrice = value(env, OUTPUT_PRICE_ENV);
         AgentBenchmark.PriceConfig prices = parsePrices(inputPrice, outputPrice);
-        return new Settings(live, provider, model, modeBudget, maxTotal, caseCount, variantCount,
+        return new Settings(live, scope, armSet, provider, model, modeBudget, maxTotal, caseCount, variantCount,
                 required, seed, prices);
+    }
+
+    private static ArmSet armSet(Map<String, String> env) {
+        String configured = value(env, ARM_SET_ENV);
+        try {
+            return configured.isBlank() ? ArmSet.CORE : ArmSet.valueOf(configured.toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException error) {
+            throw fail(ARM_SET_ENV + " must be CORE or FULL");
+        }
     }
 
     private static AgentBenchmark.PriceConfig parsePrices(String input, String output) {
@@ -74,11 +113,13 @@ final class LiveAgentBenchmarkGuard {
         return new IllegalStateException("LIVE_AGENT_BENCHMARK_PREFLIGHT: " + reason);
     }
 
-    record Settings(LiveRecommendationE2EGuard.Settings live, String provider, String model,
+    record Settings(LiveRecommendationE2EGuard.Settings live, Scope scope, ArmSet armSet,
+                    String provider, String model,
                     int maxCallsPerCase, int maxTotalCalls, int caseCount, int variantCount,
                     long requiredTotalCalls, long seed, AgentBenchmark.PriceConfig prices) {
         @Override public String toString() {
-            return "Settings[provider=" + provider + ", model=" + model + ", maxCallsPerCase="
+            return "Settings[scope=" + scope + ", armSet=" + armSet + ", provider=" + provider
+                    + ", model=" + model + ", maxCallsPerCase="
                     + maxCallsPerCase + ", maxTotalCalls=" + maxTotalCalls + ", seed=" + seed + ", key=<redacted>]";
         }
     }

@@ -14,13 +14,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
 
-/** Faults are selected only by benchmark request context and are never active in production. */
+/** Faults are selected from a test-only run-scoped registry and are never model-visible. */
 public final class AgentBenchmarkFaultHook implements RecommendationPipelineHook {
-    private final Map<String, AtomicInteger> invocations = new ConcurrentHashMap<>();
-
     @Override
     public void beforeTool(String toolName, RecommendationPipelineState state, Map<String, Object> trustedArguments) {
         Plan plan = plan(state);
@@ -61,29 +57,20 @@ public final class AgentBenchmarkFaultHook implements RecommendationPipelineHook
     }
 
     private int occurrence(RecommendationPipelineState state, String tool) {
-        return invocations.computeIfAbsent(key(state, tool), ignored -> new AtomicInteger()).incrementAndGet();
+        AgentBenchmarkFaultRegistry.State fault = AgentBenchmarkFaultRegistry.state(state.getRunId());
+        return fault == null ? 0 : fault.nextOccurrence(tool);
     }
 
     private int currentOccurrence(RecommendationPipelineState state, String tool) {
-        return invocations.getOrDefault(key(state, tool), new AtomicInteger()).get();
+        AgentBenchmarkFaultRegistry.State fault = AgentBenchmarkFaultRegistry.state(state.getRunId());
+        return fault == null ? 0 : fault.currentOccurrence(tool);
     }
 
-    private String key(RecommendationPipelineState state, String tool) {
-        return state.getRunId() + ":" + tool;
-    }
-
-    @SuppressWarnings("unchecked")
     private Plan plan(RecommendationPipelineState state) {
-        Object raw = state.getRequest().getContext() == null ? null
-                : state.getRequest().getContext().get("benchmarkFaultPlan");
-        if (!(raw instanceof Map<?, ?> map)) return Plan.none();
-        Object type = map.containsKey("type") ? map.get("type") : "none";
-        Object tool = map.containsKey("tool") ? map.get("tool") : "";
-        return new Plan(String.valueOf(type), String.valueOf(tool), number(map.get("triggerCount"), 1));
-    }
-
-    private int number(Object value, int fallback) {
-        return value instanceof Number number ? Math.max(1, number.intValue()) : fallback;
+        AgentBenchmarkFaultRegistry.State fault = AgentBenchmarkFaultRegistry.state(state.getRunId());
+        if (fault == null) return Plan.none();
+        AgentBenchmarkDataset.FaultPlan plan = fault.plan();
+        return new Plan(plan.type(), plan.tool(), plan.triggerCount());
     }
 
     private record Plan(String type, String tool, int triggerCount) {

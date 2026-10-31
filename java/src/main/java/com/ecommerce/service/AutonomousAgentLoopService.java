@@ -391,10 +391,11 @@ public class AutonomousAgentLoopService {
             context.checkActive();
             int remaining = config.getMaxSteps() - toolCalls.size();
             List<SpecialistParallelPlanner.PlannedSpecialistAction> parallelActions =
-                    modeResolver.llmEnabled()
-                            || evaluation.topology() == AgentEvaluationProfile.Topology.SINGLE
-                            || !evaluation.pathGuardEnabled() ? List.of()
-                            : parallelPlanner.plan(context, config.getToolWhitelist(), remaining);
+                    evaluation.topology() == AgentEvaluationProfile.Topology.SINGLE
+                            || !evaluation.parallelSchedulingEnabled()
+                            || (modeResolver.llmEnabled() && !AgentEvaluationProfile.isActive()) ? List.of()
+                            : parallelPlanner.plan(context, config.getToolWhitelist(), remaining,
+                                    evaluation.pathGuardEnabled(), evaluation.parallelSchedulingEnabled());
             if (!parallelActions.isEmpty()) {
                 parallelBatchCount.incrementAndGet();
                 parallelSpecialistCount.addAndGet(parallelActions.size());
@@ -783,10 +784,11 @@ public class AutonomousAgentLoopService {
 
     private CompletableFuture<SpecialistAgentTeam.SpecialistRun> submitOrRunInCaller(
             Supplier<SpecialistAgentTeam.SpecialistRun> task) {
+        Supplier<SpecialistAgentTeam.SpecialistRun> scopedTask = AgentEvaluationProfile.wrapCurrent(task);
         try {
-            return CompletableFuture.supplyAsync(task, orchestrationExecutor);
+            return CompletableFuture.supplyAsync(scopedTask, orchestrationExecutor);
         } catch (RejectedExecutionException rejected) {
-            return CompletableFuture.completedFuture(task.get());
+            return CompletableFuture.completedFuture(scopedTask.get());
         }
     }
 
@@ -1356,6 +1358,7 @@ public class AutonomousAgentLoopService {
                 ? List.of("SINGLE") : List.of("PROFILE", "PRODUCT", "INVENTORY", "COPY"));
         strategy.put("vetoEnabled", evaluation.vetoEnabled());
         strategy.put("pathGuardEnabled", evaluation.pathGuardEnabled());
+        strategy.put("parallelSchedulingEnabled", evaluation.parallelSchedulingEnabled());
         strategy.put("scenePath", scenePathEnforcer.pathFor(request.getScene()));
         strategy.put("requiredCapabilities", scenePathEnforcer.requiredCapabilities(request.getScene()));
         strategy.put("optionalCapabilities", scenePathEnforcer.optionalCapabilities(request.getScene()));

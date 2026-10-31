@@ -22,6 +22,7 @@ import java.util.Map;
 /** Pinned Java-mainline cases plus explicit, non-aggregated provenance for prior evaluations. */
 public final class AgentBenchmarkDataset {
     public static final String RESOURCE = "recommendation-agent-benchmark.jsonl";
+    public static final String COMPLEX_RESOURCE = "recommendation-agent-complex-business.jsonl";
     public static final String AFTER_SALES_OFFLINE_RESOURCE = "after-sales-eval.jsonl";
     private static final String TAU3_SUMMARY = "benchmarks/tau3-retail/published/retail-base-single-trial/summary.json";
     private static final String TAU3_METADATA = "benchmarks/tau3-retail/published/retail-base-single-trial/metadata.json";
@@ -29,27 +30,84 @@ public final class AgentBenchmarkDataset {
 
     private AgentBenchmarkDataset() {}
 
-    public record Case(String id, String userId, String intentText, String expectedScene,
+    public record Case(String id, String suite, String category, String complexity, boolean pilot,
+                       String userId, String intentText, List<String> conversationTurns, String expectedScene,
                        String country, String region, String locale, String currency, String platform,
-                       int numItems, String category, String expectedOutcome,
+                       int numItems, String expectedOutcome,
                        String expectedFailureReason, List<String> expectedRequiredTools,
-                       List<String> forbiddenTools, FaultPlan faultPlan, Map<String, Object> constraints) {}
+                       List<String> forbiddenTools, List<String> requiredCapabilities,
+                       List<String> forbiddenCapabilities, FaultPlan faultPlan,
+                       Map<String, Object> constraints) {
+        public String intentForExecution() {
+            return conversationTurns == null || conversationTurns.isEmpty()
+                    ? intentText : intentText + "\n" + String.join("\n", conversationTurns);
+        }
+    }
 
     public record FaultPlan(String type, String tool, int triggerCount) {
         public boolean enabled() { return type != null && !"none".equals(type); }
     }
 
-    public record Loaded(List<Case> cases, String sha256, String faultPlanHash,
+    public record Loaded(List<Case> cases, String sha256, Map<String, String> suiteHashes,
+                         String faultPlanHash,
                          List<AgentBenchmark.DataReference> references) {}
 
     public static Loaded load() {
-        byte[] bytes = resourceBytes(RESOURCE);
-        List<Case> cases = parse(new String(bytes, StandardCharsets.UTF_8));
+        return loadSuites(false);
+    }
+
+    public static Loaded loadComplex() {
+        byte[] bytes = resourceBytes(COMPLEX_RESOURCE);
+        List<Case> cases = parse(new String(bytes, StandardCharsets.UTF_8), "complex-business", 30, 50);
         String hash = textSha256(bytes);
+        Map<String, String> hashes = Map.of("complex-business", hash);
+        return new Loaded(cases, hash, hashes, faultPlanHash(cases),
+                references(null, hash, Set.of("complex-business")));
+    }
+
+    public static Loaded loadAll() {
+        return loadSuites(true);
+    }
+
+    private static Loaded loadSuites(boolean includeComplex) {
+        byte[] regressionBytes = resourceBytes(RESOURCE);
+        List<Case> regression = parse(new String(regressionBytes, StandardCharsets.UTF_8),
+                "regression", 66, 66);
+        String regressionHash = textSha256(regressionBytes);
+        byte[] complexBytes = resourceBytes(COMPLEX_RESOURCE);
+        String complexHash = textSha256(complexBytes);
+        List<Case> cases = new ArrayList<>(regression);
+        Map<String, String> hashes = new LinkedHashMap<>();
+        hashes.put("regression", regressionHash);
+        Set<String> included = new HashSet<>();
+        included.add("regression");
+        if (includeComplex) {
+            cases.addAll(parse(new String(complexBytes, StandardCharsets.UTF_8),
+                    "complex-business", 30, 50));
+            hashes.put("complex-business", complexHash);
+            included.add("complex-business");
+        }
+        String combinedHash = includeComplex
+                ? sha256(("regression:" + regressionHash + "\ncomplex-business:" + complexHash)
+                        .getBytes(StandardCharsets.UTF_8))
+                : regressionHash;
+        return new Loaded(List.copyOf(cases), combinedHash, Map.copyOf(hashes), faultPlanHash(cases),
+                references(regressionHash, complexHash, included));
+    }
+
+    private static List<AgentBenchmark.DataReference> references(
+            String regressionHash, String complexHash, Set<String> includedSuites) {
         List<AgentBenchmark.DataReference> refs = new ArrayList<>();
         refs.add(new AgentBenchmark.DataReference("java-recommendation-e2e", AgentBenchmark.ExecutionKind.LIVE_LLM,
-                "java/src/test/resources/" + RESOURCE, hash, true,
-                "Synthetic Java recommendation mainline dataset shared by separately labelled offline and live runs; variant executionKind governs metric provenance."));
+                "java/src/test/resources/" + RESOURCE,
+                regressionHash == null ? textSha256(resourceBytes(RESOURCE)) : regressionHash,
+                includedSuites.contains("regression"),
+                "Pinned 66-case regression suite; kept byte-for-byte stable and reported independently."));
+        refs.add(new AgentBenchmark.DataReference("java-recommendation-complex-business",
+                AgentBenchmark.ExecutionKind.LIVE_LLM,
+                "java/src/test/resources/" + COMPLEX_RESOURCE, complexHash,
+                includedSuites.contains("complex-business"),
+                "Complex-business suite using capability and business-invariant contracts rather than a fixed full tool sequence."));
         byte[] afterSales = resourceBytes(AFTER_SALES_OFFLINE_RESOURCE);
         refs.add(new AgentBenchmark.DataReference("java-after-sales-offline", AgentBenchmark.ExecutionKind.OFFLINE_SIMULATION,
                 "java/src/test/resources/" + AFTER_SALES_OFFLINE_RESOURCE, textSha256(afterSales), false,
@@ -63,22 +121,30 @@ public final class AgentBenchmarkDataset {
         refs.add(new AgentBenchmark.DataReference("tau3-retail-python-provenance", AgentBenchmark.ExecutionKind.EXTERNAL_REFERENCE,
                 TAU3_METADATA, tau3MetadataHash, false,
                 "Published Python adapter provenance metadata; external reference only."));
-        return new Loaded(cases, hash, faultPlanHash(cases), List.copyOf(refs));
+        return List.copyOf(refs);
     }
 
     static List<Case> parse(String jsonl) {
+        return parse(jsonl, "regression", 1, 100);
+    }
+
+    static List<Case> parse(String jsonl, String suite, int minimum, int maximum) {
         List<Case> result = new ArrayList<>();
         Set<String> ids = new HashSet<>();
         for (String line : jsonl.split("\\R")) {
             if (line.isBlank()) continue;
             try {
                 JsonNode node = MAPPER.readTree(line);
-                Case item = new Case(required(node, "id"), required(node, "userId"), required(node, "intentText"),
+                Case item = new Case(required(node, "id"), suite, required(node, "category"),
+                        node.path("complexity").asText("basic").trim(), node.path("pilot").asBoolean(false),
+                        required(node, "userId"), required(node, "intentText"),
+                        stringList(node, "conversationTurns"),
                         required(node, "expectedScene"), required(node, "country"), required(node, "region"),
                         required(node, "locale"), required(node, "currency"), required(node, "platform"),
-                        node.path("numItems").asInt(2), required(node, "category"),
-                        required(node, "expectedOutcome"), optional(node, "expectedFailureReason"),
+                        node.path("numItems").asInt(2), required(node, "expectedOutcome"),
+                        optional(node, "expectedFailureReason"),
                         stringList(node, "expectedRequiredTools"), stringList(node, "forbiddenTools"),
+                        stringList(node, "requiredCapabilities"), stringList(node, "forbiddenCapabilities"),
                         faultPlan(node.path("faultPlan")), objectMap(node.path("constraints")));
                 if (!ids.add(item.id())) throw new IllegalArgumentException("BENCHMARK_DUPLICATE_CASE_ID: " + item.id());
                 if (!Set.of("homepage", "campaign", "retention").contains(item.expectedScene())) {
@@ -87,7 +153,8 @@ public final class AgentBenchmarkDataset {
                 if (item.numItems() < 1 || item.numItems() > 10) {
                     throw new IllegalArgumentException("BENCHMARK_INVALID_NUM_ITEMS: " + item.id());
                 }
-                if (!Set.of("normal", "constraint", "inventory", "failure").contains(item.category())) {
+                if (!Set.of("normal", "constraint", "inventory", "failure", "multi_turn", "conflict",
+                        "market_constraint", "adversarial").contains(item.category())) {
                     throw new IllegalArgumentException("BENCHMARK_INVALID_CATEGORY: " + item.id());
                 }
                 if (!Set.of("completed", "completed_empty", "failed", "blocked", "timeout")
@@ -97,6 +164,16 @@ public final class AgentBenchmarkDataset {
                 if (!ScenePathTools.ALL.containsAll(item.expectedRequiredTools())
                         || !ScenePathTools.ALL.containsAll(item.forbiddenTools())) {
                     throw new IllegalArgumentException("BENCHMARK_UNKNOWN_EXPECTED_TOOL: " + item.id());
+                }
+                if (!Capabilities.ALL.containsAll(item.requiredCapabilities())
+                        || !Capabilities.ALL.containsAll(item.forbiddenCapabilities())) {
+                    throw new IllegalArgumentException("BENCHMARK_UNKNOWN_CAPABILITY: " + item.id());
+                }
+                if ("complex-business".equals(suite) && !item.expectedRequiredTools().isEmpty()) {
+                    throw new IllegalArgumentException("COMPLEX_BENCHMARK_MUST_USE_CAPABILITIES: " + item.id());
+                }
+                if ("complex-business".equals(suite)) {
+                    validateComplexProductContract(item);
                 }
                 if (item.faultPlan().enabled()
                         && (!Set.of("tool_failure", "tool_timeout", "empty_result", "evidence_conflict",
@@ -109,13 +186,43 @@ public final class AgentBenchmarkDataset {
                 throw new IllegalArgumentException("BENCHMARK_CASE_PARSE_FAILED", error);
             }
         }
-        if (result.size() < 50 || result.size() > 100) {
+        if (result.size() < minimum || result.size() > maximum) {
             throw new IllegalArgumentException("BENCHMARK_CASE_COUNT_OUT_OF_RANGE: " + result.size());
         }
         if (result.stream().map(Case::expectedScene).distinct().count() != 3) {
             throw new IllegalArgumentException("BENCHMARK_DATASET_MUST_COVER_ALL_RECOMMENDATION_SCENES");
         }
+        if ("complex-business".equals(suite)) {
+            validateComplexPilotCoverage(result);
+        }
         return List.copyOf(result);
+    }
+
+    private static void validateComplexPilotCoverage(List<Case> cases) {
+        List<Case> pilot = cases.stream().filter(Case::pilot).toList();
+        if (pilot.size() != 9) {
+            throw new IllegalArgumentException("COMPLEX_BENCHMARK_PILOT_MUST_HAVE_NINE_CASES");
+        }
+        Set<String> scenes = pilot.stream().map(Case::expectedScene).collect(java.util.stream.Collectors.toSet());
+        if (!scenes.containsAll(Set.of("homepage", "campaign", "retention"))) {
+            throw new IllegalArgumentException("COMPLEX_BENCHMARK_PILOT_MUST_COVER_ALL_SCENES");
+        }
+        Set<String> categories = pilot.stream().map(Case::category).collect(java.util.stream.Collectors.toSet());
+        if (!categories.containsAll(Set.of("multi_turn", "adversarial", "inventory", "conflict", "failure"))) {
+            throw new IllegalArgumentException("COMPLEX_BENCHMARK_PILOT_MISSING_REQUIRED_CATEGORY");
+        }
+    }
+
+    private static void validateComplexProductContract(Case item) {
+        Object raw = item.constraints().get("minProducts");
+        int minimum = raw instanceof Number number ? number.intValue() : -1;
+        if ("completed".equals(item.expectedOutcome())
+                && (minimum <= 0 || minimum > item.numItems())) {
+            throw new IllegalArgumentException("COMPLEX_BENCHMARK_INVALID_MIN_PRODUCTS: " + item.id());
+        }
+        if ("completed_empty".equals(item.expectedOutcome()) && minimum != 0) {
+            throw new IllegalArgumentException("COMPLEX_BENCHMARK_EMPTY_MUST_REQUIRE_ZERO_PRODUCTS: " + item.id());
+        }
     }
 
     public static String sha256(byte[] bytes) {
@@ -189,6 +296,13 @@ public final class AgentBenchmarkDataset {
                 "get_user_profile", "load_campaign_constraints", "get_recent_orders", "search_products",
                 "check_fulfillment", "check_inventory", "rerank", "filter_products",
                 "generate_localized_copy", "generate_retention_copy", "final_answer");
+    }
+
+    static final class Capabilities {
+        static final Set<String> ALL = Set.of(
+                "profile", "order_context", "campaign_constraints", "product_recall",
+                "market_fulfillment", "inventory", "ranking", "localized_copy",
+                "retention_copy", "final_decision");
     }
 
     private static byte[] resourceBytes(String name) {
