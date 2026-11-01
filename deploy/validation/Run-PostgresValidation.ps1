@@ -11,7 +11,7 @@ Never use this script with a production database.
 [CmdletBinding()]
 param(
     [string]$Image = 'pgvector/pgvector:pg16',
-    [string]$TestFilter = 'RecommendationPostgresPersistenceTest,RecommendationExecutionLeasePostgresTest,RecommendationRecoveryProcessTest,LiveBenchmarkIsolationPostgresTest,LiveBenchmarkSpringLifecyclePostgresTest',
+    [string]$TestFilter = 'RecommendationPostgresPersistenceTest,RecommendationExecutionLeasePostgresTest,RecommendationRecoveryProcessTest,LiveBenchmarkIsolationPostgresTest,LiveBenchmarkSpringLifecyclePostgresTest,LiveBenchmarkPilotPostgresTest',
     [ValidateRange(10, 600)]
     [int]$StartupTimeoutSeconds = 60,
     [switch]$KeepContainer

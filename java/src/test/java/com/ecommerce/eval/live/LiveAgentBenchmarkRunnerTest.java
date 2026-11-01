@@ -45,8 +45,14 @@ class LiveAgentBenchmarkRunnerTest {
         List<AgentBenchmark.Variant> variants = LiveAgentBenchmarkGuard.selectedVariants(System.getenv());
         int pilotCount = (int) dataset.cases().stream().filter(AgentBenchmarkDataset.Case::pilot).count();
         int smokeCount = AgentBenchmarkDataset.selectSmoke(dataset.cases()).size();
+        String requestedScope = System.getenv().getOrDefault(LiveAgentBenchmarkGuard.SCOPE_ENV, "");
+        LiveBenchmarkSmokeEvidence.Verified smokeEvidence = null;
+        if ("PILOT".equalsIgnoreCase(requestedScope) || "FULL".equalsIgnoreCase(requestedScope)) {
+            smokeEvidence = LiveBenchmarkSmokeEvidence.verifyForRun(System.getenv(), repositoryRoot(), dataset,
+                    AgentBenchmarkDataset.selectSmoke(dataset.cases()));
+        }
         LiveAgentBenchmarkGuard.Settings settings = LiveAgentBenchmarkGuard.requireConfiguration(
-                System.getenv(), dataset.cases().size(), pilotCount, smokeCount, variants.size());
+                System.getenv(), dataset.cases().size(), pilotCount, smokeCount, variants.size(), smokeEvidence);
         List<AgentBenchmarkDataset.Case> selectedCases = selectedCases(dataset, settings.scope());
         LiveRecommendationE2EGuard.verifyPostgres(settings.live());
         String toolsetHash = AgentBenchmarkDataset.sha256(String.join("\n",
@@ -77,7 +83,7 @@ class LiveAgentBenchmarkRunnerTest {
                 .initializers(context -> isolation.install(context.getEnvironment()))
                 .run()) {
             isolation.verify(app);
-            LiveBenchmarkFixtureSeeder.seed(app);
+            LiveBenchmarkFixtureSeeder.seed(app, selectedCases);
             AutonomousAgentLoopService agent = app.getBean(AutonomousAgentLoopService.class);
             RecommendationRunRepository runs = app.getBean(RecommendationRunRepository.class);
             RecommendationRunEventService eventStore = app.getBean(RecommendationRunEventService.class);
@@ -214,7 +220,8 @@ class LiveAgentBenchmarkRunnerTest {
         boolean failureReasonPresent = testCase.expectedOutcome().startsWith("completed")
                 || events.stream().filter(event -> "run.failed".equals(event.get("name")))
                 .map(event -> event.get("data")).filter(Map.class::isInstance)
-                .map(value -> (Map<?, ?>) value).anyMatch(data -> nonBlank(data.get("stopReason")));
+                .map(value -> (Map<?, ?>) value).anyMatch(data -> nonBlank(data.get("stopReason"))
+                        || nonBlank(data.get("errorType")));
         return names.contains("run.started") && names.contains("tool.started")
                 && completeLlmTrace && modelPlanned && terminal && finalTraceSatisfied && failureReasonPresent;
     }
@@ -275,6 +282,16 @@ class LiveAgentBenchmarkRunnerTest {
             String value = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
             return process.waitFor() == 0 && !value.isBlank() ? value : "unknown";
         } catch (Exception ignored) { return "unknown"; }
+    }
+
+    private static Path repositoryRoot() {
+        Path current = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
+        if (java.nio.file.Files.isDirectory(current.resolve("java/src/test/resources"))) return current;
+        if (java.nio.file.Files.isDirectory(current.resolve("src/test/resources"))
+                && current.getFileName() != null && "java".equals(current.getFileName().toString())) {
+            return current.getParent();
+        }
+        throw new IllegalStateException("LIVE_AGENT_BENCHMARK_PREFLIGHT: repository root was not found");
     }
 
     static String configHash(String revision, AgentBenchmark.Controls controls,

@@ -25,7 +25,7 @@ public final class AgentBenchmarkFaultRegistry {
         return ACTIVE.get(runId);
     }
 
-    static int activeBindings() {
+    public static int activeBindings() {
         return ACTIVE.size();
     }
 

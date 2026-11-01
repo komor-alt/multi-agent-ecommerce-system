@@ -15,7 +15,7 @@ class LiveAgentBenchmarkGuardTest {
         Map<String, String> env = new HashMap<>();
         env.put(LiveAgentBenchmarkGuard.RUN_ENV, "true");
         env.put(LiveAgentBenchmarkGuard.SCOPE_ENV, "PILOT");
-        env.put(LiveAgentBenchmarkGuard.SMOKE_PASSED_ENV, "true");
+        env.put("ECOM_AGENT_BENCHMARK_SMOKE_PASSED", "true");
         env.put(LiveRecommendationE2EGuard.RUN_ENV, "true");
         env.put(LiveRecommendationE2EGuard.MODE_ENV, "LLM");
         env.put(LiveRecommendationE2EGuard.LIVE_ENV, "true");
@@ -34,7 +34,7 @@ class LiveAgentBenchmarkGuardTest {
 
     @Test
     void requiresBothLiveOptInsFiniteAggregateBudgetSeedAndExplicitModel() {
-        LiveAgentBenchmarkGuard.Settings settings = LiveAgentBenchmarkGuard.requireConfiguration(env(), 102, 6, 3, 2);
+        LiveAgentBenchmarkGuard.Settings settings = configure(env(), 102, 6, 3, 2);
         assertThat(settings.scope()).isEqualTo(LiveAgentBenchmarkGuard.Scope.PILOT);
         assertThat(settings.maxCallsPerCase()).isEqualTo(4);
         assertThat(settings.maxTotalCalls()).isEqualTo(48);
@@ -48,12 +48,12 @@ class LiveAgentBenchmarkGuardTest {
 
         Map<String, String> noOuterOptIn = env();
         noOuterOptIn.put(LiveAgentBenchmarkGuard.RUN_ENV, "false");
-        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(noOuterOptIn, 102, 6, 3, 2))
+        assertThatThrownBy(() -> configure(noOuterOptIn, 102, 6, 3, 2))
                 .hasMessageContaining(LiveAgentBenchmarkGuard.RUN_ENV);
 
         Map<String, String> insufficient = env();
         insufficient.put(LiveAgentBenchmarkGuard.TOTAL_BUDGET_ENV, "47");
-        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(insufficient, 102, 6, 3, 2))
+        assertThatThrownBy(() -> configure(insufficient, 102, 6, 3, 2))
                 .hasMessageContaining(LiveAgentBenchmarkGuard.TOTAL_BUDGET_ENV);
     }
 
@@ -66,17 +66,17 @@ class LiveAgentBenchmarkGuardTest {
 
         Map<String, String> pilot = env();
         pilot.put(LiveAgentBenchmarkGuard.TOTAL_BUDGET_ENV, "72");
-        assertThat(LiveAgentBenchmarkGuard.requireConfiguration(pilot, 102, 9, 3, core.size())
+        assertThat(configure(pilot, 102, 9, 3, core.size())
                 .requiredTotalCalls()).isEqualTo(72);
 
         Map<String, String> fullArms = env();
         fullArms.put(LiveAgentBenchmarkGuard.ARM_SET_ENV, "FULL");
         fullArms.put(LiveAgentBenchmarkGuard.TOTAL_BUDGET_ENV, "216");
         assertThat(LiveAgentBenchmarkGuard.selectedVariants(fullArms)).hasSize(6);
-        assertThat(LiveAgentBenchmarkGuard.requireConfiguration(fullArms, 102, 9, 3, 6).armSet())
+        assertThat(configure(fullArms, 102, 9, 3, 6).armSet())
                 .isEqualTo(LiveAgentBenchmarkGuard.ArmSet.FULL);
 
-        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(pilot, 102, 9, 3, 6))
+        assertThatThrownBy(() -> configure(pilot, 102, 9, 3, 6))
                 .hasMessageContaining("variantCount must match");
 
         Map<String, String> invalid = env();
@@ -96,7 +96,7 @@ class LiveAgentBenchmarkGuardTest {
 
         List<com.ecommerce.eval.benchmark.AgentBenchmark.Variant> variants =
                 LiveAgentBenchmarkGuard.selectedVariants(pilot);
-        LiveAgentBenchmarkGuard.Settings settings = LiveAgentBenchmarkGuard.requireConfiguration(
+        LiveAgentBenchmarkGuard.Settings settings = configure(
                 pilot, 102, 9, 3, variants.size());
 
         assertThat(variants).extracting(com.ecommerce.eval.benchmark.AgentBenchmark.Variant::id)
@@ -115,19 +115,19 @@ class LiveAgentBenchmarkGuardTest {
     void requiresPositivePerCallOutputTokenCap() {
         Map<String, String> missing = env();
         missing.remove(LiveAgentBenchmarkGuard.MAX_OUTPUT_TOKENS_ENV);
-        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(missing, 102, 6, 3, 2))
+        assertThatThrownBy(() -> configure(missing, 102, 6, 3, 2))
                 .hasMessageContaining(LiveAgentBenchmarkGuard.MAX_OUTPUT_TOKENS_ENV);
 
         for (String invalid : List.of("0", "-1", "not-a-number")) {
             Map<String, String> configured = env();
             configured.put(LiveAgentBenchmarkGuard.MAX_OUTPUT_TOKENS_ENV, invalid);
-            assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(configured, 102, 6, 3, 2))
+            assertThatThrownBy(() -> configure(configured, 102, 6, 3, 2))
                     .hasMessageContaining(LiveAgentBenchmarkGuard.MAX_OUTPUT_TOKENS_ENV);
         }
 
         Map<String, String> valid = env();
         valid.put(LiveAgentBenchmarkGuard.MAX_OUTPUT_TOKENS_ENV, "2048");
-        assertThat(LiveAgentBenchmarkGuard.requireConfiguration(valid, 102, 6, 3, 2)
+        assertThat(configure(valid, 102, 6, 3, 2)
                 .maxOutputTokensPerCall()).isEqualTo(2048);
     }
 
@@ -137,7 +137,7 @@ class LiveAgentBenchmarkGuardTest {
         tooShort.put(LiveAgentBenchmarkGuard.LLM_TIMEOUT_ENV, "30000");
         tooShort.put(LiveAgentBenchmarkGuard.RUN_TIMEOUT_ENV, "60s");
 
-        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(tooShort, 102, 6, 3, 2))
+        assertThatThrownBy(() -> configure(tooShort, 102, 6, 3, 2))
                 .hasMessageContaining(LiveAgentBenchmarkGuard.RUN_TIMEOUT_ENV)
                 .hasMessageContaining("62000ms");
     }
@@ -151,42 +151,42 @@ class LiveAgentBenchmarkGuardTest {
 
         Map<String, String> smoke = env();
         smoke.put(LiveAgentBenchmarkGuard.SCOPE_ENV, "SMOKE");
-        smoke.remove(LiveAgentBenchmarkGuard.SMOKE_PASSED_ENV);
+        smoke.remove("ECOM_AGENT_BENCHMARK_SMOKE_PASSED");
         smoke.put(LiveAgentBenchmarkGuard.TOTAL_BUDGET_ENV, "24");
-        LiveAgentBenchmarkGuard.Settings settings = LiveAgentBenchmarkGuard.requireConfiguration(
+        LiveAgentBenchmarkGuard.Settings settings = configure(
                 smoke, 102, 9, 3, 2);
         assertThat(settings.scope()).isEqualTo(LiveAgentBenchmarkGuard.Scope.SMOKE);
         assertThat(settings.caseCount()).isEqualTo(3);
         assertThat(settings.requiredTotalCalls()).isEqualTo(24);
 
         Map<String, String> unqualifiedPilot = env();
-        unqualifiedPilot.remove(LiveAgentBenchmarkGuard.SMOKE_PASSED_ENV);
+        unqualifiedPilot.remove("ECOM_AGENT_BENCHMARK_SMOKE_PASSED");
         unqualifiedPilot.put(LiveAgentBenchmarkGuard.TOTAL_BUDGET_ENV, "72");
         assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(
-                unqualifiedPilot, 102, 9, 3, 2))
-                .hasMessageContaining(LiveAgentBenchmarkGuard.SMOKE_PASSED_ENV);
+                unqualifiedPilot, 102, 9, 3, 2, null))
+                .hasMessageContaining("verified pinned historical SMOKE report evidence");
     }
 
     @Test
     void rejectsUnequalPerRunBudgetsUnboundedTotalsMissingSeedAndPartialPricing() {
         Map<String, String> unequal = env();
         unequal.put(LiveRecommendationE2EGuard.SUPERVISOR_BUDGET_ENV, "3");
-        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(unequal, 102, 6, 3, 2))
+        assertThatThrownBy(() -> configure(unequal, 102, 6, 3, 2))
                 .hasMessageContaining("must match");
 
         Map<String, String> surplus = env();
         surplus.put(LiveAgentBenchmarkGuard.TOTAL_BUDGET_ENV, "49");
-        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(surplus, 102, 6, 3, 2))
+        assertThatThrownBy(() -> configure(surplus, 102, 6, 3, 2))
                 .hasMessageContaining("must equal");
 
         Map<String, String> noSeed = env();
         noSeed.remove(LiveAgentBenchmarkGuard.SEED_ENV);
-        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(noSeed, 102, 6, 3, 2))
+        assertThatThrownBy(() -> configure(noSeed, 102, 6, 3, 2))
                 .hasMessageContaining(LiveAgentBenchmarkGuard.SEED_ENV);
 
         Map<String, String> partialPrice = env();
         partialPrice.put(LiveAgentBenchmarkGuard.INPUT_PRICE_ENV, "0.2");
-        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(partialPrice, 102, 6, 3, 2))
+        assertThatThrownBy(() -> configure(partialPrice, 102, 6, 3, 2))
                 .hasMessageContaining("both input and output token prices");
     }
 
@@ -198,26 +198,26 @@ class LiveAgentBenchmarkGuardTest {
         Map<String, String> tooSmall = env();
         tooSmall.put(LiveAgentBenchmarkGuard.SCOPE_ENV, "FULL");
         tooSmall.put(LiveAgentBenchmarkGuard.TOTAL_BUDGET_ENV, String.valueOf(count * 2 * 4 - 1));
-        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(tooSmall, count, pilotCount, 3, 2))
+        assertThatThrownBy(() -> configure(tooSmall, count, pilotCount, 3, 2))
                 .hasMessageContaining("LIVE_AGENT_BENCHMARK_BUDGET");
 
         Map<String, String> full = env();
         full.put(LiveAgentBenchmarkGuard.SCOPE_ENV, "FULL");
         full.put(LiveAgentBenchmarkGuard.TOTAL_BUDGET_ENV, String.valueOf(count * 2 * 4));
-        assertThat(LiveAgentBenchmarkGuard.requireConfiguration(full, count, pilotCount, 3, 2).caseCount())
+        assertThat(configure(full, count, pilotCount, 3, 2).caseCount())
                 .isEqualTo(count);
 
         Map<String, String> pilot = env();
         int exactPilotBudget = pilotCount * 2 * 4;
         pilot.put(LiveAgentBenchmarkGuard.TOTAL_BUDGET_ENV, String.valueOf(exactPilotBudget));
-        LiveAgentBenchmarkGuard.Settings pilotSettings = LiveAgentBenchmarkGuard.requireConfiguration(
+        LiveAgentBenchmarkGuard.Settings pilotSettings = configure(
                 pilot, count, pilotCount, 3, 2);
         assertThat(pilotSettings.caseCount()).isEqualTo(pilotCount);
         assertThat(pilotSettings.requiredTotalCalls()).isEqualTo(exactPilotBudget);
 
         Map<String, String> pilotSurplus = new HashMap<>(pilot);
         pilotSurplus.put(LiveAgentBenchmarkGuard.TOTAL_BUDGET_ENV, String.valueOf(exactPilotBudget + 1));
-        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(
+        assertThatThrownBy(() -> configure(
                 pilotSurplus, count, pilotCount, 3, 2))
                 .hasMessageContaining("LIVE_AGENT_BENCHMARK_BUDGET");
     }
@@ -226,12 +226,12 @@ class LiveAgentBenchmarkGuardTest {
     void requiresExplicitValidScopeBeforeAnyProviderCanStart() {
         Map<String, String> missing = env();
         missing.remove(LiveAgentBenchmarkGuard.SCOPE_ENV);
-        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(missing, 102, 6, 3, 2))
+        assertThatThrownBy(() -> configure(missing, 102, 6, 3, 2))
                 .hasMessageContaining("SMOKE, PILOT or FULL");
 
         Map<String, String> invalid = env();
         invalid.put(LiveAgentBenchmarkGuard.SCOPE_ENV, "sample");
-        assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(invalid, 102, 6, 3, 2))
+        assertThatThrownBy(() -> configure(invalid, 102, 6, 3, 2))
                 .hasMessageContaining("SMOKE, PILOT or FULL");
     }
 
@@ -239,15 +239,37 @@ class LiveAgentBenchmarkGuardTest {
     void restrictsBenchmarkToAnExplicitIsolatedSchemaNamespace() {
         Map<String, String> custom = env();
         custom.put(LiveAgentBenchmarkGuard.SCHEMA_ENV, "agent_benchmark_ci_01");
-        assertThat(LiveAgentBenchmarkGuard.requireConfiguration(custom, 102, 6, 3, 2).schema())
+        assertThat(configure(custom, 102, 6, 3, 2).schema())
                 .isEqualTo("agent_benchmark_ci_01");
 
         for (String invalid : List.of("public", "agent-benchmark", "other_schema", "agent_benchmark;drop",
                 "agent_benchmark_" + "x".repeat(64))) {
             Map<String, String> configured = env();
             configured.put(LiveAgentBenchmarkGuard.SCHEMA_ENV, invalid);
-            assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(configured, 102, 6, 3, 2))
+            assertThatThrownBy(() -> configure(configured, 102, 6, 3, 2))
                     .hasMessageContaining(LiveAgentBenchmarkGuard.SCHEMA_ENV);
         }
+    }
+
+    private LiveAgentBenchmarkGuard.Settings configure(Map<String, String> env, int fullCaseCount,
+                                                        int pilotCaseCount, int smokeCaseCount,
+                                                        int variantCount) {
+        LiveBenchmarkSmokeEvidence.Verified evidence = null;
+        String scope = env.getOrDefault(LiveAgentBenchmarkGuard.SCOPE_ENV, "");
+        if ("PILOT".equalsIgnoreCase(scope) || "FULL".equalsIgnoreCase(scope)) {
+            AgentBenchmarkDataset.Loaded dataset = AgentBenchmarkDataset.loadAll();
+            try (var stream = getClass().getClassLoader().getResourceAsStream(
+                    LiveBenchmarkSmokeEvidence.TEST_REPORT_RESOURCE)) {
+                if (stream == null) throw new IllegalStateException("pinned smoke report fixture missing");
+                evidence = LiveBenchmarkSmokeEvidence.verifyBytes(stream.readAllBytes(),
+                        LiveBenchmarkSmokeEvidence.PINNED_REPORT_SHA256,
+                        LiveBenchmarkSmokeEvidence.BASELINE_REVISION, List.of(), true, dataset,
+                        AgentBenchmarkDataset.selectSmoke(dataset.cases()));
+            } catch (java.io.IOException error) {
+                throw new IllegalStateException(error);
+            }
+        }
+        return LiveAgentBenchmarkGuard.requireConfiguration(env, fullCaseCount, pilotCaseCount,
+                smokeCaseCount, variantCount, evidence);
     }
 }

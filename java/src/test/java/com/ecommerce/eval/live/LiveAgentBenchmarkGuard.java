@@ -14,7 +14,6 @@ final class LiveAgentBenchmarkGuard {
     static final String RUN_ENV = "ECOM_RUN_LIVE_AGENT_BENCHMARK";
     static final String SCOPE_ENV = "ECOM_AGENT_BENCHMARK_SCOPE";
     static final String ARM_SET_ENV = "ECOM_AGENT_BENCHMARK_ARMS";
-    static final String SMOKE_PASSED_ENV = "ECOM_AGENT_BENCHMARK_SMOKE_PASSED";
     static final String TOTAL_BUDGET_ENV = "ECOM_AGENT_BENCHMARK_MAX_TOTAL_LLM_CALLS";
     static final String MAX_OUTPUT_TOKENS_ENV = "ECOM_AGENT_BENCHMARK_MAX_OUTPUT_TOKENS";
     static final String SEED_ENV = "ECOM_AGENT_BENCHMARK_SEED";
@@ -43,6 +42,13 @@ final class LiveAgentBenchmarkGuard {
 
     static Settings requireConfiguration(Map<String, String> env, int fullCaseCount,
                                          int pilotCaseCount, int smokeCaseCount, int variantCount) {
+        return requireConfiguration(env, fullCaseCount, pilotCaseCount, smokeCaseCount,
+                variantCount, null);
+    }
+
+    static Settings requireConfiguration(Map<String, String> env, int fullCaseCount,
+                                         int pilotCaseCount, int smokeCaseCount, int variantCount,
+                                         LiveBenchmarkSmokeEvidence.Verified smokeEvidence) {
         if (!"true".equalsIgnoreCase(value(env, RUN_ENV))) throw fail(RUN_ENV + " must be true");
         Scope scope;
         try {
@@ -50,8 +56,8 @@ final class LiveAgentBenchmarkGuard {
         } catch (IllegalArgumentException error) {
             throw fail(SCOPE_ENV + " must be explicitly SMOKE, PILOT or FULL");
         }
-        if (scope != Scope.SMOKE && !"true".equalsIgnoreCase(value(env, SMOKE_PASSED_ENV))) {
-            throw fail(SMOKE_PASSED_ENV + " must be true before PILOT or FULL");
+        if (scope != Scope.SMOKE && (smokeEvidence == null || !smokeEvidence.valid())) {
+            throw fail("verified pinned historical SMOKE report evidence is required before PILOT or FULL");
         }
         int caseCount = switch (scope) {
             case SMOKE -> smokeCaseCount;

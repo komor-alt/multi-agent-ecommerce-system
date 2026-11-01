@@ -23,6 +23,8 @@ import com.ecommerce.service.LlmCallBudget;
 import com.ecommerce.service.RecommendationModeResolver;
 import com.ecommerce.service.ScenePathEnforcer;
 import com.ecommerce.service.TracedRecommendationLlmClient;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.boot.WebApplicationType;
@@ -43,6 +45,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -87,8 +91,10 @@ class LiveBenchmarkSpringLifecyclePostgresTest {
             assertThat(app.getEnvironment().getProperty("agent.limits.run-timeout")).isEqualTo("90000ms");
             assertThat(app.getBean(RuntimeLimitsProperties.class).getRunTimeout()).isEqualTo(Duration.ofSeconds(90));
             assertThat(providerCalls).as("Provider must not run before isolation verification").hasValue(0);
-            LiveBenchmarkFixtureSeeder.seed(app);
-            assertSmokeFixtures(app);
+            List<AgentBenchmarkDataset.Case> smokeCases = AgentBenchmarkDataset.selectSmoke(
+                    AgentBenchmarkDataset.loadAll().cases());
+            LiveBenchmarkFixtureSeeder.seed(app, smokeCases);
+            LiveBenchmarkFixtureSeeder.verify(app, smokeCases);
 
             BenchmarkCallBudgetLedger ledger = app.getBean(BenchmarkCallBudgetLedger.class);
             AutonomousAgentLoopService agent = app.getBean(AutonomousAgentLoopService.class);
@@ -424,6 +430,12 @@ class LiveBenchmarkSpringLifecyclePostgresTest {
 
     @TestConfiguration(proxyBeanMethods = false)
     static class FakeProviderConfiguration {
+        private static final java.util.List<String> SINGLE_AGENT_DIAGNOSTICS =
+                new java.util.concurrent.CopyOnWriteArrayList<>();
+
+        static void resetSingleAgentDiagnostics() { SINGLE_AGENT_DIAGNOSTICS.clear(); }
+        static java.util.List<String> singleAgentDiagnostics() { return java.util.List.copyOf(SINGLE_AGENT_DIAGNOSTICS); }
+
         @Bean
         @Primary
         RecommendationModeResolver fakeRecommendationModeResolver() {
@@ -466,6 +478,7 @@ class LiveBenchmarkSpringLifecyclePostgresTest {
                     anyString(), any(TracedRecommendationLlmClient.OutputParser.class)))
                     .thenAnswer(invocation -> {
                         String phase = invocation.getArgument(0);
+                        String prompt = invocation.getArgument(2);
                         LlmCallBudget budget = invocation.getArgument(3);
                         String fingerprint = invocation.getArgument(4);
                         TracedRecommendationLlmClient.OutputParser parser = invocation.getArgument(5);
@@ -478,7 +491,7 @@ class LiveBenchmarkSpringLifecyclePostgresTest {
                         fakeProviderPhases.add(phase);
                         fakeProviderCalls.incrementAndGet();
                         try {
-                            Object parsed = parser.parse(responseFor(phase));
+                            Object parsed = parser.parse(responseFor(phase, prompt));
                             budget.recordTrace(trace(phase, "success", null, true));
                             return parsed;
                         } catch (TracedRecommendationLlmClient.OutputValidationException invalid) {
@@ -501,20 +514,98 @@ class LiveBenchmarkSpringLifecyclePostgresTest {
                     providerInvoked);
         }
 
-        private static String responseFor(String phase) {
+        private static String responseFor(String phase, String prompt) throws Exception {
             return switch (phase) {
-                case "scene_intent" -> "{\"scene\":\"homepage\"}";
+                case "scene_intent" -> "{\"scene\":\"" + inferScene(prompt) + "\"}";
                 case "user_profile" -> """
                         {"segments":["active"],"preferred_categories":[],"price_range":[0,2000],
                          "rfm_score":{"recency":0.8,"frequency":0.5,"monetary":0.6},
                          "real_time_tags":{}}
                         """;
-                case "supervisor" -> "{\"thought\":\"Use the next bounded specialist\",\"agent\":\"PROFILE\"}";
-                case "single_agent" -> "{\"thought\":\"Use the next bounded tool\",\"action\":\"get_user_profile\"}";
+                case "supervisor" -> "{\"thought\":\"Select the next state-allowed specialist\",\"agent\":\""
+                        + new ObjectMapper().readTree(prompt).path("expectedNextAgent").asText("SUPERVISOR") + "\"}";
+                case "single_agent" -> "{\"thought\":\"Select a state-valid tool that advances the observed run\",\"action\":\""
+                        + nextUnobservedTool(prompt) + "\"}";
                 case "final_decision" -> "{\"summary\":\"Fixture recommendation decision.\",\"productReasons\":[]}";
-                case "product_rerank", "marketing_copy" -> "[]";
+                case "product_rerank" -> jsonProductIds(prompt);
+                case "marketing_copy" -> jsonCopies(prompt);
                 default -> "{\"action\":\"get_user_profile\"}";
             };
+        }
+
+        private static String inferScene(String prompt) {
+            String lower = prompt == null ? "" : prompt.toLowerCase(java.util.Locale.ROOT);
+            if (lower.contains("retention") || lower.contains("win-back")) return "retention";
+            if (lower.contains("campaign")) return "campaign";
+            return "homepage";
+        }
+
+        private static String nextUnobservedTool(String prompt) throws Exception {
+            JsonNode state = new ObjectMapper().readTree(prompt);
+            List<String> candidates = new java.util.ArrayList<>();
+            state.path("candidateTools").forEach(item -> candidates.add(item.asText()));
+            JsonNode observations = state.path("observations");
+            Map<String, Integer> observedCounts = new java.util.HashMap<>();
+            boolean revisionRequested = false;
+            for (JsonNode observation : observations) {
+                String tool = observation.path("toolName").asText("");
+                if (!tool.isBlank()) observedCounts.merge(tool, 1, Integer::sum);
+                revisionRequested |= observation.path("data").path("revisionRequested").asBoolean(false);
+            }
+            String scene = state.path("scene").asText("homepage");
+            int requiredSearches = revisionRequested ? 2 : 1;
+            int observedSearches = observedCounts.getOrDefault("search_products", 0);
+            int observedFulfillmentChecks = observedCounts.getOrDefault("check_fulfillment", 0);
+            for (String tool : preferredTools(scene)) {
+                int required = switch (tool) {
+                    case "search_products" -> requiredSearches;
+                    case "check_fulfillment" -> observedSearches;
+                    case "check_inventory" -> "campaign".equals(scene)
+                            ? observedFulfillmentChecks : observedSearches;
+                    default -> 1;
+                };
+                if (observedCounts.getOrDefault(tool, 0) < required && candidates.contains(tool)) {
+                    SINGLE_AGENT_DIAGNOSTICS.add("scene=" + scene + "; candidates=" + candidates
+                            + "; observed=" + observedCounts + "; revision=" + revisionRequested
+                            + "; selected=" + tool);
+                    return tool;
+                }
+            }
+            String selected = candidates.stream()
+                    .filter(candidate -> observedCounts.getOrDefault(candidate, 0) == 0).findFirst()
+                    .orElseGet(() -> candidates.stream().findFirst().orElse("final_answer"));
+            SINGLE_AGENT_DIAGNOSTICS.add("scene=" + scene + "; candidates=" + candidates
+                    + "; observed=" + observedCounts
+                    + "; revision=" + revisionRequested + "; selected=" + selected);
+            return selected;
+        }
+
+        private static List<String> preferredTools(String scene) {
+            return switch (scene) {
+                case "campaign" -> List.of("load_campaign_constraints", "search_products",
+                        "check_fulfillment", "check_inventory", "rerank", "generate_localized_copy");
+                case "retention" -> List.of("get_user_profile", "get_recent_orders", "search_products",
+                        "check_inventory", "rerank", "generate_retention_copy");
+                default -> List.of("get_user_profile", "search_products", "check_inventory", "rerank");
+            };
+        }
+
+        private static List<String> productIds(String prompt) {
+            Matcher matcher = Pattern.compile("(?m)^ID:([^ ]+)").matcher(prompt);
+            java.util.LinkedHashSet<String> ids = new java.util.LinkedHashSet<>();
+            while (matcher.find()) ids.add(matcher.group(1));
+            return List.copyOf(ids);
+        }
+
+        private static String jsonProductIds(String prompt) throws Exception {
+            return new ObjectMapper().writeValueAsString(Map.of("productIds", productIds(prompt)));
+        }
+
+        private static String jsonCopies(String prompt) throws Exception {
+            List<Map<String, String>> copies = productIds(prompt).stream()
+                    .map(id -> Map.of("product_id", id, "copy", "Fixture copy grounded in the selected product."))
+                    .toList();
+            return new ObjectMapper().writeValueAsString(copies);
         }
     }
 }

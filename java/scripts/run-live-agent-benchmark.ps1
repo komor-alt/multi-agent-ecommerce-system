@@ -10,6 +10,8 @@ param(
     [string]$DatasourceUrl = 'jdbc:postgresql://127.0.0.1:5432/ecommerce_agent',
     [string]$DatasourceUsername = 'ecommerce',
     [string]$DatasourcePassword = 'ecommerce',
+    [string]$SmokeReportPath,
+    [string]$SmokeReportSha256,
     [switch]$ConfirmPaidRun
 )
 
@@ -22,6 +24,21 @@ $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $java = Join-Path $repo 'java'
 $dotenv = Join-Path $repo '.env'
 if (-not (Test-Path -LiteralPath $dotenv)) { throw 'Local .env is required.' }
+if ($Scope -ne 'SMOKE') {
+    if ([string]::IsNullOrWhiteSpace($SmokeReportPath) -or
+            [string]::IsNullOrWhiteSpace($SmokeReportSha256)) {
+        throw 'PILOT/FULL requires an explicit historical SMOKE report path and SHA-256.'
+    }
+    $resolvedReport = (Resolve-Path -LiteralPath $SmokeReportPath).Path
+    $repoPrefix = [IO.Path]::GetFullPath($repo).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    if (-not $resolvedReport.StartsWith($repoPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Historical SMOKE report must be inside the repository.'
+    }
+    $actualReportSha256 = (Get-FileHash -LiteralPath $resolvedReport -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualReportSha256 -ne $SmokeReportSha256.ToLowerInvariant()) {
+        throw 'Historical SMOKE report SHA-256 does not match the supplied digest.'
+    }
+}
 $gitStatus = @(& git -C $repo status --porcelain=v1)
 if ($LASTEXITCODE -ne 0) { throw 'Unable to verify Git worktree state.' }
 if ($gitStatus.Count -ne 0) { throw 'Git worktree must be clean.' }
@@ -77,6 +94,10 @@ $benchmarkEnvironment = [ordered]@{
     SPRING_DATASOURCE_DRIVER_CLASS_NAME = 'org.postgresql.Driver'
     SPRING_DATA_REDIS_HOST = '127.0.0.1'
     SPRING_DATA_REDIS_PORT = '6379'
+}
+if ($Scope -ne 'SMOKE') {
+    $benchmarkEnvironment['ECOM_AGENT_BENCHMARK_SMOKE_REPORT'] = $resolvedReport
+    $benchmarkEnvironment['ECOM_AGENT_BENCHMARK_SMOKE_REPORT_SHA256'] = $actualReportSha256
 }
 $previousEnvironment = @{}
 foreach ($name in $benchmarkEnvironment.Keys) {

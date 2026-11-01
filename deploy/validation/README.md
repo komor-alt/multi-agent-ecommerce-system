@@ -25,6 +25,7 @@
 - `RecommendationRecoveryProcessTest`：真正启动两个独立 JVM，强杀持有租约的 A，让 B 等待数据库租约过期并接管；验证旧任务轨迹/产物保留、未完成任务取消和唯一终态。
 - `LiveBenchmarkIsolationPostgresTest`：验证 Benchmark schema advisory lock、持久化 Provider 调用账本、重复实例拒绝，以及异常关闭后 namespaced Run 不可恢复并进入终态。
 - `LiveBenchmarkSpringLifecyclePostgresTest`：启动真实 Spring Benchmark Context，使用不联网的 Fake Provider 执行 namespaced Agent Run，并验证异常中止后的 Run、manifest/session、预算拒绝和共享 schema 隔离。
+- `LiveBenchmarkPilotPostgresTest`：使用独立 schema 和 Fake Provider 执行完整 9 Case × 2 CORE arms，验证确定性 fixture、库存二次召回、工具超时、持久化预算账本与 abort/recovery 隔离。
 
 双 JVM 测试使用生产 Store/EventService，但任务产物由测试 fixture 构造，并非完整推荐 HTTP 或真实模型链路。
 它验证实际进程崩溃后的持久化与接管边界，不代表整服务端到端恢复已全部验收。
