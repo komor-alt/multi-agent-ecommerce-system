@@ -1,12 +1,17 @@
 package com.ecommerce.eval.live;
 
+import com.ecommerce.config.RuntimeLimitsProperties;
 import org.junit.jupiter.api.Test;
+import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.mock.env.MockEnvironment;
 
+import java.time.Duration;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class LiveBenchmarkIsolationPropertyTest {
     @Test
@@ -16,6 +21,7 @@ class LiveBenchmarkIsolationPropertyTest {
                 .withProperty("agent.embedding.max-calls", "100")
                 .withProperty("agent.demo.seed-enabled", "true")
                 .withProperty("agent.recovery.enabled", "true")
+                .withProperty("agent.limits.run-timeout", "5s")
                 .withProperty("spring.datasource.url", "jdbc:postgresql://localhost/shared");
 
         LiveBenchmarkIsolation.installFirst(environment, Map.of(
@@ -23,6 +29,7 @@ class LiveBenchmarkIsolationPropertyTest {
                 "agent.embedding.max-calls", "0",
                 "agent.demo.seed-enabled", "false",
                 "agent.recovery.enabled", "false",
+                "agent.limits.run-timeout", "90000ms",
                 "spring.datasource.url", "jdbc:postgresql://localhost/isolated?currentSchema=agent_benchmark",
                 "spring.datasource.username", "benchmark_user",
                 "spring.datasource.password", "benchmark_password"));
@@ -31,11 +38,27 @@ class LiveBenchmarkIsolationPropertyTest {
         assertThat(environment.getProperty("agent.embedding.max-calls")).isEqualTo("0");
         assertThat(environment.getProperty("agent.demo.seed-enabled")).isEqualTo("false");
         assertThat(environment.getProperty("agent.recovery.enabled")).isEqualTo("false");
+        assertThat(environment.getProperty("agent.limits.run-timeout")).isEqualTo("90000ms");
         assertThat(environment.getProperty("spring.datasource.url"))
                 .contains("currentSchema=agent_benchmark");
         assertThat(environment.getProperty("spring.datasource.username")).isEqualTo("benchmark_user");
         assertThat(environment.getPropertySources().iterator().next().getName())
                 .isEqualTo(LiveBenchmarkIsolation.PROPERTY_SOURCE);
+    }
+
+    @Test
+    void runtimeLimitsBeanVerificationRejectsAConflictingBoundTimeout() {
+        ConfigurableApplicationContext app = mock(ConfigurableApplicationContext.class);
+        RuntimeLimitsProperties limits = new RuntimeLimitsProperties();
+        limits.setRunTimeout(Duration.ofSeconds(5));
+        when(app.getBean(RuntimeLimitsProperties.class)).thenReturn(limits);
+
+        assertThatThrownBy(() -> LiveBenchmarkIsolation.verifyRuntimeLimitsBean(app, 90_000L))
+                .hasMessageContaining("RuntimeLimitsProperties")
+                .hasMessageContaining("90000ms");
+
+        limits.setRunTimeout(Duration.ofSeconds(90));
+        LiveBenchmarkIsolation.verifyRuntimeLimitsBean(app, 90_000L);
     }
 
     @Test

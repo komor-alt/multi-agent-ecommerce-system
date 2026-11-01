@@ -1,6 +1,7 @@
 package com.ecommerce.eval.live;
 
 import com.ecommerce.data.CatalogSeedInitializer;
+import com.ecommerce.config.RuntimeLimitsProperties;
 import com.ecommerce.runtime.persistence.RecommendationRecoveryProperties;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.core.env.ConfigurableEnvironment;
@@ -91,7 +92,7 @@ final class LiveBenchmarkIsolation implements AutoCloseable {
         properties.put("agent.recommend.max-llm-calls", settings.maxCallsPerCase());
         properties.put("agent.supervisor.max-llm-calls", settings.maxCallsPerCase());
         properties.put("agent.recommend.llm-timeout-ms", settings.llmTimeoutMs());
-        properties.put("agent.runtime.run-timeout", settings.runTimeoutMs() + "ms");
+        properties.put("agent.limits.run-timeout", settings.runTimeoutMs() + "ms");
         properties.put("spring.ai.openai.chat.options.max-tokens", settings.maxOutputTokensPerCall());
         properties.put("spring.datasource.url", isolatedJdbcUrl);
         properties.put("spring.datasource.username", settings.live().username());
@@ -128,7 +129,8 @@ final class LiveBenchmarkIsolation implements AutoCloseable {
         ConfigurableEnvironment environment = app.getEnvironment();
         verifySafetyProperties(environment, isolatedJdbcUrl, settings.schema(), namespace, revision, configHash);
         require(environment, "agent.recommend.llm-timeout-ms", Long.toString(settings.llmTimeoutMs()));
-        require(environment, "agent.runtime.run-timeout", settings.runTimeoutMs() + "ms");
+        require(environment, "agent.limits.run-timeout", settings.runTimeoutMs() + "ms");
+        verifyRuntimeLimitsBean(app, settings.runTimeoutMs());
         requireSecret(environment, "spring.datasource.username", settings.live().username());
         requireSecret(environment, "spring.datasource.password", settings.live().password());
         if (app.getBean(RecommendationRecoveryProperties.class).isEnabled()) {
@@ -150,6 +152,15 @@ final class LiveBenchmarkIsolation implements AutoCloseable {
         require(environment, "agent.benchmark.namespace", namespace);
         require(environment, "agent.benchmark.revision", revision);
         require(environment, "agent.benchmark.config-hash", configHash);
+    }
+
+    static void verifyRuntimeLimitsBean(ConfigurableApplicationContext app, long expectedRunTimeoutMs) {
+        RuntimeLimitsProperties limits = app.getBean(RuntimeLimitsProperties.class);
+        long actualRunTimeoutMs = limits.getRunTimeout() == null ? -1L : limits.getRunTimeout().toMillis();
+        if (actualRunTimeoutMs != expectedRunTimeoutMs) {
+            throw fail("effective RuntimeLimitsProperties run timeout must equal "
+                    + expectedRunTimeoutMs + "ms");
+        }
     }
 
     String namespace() { return namespace; }

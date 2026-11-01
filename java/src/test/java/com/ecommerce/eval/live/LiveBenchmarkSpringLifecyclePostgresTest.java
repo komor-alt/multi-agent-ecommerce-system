@@ -1,6 +1,7 @@
 package com.ecommerce.eval.live;
 
 import com.ecommerce.MultiAgentApplication;
+import com.ecommerce.config.RuntimeLimitsProperties;
 import com.ecommerce.data.repository.RecInventoryRepository;
 import com.ecommerce.data.repository.RecOrderRepository;
 import com.ecommerce.data.repository.RecProductRepository;
@@ -36,6 +37,7 @@ import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -68,7 +70,9 @@ class LiveBenchmarkSpringLifecyclePostgresTest {
         String schema = "agent_benchmark_lifecycle_" + UUID.randomUUID().toString().replace("-", "");
         LiveBenchmarkIsolation isolation = null;
         ConfigurableApplicationContext app = null;
+        String previousRunTimeout = System.getProperty("agent.limits.run-timeout");
         System.setProperty(AgentEvaluationProfile.ENABLE_PROPERTY, "true");
+        System.setProperty("agent.limits.run-timeout", "5s");
         try {
             isolation = LiveBenchmarkIsolation.open(settings(schema), REVISION, CONFIG_HASH, DATASET_HASH);
             LiveBenchmarkIsolation activeIsolation = isolation;
@@ -78,7 +82,11 @@ class LiveBenchmarkSpringLifecyclePostgresTest {
                     .web(WebApplicationType.NONE)
                     .initializers(context -> activeIsolation.install(context.getEnvironment()))
                     .run();
+            AtomicInteger providerCalls = app.getBean("fakeProviderCalls", AtomicInteger.class);
             isolation.verify(app);
+            assertThat(app.getEnvironment().getProperty("agent.limits.run-timeout")).isEqualTo("90000ms");
+            assertThat(app.getBean(RuntimeLimitsProperties.class).getRunTimeout()).isEqualTo(Duration.ofSeconds(90));
+            assertThat(providerCalls).as("Provider must not run before isolation verification").hasValue(0);
             LiveBenchmarkFixtureSeeder.seed(app);
             assertSmokeFixtures(app);
 
@@ -87,7 +95,6 @@ class LiveBenchmarkSpringLifecyclePostgresTest {
             RecommendationRunRepository runs = app.getBean(RecommendationRunRepository.class);
             RecommendationRunEventService events = app.getBean(RecommendationRunEventService.class);
             RecommendationRuntimeStore runtimeStore = app.getBean(RecommendationRuntimeStore.class);
-            AtomicInteger providerCalls = app.getBean("fakeProviderCalls", AtomicInteger.class);
             @SuppressWarnings("unchecked")
             Set<LlmCallBudget> providerBudgets = app.getBean("fakeProviderBudgets", Set.class);
             @SuppressWarnings("unchecked")
@@ -230,6 +237,11 @@ class LiveBenchmarkSpringLifecyclePostgresTest {
             if (app != null) app.close();
             if (isolation != null) isolation.close();
             System.clearProperty(AgentEvaluationProfile.ENABLE_PROPERTY);
+            if (previousRunTimeout == null) {
+                System.clearProperty("agent.limits.run-timeout");
+            } else {
+                System.setProperty("agent.limits.run-timeout", previousRunTimeout);
+            }
             dropSchema(schema);
         }
     }
@@ -299,7 +311,7 @@ class LiveBenchmarkSpringLifecyclePostgresTest {
                 required("ECOM_POSTGRES_TEST_PASSWORD"));
         return new LiveAgentBenchmarkGuard.Settings(live, LiveAgentBenchmarkGuard.Scope.SMOKE,
                 LiveAgentBenchmarkGuard.ArmSet.CORE, "fixture", "fixture-model", 20, 120,
-                3, 2, 120, 256, 20261030L, 1_000, 5_000, schema,
+                3, 2, 120, 256, 20261030L, 1_000, 90_000, schema,
                 new AgentBenchmark.PriceConfig(null, null));
     }
 
