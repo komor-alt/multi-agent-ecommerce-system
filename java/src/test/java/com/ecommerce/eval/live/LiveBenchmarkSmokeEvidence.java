@@ -5,6 +5,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -81,7 +84,7 @@ final class LiveBenchmarkSmokeEvidence {
                                 List<String> changedPaths, boolean baselineIsAncestor,
                                 AgentBenchmarkDataset.Loaded dataset,
                                 List<AgentBenchmarkDataset.Case> smokeCases) {
-        String actualHash = AgentBenchmarkDataset.sha256(bytes);
+        String actualHash = canonicalReportSha256(bytes);
         if (!PINNED_REPORT_SHA256.equals(normalizeHash(providedHash))
                 || !PINNED_REPORT_SHA256.equals(actualHash)) {
             throw fail("historical SMOKE report SHA-256 mismatch");
@@ -241,6 +244,22 @@ final class LiveBenchmarkSmokeEvidence {
 
     private static String normalizeHash(String hash) {
         return hash == null ? "" : hash.trim().toLowerCase(Locale.ROOT);
+    }
+
+    /** Hashes strict UTF-8 report bytes after normalizing every line ending to CRLF. */
+    static String canonicalReportSha256(byte[] bytes) {
+        try {
+            String text = StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(bytes)).toString();
+            String canonicalText = text.replace("\r\n", "\n")
+                    .replace('\r', '\n')
+                    .replace("\n", "\r\n");
+            return AgentBenchmarkDataset.sha256(canonicalText.getBytes(StandardCharsets.UTF_8));
+        } catch (CharacterCodingException error) {
+            throw fail("historical SMOKE report is not valid UTF-8");
+        }
     }
 
     private static boolean validRevision(String revision) {

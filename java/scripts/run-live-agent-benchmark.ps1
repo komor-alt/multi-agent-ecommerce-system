@@ -16,6 +16,24 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Get-CanonicalEvidenceSha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    # Keep this canonical UTF-8/CRLF rule aligned with LiveBenchmarkSmokeEvidence.canonicalReportSha256.
+    $utf8 = [System.Text.UTF8Encoding]::new($false, $true)
+    $text = $utf8.GetString([IO.File]::ReadAllBytes($Path))
+    $canonicalText = [regex]::Replace($text, "\r\n|\r|\n", "`r`n")
+    $canonicalBytes = $utf8.GetBytes($canonicalText)
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        return [BitConverter]::ToString($sha256.ComputeHash($canonicalBytes)).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha256.Dispose()
+    }
+}
+
 if (-not $ConfirmPaidRun) {
     throw 'Paid benchmark is disabled. Re-run with -ConfirmPaidRun only after explicit authorization.'
 }
@@ -34,7 +52,7 @@ if ($Scope -ne 'SMOKE') {
     if (-not $resolvedReport.StartsWith($repoPrefix, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'Historical SMOKE report must be inside the repository.'
     }
-    $actualReportSha256 = (Get-FileHash -LiteralPath $resolvedReport -Algorithm SHA256).Hash.ToLowerInvariant()
+    $actualReportSha256 = Get-CanonicalEvidenceSha256 -Path $resolvedReport
     if ($actualReportSha256 -ne $SmokeReportSha256.ToLowerInvariant()) {
         throw 'Historical SMOKE report SHA-256 does not match the supplied digest.'
     }

@@ -6,6 +6,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -39,6 +42,35 @@ class LiveBenchmarkSmokeEvidenceTest {
                 true, dataset, smokeCases);
 
         assertThat(evidence.valid()).isTrue();
+    }
+
+    @Test
+    void acceptsEquivalentLfAndCrlfReportBytesUsingThePinnedCanonicalDigest() throws Exception {
+        String report = new String(reportBytes, StandardCharsets.UTF_8);
+        String lfReport = report.replace("\r\n", "\n").replace('\r', '\n');
+        byte[] lfBytes = lfReport.getBytes(StandardCharsets.UTF_8);
+        byte[] crlfBytes = lfReport.replace("\n", "\r\n").getBytes(StandardCharsets.UTF_8);
+
+        assertThat(LiveBenchmarkSmokeEvidence.canonicalReportSha256(lfBytes))
+                .isEqualTo(LiveBenchmarkSmokeEvidence.PINNED_REPORT_SHA256);
+        assertThat(LiveBenchmarkSmokeEvidence.canonicalReportSha256(crlfBytes))
+                .isEqualTo(LiveBenchmarkSmokeEvidence.PINNED_REPORT_SHA256);
+        assertThat(verify(lfBytes, LiveBenchmarkSmokeEvidence.PINNED_REPORT_SHA256,
+                "b".repeat(40), List.of(), true, dataset).valid()).isTrue();
+        assertThat(verify(crlfBytes, LiveBenchmarkSmokeEvidence.PINNED_REPORT_SHA256,
+                "b".repeat(40), List.of(), true, dataset).valid()).isTrue();
+    }
+
+    @Test
+    void powershellRunnerUsesTheSameCanonicalEvidenceHashRule() throws Exception {
+        String script = Files.readString(Path.of("scripts", "run-live-agent-benchmark.ps1"));
+
+        assertThat(script)
+                .contains("function Get-CanonicalEvidenceSha256")
+                .contains("[System.Text.UTF8Encoding]::new($false, $true)")
+                .contains("[regex]::Replace($text, \"\\r\\n|\\r|\\n\", \"`r`n\")")
+                .contains("$actualReportSha256 = Get-CanonicalEvidenceSha256 -Path $resolvedReport")
+                .doesNotContain("Get-FileHash -LiteralPath $resolvedReport");
     }
 
     @Test
