@@ -5,7 +5,6 @@ import com.ecommerce.eval.benchmark.AgentBenchmark;
 import com.ecommerce.eval.benchmark.AgentBenchmarkDataset;
 import com.ecommerce.eval.benchmark.AgentBenchmarkEvaluator;
 import com.ecommerce.eval.benchmark.AgentBenchmarkExecutionInput;
-import com.ecommerce.eval.benchmark.AgentBenchmarkFaultHook;
 import com.ecommerce.eval.benchmark.AgentBenchmarkFaultRegistry;
 import com.ecommerce.eval.benchmark.AgentBenchmarkReportWriter;
 import com.ecommerce.model.AgentLoopResponse;
@@ -17,15 +16,12 @@ import com.ecommerce.runtime.persistence.RecommendationRunEventService;
 import com.ecommerce.runtime.persistence.RecommendationRunRepository;
 import com.ecommerce.service.AgentEvaluationProfile;
 import com.ecommerce.service.AutonomousAgentLoopService;
-import com.ecommerce.service.RecommendationPipelineHook;
 import com.ecommerce.service.ScenePathEnforcer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.context.ConfigurableApplicationContext;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -35,7 +31,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
-import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -66,28 +61,35 @@ class LiveAgentBenchmarkRunnerTest {
                 MAX_STEPS, settings.seed(),
                 "variant-recorded;single-topology=false");
         AgentBenchmark.requireFairControls(Collections.nCopies(variants.size(), controls));
+        String revision = revision();
+        String configHash = configHash(revision, controls, variants, settings);
 
         System.setProperty(AgentEvaluationProfile.ENABLE_PROPERTY, "true");
         Map<String, List<AgentBenchmark.CaseObservation>> observationsByVariant = new LinkedHashMap<>();
         variants.forEach(variant -> observationsByVariant.put(variant.id(), new ArrayList<>()));
         List<AgentBenchmarkDataset.Case> orderedCases = new ArrayList<>(selectedCases);
         Collections.shuffle(orderedCases, new Random(settings.seed()));
-        String runPrefix = "live-bench-" + UUID.randomUUID().toString().substring(0, 8);
-        try (ConfigurableApplicationContext app = new SpringApplicationBuilder(
-                MultiAgentApplication.class, FaultConfiguration.class)
+        try (LiveBenchmarkIsolation isolation = LiveBenchmarkIsolation.open(
+                settings, revision, configHash, selectedHash);
+             ConfigurableApplicationContext app = new SpringApplicationBuilder(
+                MultiAgentApplication.class, LiveBenchmarkConfiguration.class)
                 .web(WebApplicationType.NONE)
-                .properties(applicationProperties(settings.maxCallsPerCase(), settings.maxOutputTokensPerCall()))
+                .initializers(context -> isolation.install(context.getEnvironment()))
                 .run()) {
+            isolation.verify(app);
+            LiveBenchmarkFixtureSeeder.seed(app);
             AutonomousAgentLoopService agent = app.getBean(AutonomousAgentLoopService.class);
             RecommendationRunRepository runs = app.getBean(RecommendationRunRepository.class);
             RecommendationRunEventService eventStore = app.getBean(RecommendationRunEventService.class);
+            BenchmarkCallBudgetLedger ledger = app.getBean(BenchmarkCallBudgetLedger.class);
             for (AgentBenchmarkDataset.Case testCase : orderedCases) {
                 List<AgentBenchmark.Variant> armsForCase = new ArrayList<>(variants);
                 Collections.shuffle(armsForCase, new Random(settings.seed() ^ testCase.id().hashCode()));
                 for (AgentBenchmark.Variant variant : armsForCase) {
                     String variantKey = Integer.toUnsignedString(variant.id().hashCode(), 36);
-                    String runId = (runPrefix + "-" + variantKey + "-" + testCase.id())
+                    String runId = (isolation.namespace() + "__" + variantKey + "__" + testCase.id())
                             .replaceAll("[^A-Za-z0-9_-]", "_");
+                    ledger.registerRun(runId, variant.id(), testCase.id(), variant.topology());
                     List<AgentRunEvent> emitted = new ArrayList<>();
                     AgentLoopResponse response = null;
                     RuntimeException failure = null;
@@ -103,6 +105,10 @@ class LiveAgentBenchmarkRunnerTest {
                                 request(runId, testCase), emitted::add));
                     } catch (RuntimeException error) {
                         failure = error;
+                    } finally {
+                        String terminal = response != null && "completed".equalsIgnoreCase(response.getStatus())
+                                ? "COMPLETED" : failure == null ? "BLOCKED" : "FAILED";
+                        ledger.markTerminal(runId, terminal);
                     }
                     double latencyMs = (System.nanoTime() - start) / 1_000_000.0;
                     List<Map<String, Object>> persisted = eventStore.history(runId);
@@ -114,39 +120,42 @@ class LiveAgentBenchmarkRunnerTest {
                             emitted, latencyMs, true, durable, settings.prices()));
                 }
             }
+            ledger.verifyComplete(selectedCases.size() * variants.size());
+
+            List<AgentBenchmark.VariantRun> results = variants.stream().map(variant -> {
+                List<AgentBenchmark.CaseObservation> observations = observationsByVariant.get(variant.id());
+                return new AgentBenchmark.VariantRun(variant.id(), variant.label(), variant.status(),
+                        AgentBenchmark.ExecutionKind.LIVE_LLM,
+                        observations.stream().anyMatch(AgentBenchmark.CaseObservation::providerInvoked),
+                        controls.provider(), controls.model(), controls.datasetHash(), controls.toolsetHash(),
+                        controls.faultPlanHash(), controls.maxCallsPerCase(), controls.maxTotalCalls(),
+                        controls.maxSteps(), controls.seed(), variant.topology(), variant.pathConstraint(),
+                        variant.vetoEnabled(), variant.parallelScheduling(), null,
+                        AgentBenchmark.summarize(observations, settings.prices()),
+                        AgentBenchmark.groupMetrics(observations, settings.prices()), List.copyOf(observations));
+            }).toList();
+
+            AgentBenchmark.Report report = new AgentBenchmark.Report("java-recommendation-agent-ablation-v4",
+                    "LIVE_" + settings.scope() + "_" + settings.armSet(),
+                    java.time.Instant.now().toString(), revision, controls,
+                    withIsolationReference(scopedReferences(dataset.references(), settings.scope(), selectedCases,
+                            selectedHash), isolation, configHash),
+                    List.copyOf(results), true,
+                    "All runnable arms use identical provider/model, dataset, toolset, fault plan, per-case budget, max steps and seed.");
+            new AgentBenchmarkReportWriter().write(report,
+                    AgentBenchmarkReportWriter.liveReportDirectory(Path.of(System.getProperty("user.dir")),
+                            settings.scope().name(), settings.armSet().name()));
+            assertThat(results).hasSize(variants.size()).allSatisfy(result -> {
+                assertThat(result.cases()).hasSize(selectedCases.size());
+                assertThat(result.cases().stream().map(AgentBenchmark.CaseObservation::caseId).toList())
+                        .containsExactlyElementsOf(orderedCases.stream().map(AgentBenchmarkDataset.Case::id).toList());
+                assertThat(result.cases()).allSatisfy(item -> assertThat(item.providerInvoked())
+                        .as("provider invocation for %s/%s", result.variantId(), item.caseId()).isTrue());
+            });
+            isolation.markSuccessful();
         } finally {
             System.clearProperty(AgentEvaluationProfile.ENABLE_PROPERTY);
         }
-
-        List<AgentBenchmark.VariantRun> results = variants.stream().map(variant -> {
-            List<AgentBenchmark.CaseObservation> observations = observationsByVariant.get(variant.id());
-            return new AgentBenchmark.VariantRun(variant.id(), variant.label(), variant.status(),
-                    AgentBenchmark.ExecutionKind.LIVE_LLM,
-                    observations.stream().anyMatch(AgentBenchmark.CaseObservation::providerInvoked),
-                    controls.provider(), controls.model(), controls.datasetHash(), controls.toolsetHash(),
-                    controls.faultPlanHash(), controls.maxCallsPerCase(), controls.maxTotalCalls(),
-                    controls.maxSteps(), controls.seed(), variant.topology(), variant.pathConstraint(),
-                    variant.vetoEnabled(), variant.parallelScheduling(), null,
-                    AgentBenchmark.summarize(observations, settings.prices()),
-                    AgentBenchmark.groupMetrics(observations, settings.prices()), List.copyOf(observations));
-        }).toList();
-
-        AgentBenchmark.Report report = new AgentBenchmark.Report("java-recommendation-agent-ablation-v4",
-                "LIVE_" + settings.scope() + "_" + settings.armSet(),
-                java.time.Instant.now().toString(), revision(), controls,
-                scopedReferences(dataset.references(), settings.scope(), selectedCases, selectedHash),
-                List.copyOf(results), true,
-                "All runnable arms use identical provider/model, dataset, toolset, fault plan, per-case budget, max steps and seed.");
-        new AgentBenchmarkReportWriter().write(report,
-                AgentBenchmarkReportWriter.liveReportDirectory(Path.of(System.getProperty("user.dir")),
-                        settings.scope().name(), settings.armSet().name()));
-        assertThat(results).hasSize(variants.size()).allSatisfy(result -> {
-            assertThat(result.cases()).hasSize(selectedCases.size());
-            assertThat(result.cases().stream().map(AgentBenchmark.CaseObservation::caseId).toList())
-                    .containsExactlyElementsOf(orderedCases.stream().map(AgentBenchmarkDataset.Case::id).toList());
-            assertThat(result.cases()).allSatisfy(item -> assertThat(item.providerInvoked())
-                    .as("provider invocation for %s/%s", result.variantId(), item.caseId()).isTrue());
-        });
     }
 
     static Map<String, Object> applicationProperties(int maxCallsPerCase, int maxOutputTokensPerCall) {
@@ -158,6 +167,8 @@ class LiveAgentBenchmarkRunnerTest {
                 "spring.ai.openai.chat.options.max-tokens", maxOutputTokensPerCall,
                 "agent.embedding.live-enabled", "false",
                 "agent.embedding.max-calls", "0",
+                "agent.demo.seed-enabled", "false",
+                "agent.recovery.enabled", "false",
                 "spring.datasource.driver-class-name", "org.postgresql.Driver");
     }
 
@@ -260,17 +271,35 @@ class LiveAgentBenchmarkRunnerTest {
 
     private static String revision() {
         try {
-            Process process = new ProcessBuilder("git", "rev-parse", "--short", "HEAD").start();
+            Process process = new ProcessBuilder("git", "rev-parse", "HEAD").start();
             String value = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
             return process.waitFor() == 0 && !value.isBlank() ? value : "unknown";
         } catch (Exception ignored) { return "unknown"; }
     }
 
-    @Configuration(proxyBeanMethods = false)
-    static class FaultConfiguration {
-        @Bean
-        RecommendationPipelineHook benchmarkFaultHook() {
-            return new AgentBenchmarkFaultHook();
-        }
+    static String configHash(String revision, AgentBenchmark.Controls controls,
+                             List<AgentBenchmark.Variant> variants,
+                             LiveAgentBenchmarkGuard.Settings settings) {
+        String material = String.join("\n",
+                revision, controls.provider(), controls.model(), controls.datasetHash(), controls.toolsetHash(),
+                controls.faultPlanHash(), String.valueOf(controls.maxCallsPerCase()),
+                String.valueOf(controls.maxTotalCalls()), String.valueOf(controls.maxOutputTokensPerCall()),
+                String.valueOf(controls.maxSteps()), String.valueOf(controls.seed()), settings.scope().name(),
+                settings.armSet().name(), settings.schema(), variants.stream().map(AgentBenchmark.Variant::id)
+                        .sorted().collect(java.util.stream.Collectors.joining(",")));
+        return AgentBenchmarkDataset.sha256(material.getBytes(StandardCharsets.UTF_8));
+    }
+
+    static List<AgentBenchmark.DataReference> withIsolationReference(
+            List<AgentBenchmark.DataReference> references, LiveBenchmarkIsolation isolation,
+            String configHash) {
+        List<AgentBenchmark.DataReference> result = new ArrayList<>(references);
+        result.add(new AgentBenchmark.DataReference("live-benchmark-isolation-manifest",
+                AgentBenchmark.ExecutionKind.LIVE_LLM,
+                "postgresql://<redacted>/" + isolation.schema() + "/" + isolation.namespace(),
+                configHash, true, "Isolated schema/session manifest; revision=" + isolation.revision()
+                + ", namespace=" + isolation.namespace()
+                + ", recovery=false, embedding=false, demoSeed=false"));
+        return List.copyOf(result);
     }
 }

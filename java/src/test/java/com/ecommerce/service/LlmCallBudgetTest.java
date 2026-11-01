@@ -93,4 +93,19 @@ class LlmCallBudgetTest {
             workers.shutdownNow();
         }
     }
+
+    @Test
+    void externalLimiterBlocksBeforeConsumingTheLocalBudget() {
+        LlmCallBudget denied = new LlmCallBudget(2,
+                (phase, fingerprint) -> new LlmCallBudget.Reservation(false, "llm_budget_exhausted"));
+        assertFalse(denied.reserve("planner", "first").acquired());
+        assertEquals(0, denied.snapshot().get("llmCallCount"));
+        assertEquals(1, denied.snapshot().get("budgetBlockedCalls"));
+
+        LlmCallBudget duplicate = new LlmCallBudget(2,
+                (phase, fingerprint) -> new LlmCallBudget.Reservation(false, "duplicate_call_blocked"));
+        assertFalse(duplicate.reserve("planner", "first").acquired());
+        assertEquals(0, duplicate.snapshot().get("llmCallCount"));
+        assertEquals(1, duplicate.snapshot().get("duplicateCallsBlocked"));
+    }
 }

@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_DB: runtime_contract
           POSTGRES_USER: contract
@@ -32,7 +32,7 @@ jobs:
           ECOM_POSTGRES_TEST_URL: jdbc:postgresql://localhost:5432/runtime_contract
           ECOM_POSTGRES_TEST_USER: contract
           ECOM_POSTGRES_TEST_PASSWORD: contract_ci_only
-        run: mvn -B -Dtest=RecommendationPostgresPersistenceTest,RecommendationExecutionLeasePostgresTest,RecommendationRecoveryProcessTest test
+        run: mvn -B -Dtest=RecommendationPostgresPersistenceTest,RecommendationExecutionLeasePostgresTest,RecommendationRecoveryProcessTest,LiveBenchmarkIsolationPostgresTest,LiveBenchmarkSpringLifecyclePostgresTest test
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -78,6 +78,7 @@ public class AutonomousAgentLoopService {
     private RecommendationLeaseHeartbeatService heartbeatService;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final int configuredMaxLlmCalls;
+    private LlmCallBudgetFactory llmCallBudgetFactory = (runId, maxCalls) -> new LlmCallBudget(maxCalls);
 
     public AutonomousAgentLoopService(
             RecommendationPipelineExecutor pipelineExecutor,
@@ -241,6 +242,11 @@ public class AutonomousAgentLoopService {
         return run(loopRequest, event -> {});
     }
 
+    @Autowired(required = false)
+    void setLlmCallBudgetFactory(LlmCallBudgetFactory llmCallBudgetFactory) {
+        if (llmCallBudgetFactory != null) this.llmCallBudgetFactory = llmCallBudgetFactory;
+    }
+
     public AgentLoopResponse run(ToolLoopRequest loopRequest, Consumer<AgentRunEvent> eventSink) {
         if (managedExecutionEnabled()) {
             RecommendationExecutionLease lease = runtimeStore.startAndClaimRecoverableRun(
@@ -365,7 +371,7 @@ public class AutonomousAgentLoopService {
                 eventSink.accept(event);
             }
         });
-        context.setLlmBudget(new LlmCallBudget(configuredMaxLlmCalls));
+        context.setLlmBudget(llmCallBudgetFactory.create(context.getRunId(), configuredMaxLlmCalls));
         long start = System.nanoTime();
         List<String> thoughts = new ArrayList<>();
         List<ToolCallRecord> toolCalls = new ArrayList<>();

@@ -42,6 +42,7 @@ class LiveAgentBenchmarkGuardTest {
         assertThat(settings.requiredTotalCalls()).isEqualTo(48);
         assertThat(settings.armSet()).isEqualTo(LiveAgentBenchmarkGuard.ArmSet.CORE);
         assertThat(settings.seed()).isEqualTo(20261030L);
+        assertThat(settings.schema()).isEqualTo("agent_benchmark");
         assertThat(settings.prices().status()).isEqualTo("unavailable_price_not_configured");
         assertThat(settings.toString()).doesNotContain("sk-live-unit-fixture-never-used");
 
@@ -232,5 +233,21 @@ class LiveAgentBenchmarkGuardTest {
         invalid.put(LiveAgentBenchmarkGuard.SCOPE_ENV, "sample");
         assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(invalid, 102, 6, 3, 2))
                 .hasMessageContaining("SMOKE, PILOT or FULL");
+    }
+
+    @Test
+    void restrictsBenchmarkToAnExplicitIsolatedSchemaNamespace() {
+        Map<String, String> custom = env();
+        custom.put(LiveAgentBenchmarkGuard.SCHEMA_ENV, "agent_benchmark_ci_01");
+        assertThat(LiveAgentBenchmarkGuard.requireConfiguration(custom, 102, 6, 3, 2).schema())
+                .isEqualTo("agent_benchmark_ci_01");
+
+        for (String invalid : List.of("public", "agent-benchmark", "other_schema", "agent_benchmark;drop",
+                "agent_benchmark_" + "x".repeat(64))) {
+            Map<String, String> configured = env();
+            configured.put(LiveAgentBenchmarkGuard.SCHEMA_ENV, invalid);
+            assertThatThrownBy(() -> LiveAgentBenchmarkGuard.requireConfiguration(configured, 102, 6, 3, 2))
+                    .hasMessageContaining(LiveAgentBenchmarkGuard.SCHEMA_ENV);
+        }
     }
 }

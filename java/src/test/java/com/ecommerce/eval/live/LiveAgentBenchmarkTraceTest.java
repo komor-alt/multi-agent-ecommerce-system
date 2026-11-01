@@ -19,7 +19,11 @@ class LiveAgentBenchmarkTraceTest {
                 .doesNotContainKey("spring.ai.openai.api-key")
                 .containsEntry("agent.recommend.max-llm-calls", 12)
                 .containsEntry("agent.supervisor.max-llm-calls", 12)
-                .containsEntry("spring.ai.openai.chat.options.max-tokens", 2048);
+                .containsEntry("spring.ai.openai.chat.options.max-tokens", 2048)
+                .containsEntry("agent.embedding.live-enabled", "false")
+                .containsEntry("agent.embedding.max-calls", "0")
+                .containsEntry("agent.demo.seed-enabled", "false")
+                .containsEntry("agent.recovery.enabled", "false");
 
         try (var stream = getClass().getResourceAsStream("/application.yml")) {
             assertThat(stream).isNotNull();

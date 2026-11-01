@@ -22,6 +22,8 @@ final class LiveAgentBenchmarkGuard {
     static final String OUTPUT_PRICE_ENV = "ECOM_AGENT_BENCHMARK_OUTPUT_USD_PER_1M";
     static final String LLM_TIMEOUT_ENV = "ECOM_RECOMMEND_LLM_TIMEOUT_MS";
     static final String RUN_TIMEOUT_ENV = "ECOM_AGENT_RUN_TIMEOUT";
+    static final String SCHEMA_ENV = "ECOM_AGENT_BENCHMARK_SCHEMA";
+    static final String DEFAULT_SCHEMA = "agent_benchmark";
     private static final long DEFAULT_LLM_TIMEOUT_MS = 15_000L;
     private static final Duration DEFAULT_RUN_TIMEOUT = Duration.ofSeconds(60);
     private static final long PRODUCT_RERANK_RETRY_MARGIN_MS = 2_000L;
@@ -103,8 +105,13 @@ final class LiveAgentBenchmarkGuard {
         String inputPrice = value(env, INPUT_PRICE_ENV);
         String outputPrice = value(env, OUTPUT_PRICE_ENV);
         AgentBenchmark.PriceConfig prices = parsePrices(inputPrice, outputPrice);
+        String schema = value(env, SCHEMA_ENV);
+        if (schema.isBlank()) schema = DEFAULT_SCHEMA;
+        if (schema.length() > 63 || !schema.matches("agent_benchmark(?:_[a-z0-9_]+)?")) {
+            throw fail(SCHEMA_ENV + " must be agent_benchmark or use the agent_benchmark_ prefix");
+        }
         return new Settings(live, scope, armSet, provider, model, modeBudget, maxTotal, caseCount, variantCount,
-                required, maxOutputTokensPerCall, seed, llmTimeoutMs, runTimeoutMs, prices);
+                required, maxOutputTokensPerCall, seed, llmTimeoutMs, runTimeoutMs, schema, prices);
     }
 
     private static ArmSet armSet(Map<String, String> env) {
@@ -180,14 +187,15 @@ final class LiveAgentBenchmarkGuard {
                     String provider, String model,
                     int maxCallsPerCase, int maxTotalCalls, int caseCount, int variantCount,
                     long requiredTotalCalls, int maxOutputTokensPerCall,
-                    long seed, long llmTimeoutMs, long runTimeoutMs,
+                    long seed, long llmTimeoutMs, long runTimeoutMs, String schema,
                     AgentBenchmark.PriceConfig prices) {
         @Override public String toString() {
             return "Settings[scope=" + scope + ", armSet=" + armSet + ", provider=" + provider
                     + ", model=" + model + ", maxCallsPerCase="
                     + maxCallsPerCase + ", maxTotalCalls=" + maxTotalCalls + ", llmTimeoutMs="
                     + llmTimeoutMs + ", runTimeoutMs=" + runTimeoutMs + ", maxOutputTokensPerCall="
-                    + maxOutputTokensPerCall + ", seed=" + seed + ", key=<redacted>]";
+                    + maxOutputTokensPerCall + ", seed=" + seed + ", schema=" + schema
+                    + ", key=<redacted>]";
         }
     }
 }

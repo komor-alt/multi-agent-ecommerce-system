@@ -10,8 +10,8 @@ Never use this script with a production database.
 #>
 [CmdletBinding()]
 param(
-    [string]$Image = 'postgres:16-alpine',
-    [string]$TestFilter = 'RecommendationPostgresPersistenceTest,RecommendationExecutionLeasePostgresTest,RecommendationRecoveryProcessTest',
+    [string]$Image = 'pgvector/pgvector:pg16',
+    [string]$TestFilter = 'RecommendationPostgresPersistenceTest,RecommendationExecutionLeasePostgresTest,RecommendationRecoveryProcessTest,LiveBenchmarkIsolationPostgresTest,LiveBenchmarkSpringLifecyclePostgresTest',
     [ValidateRange(10, 600)]
     [int]$StartupTimeoutSeconds = 60,
     [switch]$KeepContainer

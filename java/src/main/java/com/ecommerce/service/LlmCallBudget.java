@@ -21,6 +21,7 @@ public final class LlmCallBudget {
     private static final ThreadLocal<LlmCallBudget> CURRENT = new ThreadLocal<>();
 
     private final int maxCalls;
+    private final CallLimiter callLimiter;
     private final AtomicInteger callCount = new AtomicInteger();
     private final AtomicInteger budgetBlocked = new AtomicInteger();
     private final AtomicInteger duplicateBlocked = new AtomicInteger();
@@ -35,7 +36,13 @@ public final class LlmCallBudget {
     private volatile Consumer<CallTrace> traceListener = ignored -> {};
 
     public LlmCallBudget(int maxCalls) {
+        this(maxCalls, (phase, fingerprint) -> new Reservation(true, null));
+    }
+
+    public LlmCallBudget(int maxCalls, CallLimiter callLimiter) {
         this.maxCalls = Math.max(0, maxCalls);
+        this.callLimiter = callLimiter == null
+                ? (phase, fingerprint) -> new Reservation(true, null) : callLimiter;
     }
 
     /**
@@ -56,6 +63,12 @@ public final class LlmCallBudget {
         if (callCount.get() >= maxCalls) {
             budgetBlocked.incrementAndGet();
             return new Reservation(false, "llm_budget_exhausted");
+        }
+        Reservation external = callLimiter.reserve(safePhase, fingerprint);
+        if (!external.acquired()) {
+            if ("duplicate_call_blocked".equals(external.reason())) duplicateBlocked.incrementAndGet();
+            else budgetBlocked.incrementAndGet();
+            return external;
         }
         fingerprints.add(opaqueFingerprint);
         callCount.incrementAndGet();
@@ -128,6 +141,11 @@ public final class LlmCallBudget {
     }
 
     public record Reservation(boolean acquired, String reason) {}
+
+    @FunctionalInterface
+    public interface CallLimiter {
+        Reservation reserve(String phase, String fingerprint);
+    }
 
     public record CallTrace(String phase, String provider, String model, long latencyMs,
                             String status, String fallbackReason, Integer promptTokens,
